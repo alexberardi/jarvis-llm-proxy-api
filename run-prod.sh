@@ -15,14 +15,14 @@ echo "$PYTHON_VERSION" > .python-version
 eval "$(pyenv init -)"
 eval "$(pyenv virtualenv-init -)"
 
-if [ ! -d ".venv" ]; then
+if [ ! -d "venv" ]; then
   echo "📦 Creating virtual environment"
   pyenv local "$PYTHON_VERSION"
-  python -m venv .venv
+  python -m venv venv
 fi
 
 echo "📦 Installing requirements"
-source .venv/bin/activate
+source venv/bin/activate
 pip install -U pip setuptools
 pip install -r requirements.txt
 

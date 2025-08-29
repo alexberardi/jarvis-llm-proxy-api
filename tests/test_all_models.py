@@ -44,7 +44,7 @@ MODELS = [
     },
     {
         "name": "Llama 3.2 3B Instruct",
-        "file_path": ".models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "file_path": ".models/Llama-3.2-3B-Instruct-Q4_K_M_old.gguf",
         "chat_format": "chatml",
         "context_window": 8192
     }
