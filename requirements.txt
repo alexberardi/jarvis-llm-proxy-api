@@ -6,3 +6,8 @@ mlx-lm
 sentencepiece==0.2.0
 llama-cpp-python
 debugpy
+# Transformers backend dependencies
+transformers
+torch
+accelerate
+bitsandbytes

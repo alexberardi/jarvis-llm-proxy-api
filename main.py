@@ -425,6 +425,66 @@ async def get_conversation_status(version: int, conversation_id: str):
     except Exception as e:
         return {"error": f"Failed to get conversation status: {str(e)}"}, 500
 
+@app.post("/api/v{version:int}/model/reset")
+async def reset_model(version: int):
+    """Reset the main model to clear any context contamination"""
+    try:
+        print("🔄 Resetting main model...")
+        
+        # Check if the model has a reset method
+        if hasattr(model_manager.main_model, 'reset'):
+            model_manager.main_model.reset()
+            print("✅ Main model reset successfully")
+            return {
+                "status": "success",
+                "message": "Main model reset successfully",
+                "model": get_model_name(model_manager.main_model)
+            }
+        else:
+            print("⚠️  Main model does not support reset method")
+            return {
+                "status": "warning",
+                "message": "Main model does not support reset method",
+                "model": get_model_name(model_manager.main_model)
+            }, 200
+            
+    except Exception as e:
+        print(f"❌ Error resetting main model: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to reset main model: {str(e)}"
+        }, 500
+
+@app.post("/api/v{version:int}/lightweight/model/reset")
+async def reset_lightweight_model(version: int):
+    """Reset the lightweight model to clear any context contamination"""
+    try:
+        print("🔄 Resetting lightweight model...")
+        
+        # Check if the model has a reset method
+        if hasattr(model_manager.lightweight_model, 'reset'):
+            model_manager.lightweight_model.reset()
+            print("✅ Lightweight model reset successfully")
+            return {
+                "status": "success",
+                "message": "Lightweight model reset successfully",
+                "model": get_model_name(model_manager.lightweight_model)
+            }
+        else:
+            print("⚠️  Lightweight model does not support reset method")
+            return {
+                "status": "warning",
+                "message": "Lightweight model does not support reset method",
+                "model": get_model_name(model_manager.lightweight_model)
+            }, 200
+            
+    except Exception as e:
+        print(f"❌ Error resetting lightweight model: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to reset lightweight model: {str(e)}"
+        }, 500
+
 @app.get("/api/v{version:int}/health")
 async def health(version: int):
     """Health check endpoint"""

@@ -23,10 +23,13 @@ class ModelManager:
         # Initialize main model
         if model_backend == "MLX":
             from backends.mlx_backend import MlxClient
-            self.main_model = MlxClient(main_model_path, main_stop_tokens)
+            self.main_model = MlxClient(main_model_path)
         elif model_backend == "GGUF":
             from backends.gguf_backend import GGUFClient 
             self.main_model = GGUFClient(main_model_path, main_chat_format, main_stop_tokens, main_context_window)
+        elif model_backend == "TRANSFORMERS":
+            from backends.transformers_backend import TransformersClient
+            self.main_model = TransformersClient(main_model_path, main_chat_format, main_stop_tokens, main_context_window)
         elif model_backend == "REST":
             from backends.rest_backend import RestClient
             rest_url = os.getenv("JARVIS_REST_MODEL_URL")
@@ -37,15 +40,18 @@ class ModelManager:
             # from backends.ollama_backend import OllamaClient
             # self.main_model = OllamaClient()
         else:
-            raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'REST', or 'OLLAMA'.")
+            raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'REST', or 'OLLAMA'.")
 
         # Initialize lightweight model
         if lightweight_model_backend == "MLX":
             from backends.mlx_backend import MlxClient
-            self.lightweight_model = MlxClient(lightweight_model_path, lightweight_stop_tokens)
+            self.lightweight_model = MlxClient(lightweight_model_path)
         elif lightweight_model_backend == "GGUF":
             from backends.gguf_backend import GGUFClient 
             self.lightweight_model = GGUFClient(lightweight_model_path, lightweight_chat_format, lightweight_stop_tokens, lightweight_context_window)
+        elif lightweight_model_backend == "TRANSFORMERS":
+            from backends.transformers_backend import TransformersClient
+            self.lightweight_model = TransformersClient(lightweight_model_path, lightweight_chat_format, lightweight_stop_tokens, lightweight_context_window)
         elif lightweight_model_backend == "REST":
             from backends.rest_backend import RestClient
             rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")
@@ -56,7 +62,7 @@ class ModelManager:
             # from backends.ollama_backend import OllamaClient
             # self.lightweight_model = OllamaClient()
         else:
-            raise ValueError("Unsupported LIGHTWEIGHT_MODEL_BACKEND. Use 'MLX', 'GGUF', 'REST', or 'OLLAMA'.")
+            raise ValueError("Unsupported LIGHTWEIGHT_MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'REST', or 'OLLAMA'.")
     
     def swap_main_model(self, new_model: str, new_model_backend: str, new_model_chat_format: str, new_model_context_window: int = None):
         try:
@@ -70,7 +76,10 @@ class ModelManager:
                 self.main_model = MlxClient(new_model)
             elif new_model_backend.upper() == "GGUF":
                 from backends.gguf_backend import GGUFClient 
-                self.main_model = GGUFClient(new_model, new_model_chat_format, new_model_context_window)
+                self.main_model = GGUFClient(new_model, new_model_chat_format, None, new_model_context_window)
+            elif new_model_backend.upper() == "TRANSFORMERS":
+                from backends.transformers_backend import TransformersClient
+                self.main_model = TransformersClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
                 rest_url = os.getenv("JARVIS_REST_MODEL_URL")
@@ -78,7 +87,7 @@ class ModelManager:
                     raise ValueError("JARVIS_REST_MODEL_URL must be set when using REST backend")
                 self.main_model = RestClient(rest_url, new_model or "jarvis-llm", "main")
             else:
-                raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', or 'REST'.")
+                raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', or 'REST'.")
             
             return {"status": "success", "message": f"Model swapped to {new_model}"}
             
@@ -97,7 +106,10 @@ class ModelManager:
                 self.lightweight_model = MlxClient(new_model)
             elif new_model_backend.upper() == "GGUF":
                 from backends.gguf_backend import GGUFClient 
-                self.lightweight_model = GGUFClient(new_model, new_model_chat_format, new_model_context_window)
+                self.lightweight_model = GGUFClient(new_model, new_model_chat_format, None, new_model_context_window)
+            elif new_model_backend.upper() == "TRANSFORMERS":
+                from backends.transformers_backend import TransformersClient
+                self.lightweight_model = TransformersClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
                 rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")
@@ -105,7 +117,7 @@ class ModelManager:
                     raise ValueError("JARVIS_REST_LIGHTWEIGHT_MODEL_URL must be set when using REST backend")
                 self.lightweight_model = RestClient(rest_url, new_model or "jarvis-llm", "lightweight")
             else:
-                raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', or 'REST'.")
+                raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', or 'REST'.")
             
             return {"status": "success", "message": f"Lightweight model swapped to {new_model}"}
             

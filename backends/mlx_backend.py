@@ -1,5 +1,6 @@
 from mlx_lm.utils import load
 from mlx_lm.generate import generate
+from mlx_lm.sample_utils import make_sampler
 import os
 import time
 from typing import List, Dict, Any
@@ -20,28 +21,50 @@ class MlxClient:
         # Start timing
         start_time = time.time()
         
-        # Join message content in order, like ChatML
-        full_prompt = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                full_prompt += f"[SYSTEM] {content}\n"
-            elif role == "user":
-                full_prompt += f"[USER] {content}\n"
-            elif role == "assistant":
-                full_prompt += f"[ASSISTANT] {content}\n"
+        # Use the tokenizer's chat template if available
+        if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None:
+            # Convert messages to the format expected by apply_chat_template
+            formatted_messages = []
+            for msg in messages:
+                formatted_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Apply chat template
+            full_prompt = self.tokenizer.apply_chat_template(
+                formatted_messages, 
+                add_generation_prompt=True,
+                tokenize=False
+            )
+        else:
+            # Fallback to simple format if no chat template
+            full_prompt = ""
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    full_prompt += f"[SYSTEM] {content}\n"
+                elif role == "user":
+                    full_prompt += f"[USER] {content}\n"
+                elif role == "assistant":
+                    full_prompt += f"[ASSISTANT] {content}\n"
+            full_prompt = full_prompt.strip()
 
         print("⚙️  Generating with MLX...")
         print(f"🌡️  Temperature: {temperature}")
+        print(f"🔍 Debug: Using chat template: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
         
-        # Generate response with temperature
+        # Create sampler with temperature
+        sampler = make_sampler(temp=temperature)
+        
+        # Generate response with sampler
         response = generate(
             self.model, 
             self.tokenizer, 
-            full_prompt.strip(), 
+            full_prompt, 
             verbose=False,
-            temp=temperature
+            sampler=sampler
         )
         
         # Calculate timing
@@ -71,25 +94,46 @@ class MlxClient:
     def process_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Process context without generating a response - for warm-up purposes"""
         try:
-            # Join message content in order, like ChatML
-            full_prompt = ""
-            for msg in messages:
-                role = msg["role"]
-                content = msg["content"]
-                if role == "system":
-                    full_prompt += f"[SYSTEM] {content}\n"
-                elif role == "user":
-                    full_prompt += f"[USER] {content}\n"
-                elif role == "assistant":
-                    full_prompt += f"[ASSISTANT] {content}\n"
+            # Use the tokenizer's chat template if available
+            if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None:
+                # Convert messages to the format expected by apply_chat_template
+                formatted_messages = []
+                for msg in messages:
+                    formatted_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+                
+                # Apply chat template
+                full_prompt = self.tokenizer.apply_chat_template(
+                    formatted_messages, 
+                    add_generation_prompt=True,
+                    tokenize=False
+                )
+            else:
+                # Fallback to simple format if no chat template
+                full_prompt = ""
+                for msg in messages:
+                    role = msg["role"]
+                    content = msg["content"]
+                    if role == "system":
+                        full_prompt += f"[SYSTEM] {content}\n"
+                    elif role == "user":
+                        full_prompt += f"[USER] {content}\n"
+                    elif role == "assistant":
+                        full_prompt += f"[ASSISTANT] {content}\n"
+                full_prompt = full_prompt.strip()
+            
+            # Create deterministic sampler for context processing
+            sampler = make_sampler(temp=0.0)
             
             # Use minimal generation to process context
             response = generate(
                 self.model, 
                 self.tokenizer, 
-                full_prompt.strip(), 
+                full_prompt, 
                 verbose=False,
-                temp=0.0,  # Deterministic
+                sampler=sampler,
                 max_tokens=1  # Minimal tokens
             )
             

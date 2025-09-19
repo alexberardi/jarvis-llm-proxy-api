@@ -4,7 +4,7 @@ A flexible, high-performance proxy API for Large Language Models (LLMs) that sup
 
 ## Features
 
-- **Multiple Backend Support**: MLX, GGUF, REST (OpenAI, Anthropic, Ollama, LM Studio, custom APIs)
+- **Multiple Backend Support**: MLX, GGUF, Transformers, REST (OpenAI, Anthropic, Ollama, LM Studio, custom APIs)
 - **OpenAI-Compatible API**: Drop-in replacement for OpenAI API
 - **Conversation Caching**: Session-based conversation memory with warm-up support
 - **Dual Model Support**: Main model + lightweight model for different use cases
@@ -56,9 +56,68 @@ python main.py
 - **Use Case**: Local inference with llama.cpp
 - **Setup**: Set `JARVIS_MODEL_BACKEND=GGUF` and `JARVIS_MODEL_NAME=/path/to/model.gguf`
 
+### Transformers Backend
+- **Use Case**: Local inference with regular HuggingFace models (not converted to GGUF/MLX)
+- **Setup**: Set `JARVIS_MODEL_BACKEND=TRANSFORMERS` and `JARVIS_MODEL_NAME=model_name_or_path`
+- **Features**: Supports quantization, multiple devices (CUDA/MPS/CPU), chat templates
+
 ### REST Backend
 - **Use Case**: Remote APIs (OpenAI, Anthropic, Ollama, LM Studio, custom)
 - **Setup**: Set `JARVIS_MODEL_BACKEND=REST` and configure REST-specific variables
+
+## Transformers Backend Configuration
+
+The Transformers backend provides native support for HuggingFace models without requiring conversion:
+
+### Environment Variables
+
+```bash
+# Required
+JARVIS_MODEL_BACKEND=TRANSFORMERS
+JARVIS_MODEL_NAME=microsoft/DialoGPT-medium  # Or local path
+
+# Device Configuration
+JARVIS_DEVICE=auto  # auto, cuda, mps, cpu
+JARVIS_TORCH_DTYPE=auto  # auto, float16, float32, bfloat16
+
+# Quantization (optional, requires bitsandbytes)
+JARVIS_USE_QUANTIZATION=false
+JARVIS_QUANTIZATION_TYPE=4bit  # 4bit, 8bit
+
+# Generation Parameters
+JARVIS_MAX_TOKENS=2048
+JARVIS_TOP_P=0.95
+JARVIS_TOP_K=50
+JARVIS_REPETITION_PENALTY=1.1
+JARVIS_DO_SAMPLE=true
+
+# Chat Format
+JARVIS_MODEL_CHAT_FORMAT=generic  # generic, chatml, llama
+JARVIS_MODEL_CONTEXT_WINDOW=4096
+
+# Memory Optimization
+JARVIS_USE_CACHE=true
+JARVIS_TRUST_REMOTE_CODE=false
+```
+
+### Supported Features
+
+- **Multiple Devices**: Automatic device selection (CUDA, MPS, CPU)
+- **Quantization**: 4-bit and 8-bit quantization via bitsandbytes
+- **Chat Templates**: Automatic detection and fallback formatting
+- **Memory Optimization**: Efficient memory usage with caching
+- **Thread Safety**: Safe concurrent access to models
+
+### Example Usage
+
+```bash
+# Copy example configuration
+cp transformers-backend-example.env .env
+
+# Edit configuration as needed
+# Run the application
+python main.py
+```
 
 ## REST Backend Configuration
 

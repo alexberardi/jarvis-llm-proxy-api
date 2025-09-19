@@ -3,6 +3,7 @@ import os
 import time
 from typing import List, Dict, Any, Union, Optional
 from .power_metrics import PowerMetrics
+import threading
 
 class GGUFClient:
     def __init__(self, model_path: str, chat_format: str, stop_tokens: List[str] = None, context_window: int = None):
@@ -15,30 +16,76 @@ class GGUFClient:
         self.chat_format = chat_format
         self.model = None
         self.last_usage = None
+        self._lock = threading.Lock()  # Add thread safety
+        
+        # Context cache for prefix matching optimization
+        self.context_cache = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
 
         # Initialize power monitoring (optional)
         self.power_metrics = PowerMetrics()
         self.power_metrics.start_monitoring()
         
-        # Get context window from parameter or environment variable, default to 512
+        # Get context window from parameter or environment variable, default to 4096 for better performance
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "512"))
+            context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "4096"))
+        
+        # Get optimal thread count based on CPU cores
+        n_threads = int(os.getenv("JARVIS_N_THREADS", min(10, os.cpu_count() or 4)))
+        
+        # Get GPU layers - be more conservative to avoid memory issues
+        n_gpu_layers = int(os.getenv("JARVIS_N_GPU_LAYERS", "-1"))
+        
+        
+        # Memory management settings
+        self.enable_cache = os.getenv("JARVIS_ENABLE_CONTEXT_CACHE", "true").lower() == "true"
+        self.max_cache_size = int(os.getenv("JARVIS_MAX_CACHE_SIZE", "100"))
+        
+        # LLaMA.cpp optimization parameters
+        n_batch = int(os.getenv("JARVIS_N_BATCH", "512"))
+        n_ubatch = int(os.getenv("JARVIS_N_UBATCH", "512"))
+        rope_scaling_type = int(os.getenv("JARVIS_ROPE_SCALING_TYPE", "0"))
+        mul_mat_q = os.getenv("JARVIS_MUL_MAT_Q", "true").lower() == "true"
+        f16_kv = os.getenv("JARVIS_F16_KV", "true").lower() == "true"
+        seed = int(os.getenv("JARVIS_SEED", "42"))
+        verbose = os.getenv("JARVIS_VERBOSE", "false").lower() == "true"
+        
+        # Inference parameters
+        self.max_tokens = int(os.getenv("JARVIS_MAX_TOKENS", "7000"))
+        self.top_p = float(os.getenv("JARVIS_TOP_P", "0.95"))
+        self.top_k = int(os.getenv("JARVIS_TOP_K", "40"))
+        self.repeat_penalty = float(os.getenv("JARVIS_REPEAT_PENALTY", "1.1"))
+        self.mirostat_mode = int(os.getenv("JARVIS_MIROSTAT_MODE", "0"))
+        self.mirostat_tau = float(os.getenv("JARVIS_MIROSTAT_TAU", "5.0"))
+        self.mirostat_eta = float(os.getenv("JARVIS_MIROSTAT_ETA", "0.1"))
         
         print(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
         print(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
         print(f"🔍 Debug: Model path: {model_path}")
         print(f"🔍 Debug: Chat format: {chat_format}")
         print(f"🔍 Debug: Context window: {context_window}")
-        print(f"🔍 Debug: Loading model with n_gpu_layers=-1 (all layers on GPU)")
+        print(f"🔍 Debug: Threads: {n_threads}")
+        print(f"🔍 Debug: GPU layers: {n_gpu_layers}")
+        print(f"🔍 Debug: Context cache: {'enabled' if self.enable_cache else 'disabled'}")
+        print(f"🔍 Debug: Batch size: {n_batch}")
+        print(f"🔍 Debug: Micro batch size: {n_ubatch}")
+        print(f"🔍 Debug: F16 KV cache: {'enabled' if f16_kv else 'disabled'}")
+        print(f"🔍 Debug: Matrix multiplication: {'enabled' if mul_mat_q else 'disabled'}")
         
-        # Stable initialization with llama-cpp-python 0.2.64
+        # Optimized initialization with better memory management
         self.model = Llama(
             model_path=model_path,
-            n_threads=10,
-            n_gpu_layers=-1,
-            verbose=True,
-            seed=-0,
-            n_ctx=context_window,  # Use configurable context window
+            n_threads=n_threads,
+            n_gpu_layers=n_gpu_layers,
+            verbose=verbose,  # Use configurable verbose setting
+            seed=seed,  # Use configurable seed
+            n_ctx=context_window,
+            n_batch=n_batch,  # Use configurable batch size
+            n_ubatch=n_ubatch,  # Use configurable micro batch size
+            rope_scaling_type=rope_scaling_type,  # Use configurable RoPE scaling
+            mul_mat_q=mul_mat_q,  # Use configurable matrix multiplication
+            f16_kv=f16_kv,  # Use configurable F16 KV cache
         )
         
         # Debug: Check model loading results
@@ -46,14 +93,18 @@ class GGUFClient:
         print(f"🔍 Debug: Model context size: {self.model.n_ctx()}")
         print(f"🔍 Debug: Model vocab size: {self.model.n_vocab()}")
         
-        # Try to get GPU memory info if available
+        # Warm up the model with a small inference
         try:
-            print(f"🔍 Debug: Checking GPU memory usage...")
-            # Force a small inference to see if GPU is used
-            test_response = self.model.create_completion("Hello", max_tokens=1)
-            print(f"🔍 Debug: Test inference completed successfully")
+            print(f"🔍 Debug: Warming up model...")
+            warmup_response = self.model.create_chat_completion(
+                messages=[{"role": "user", "content": "Hello"}],
+                max_tokens=1,
+                temperature=0.0,
+                stream=False,
+            )
+            print(f"🔍 Debug: Model warmup completed successfully")
         except Exception as e:
-            print(f"⚠️  Debug: Test inference failed: {e}")
+            print(f"⚠️  Debug: Model warmup failed: {e}")
             
         print(f"🔍 Debug: Model initialization complete")
 
@@ -62,6 +113,11 @@ class GGUFClient:
         return self.chat_with_temperature(messages, temperature)
     
     def chat_with_temperature(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+        # Use thread lock to prevent concurrent access issues
+        with self._lock:
+            return self._chat_internal(messages, temperature)
+    
+    def _chat_internal(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         # Start timing
         start_time = time.time()
 
@@ -89,16 +145,47 @@ class GGUFClient:
         for i, msg in enumerate(messages):
             print(f"🔍 PREFIX DEBUG: Raw[{i}]: {msg}")
         
-        response = self.model.create_chat_completion(
-            messages=messages,  # type: ignore
-            temperature=temperature,
-            max_tokens=7000,
-            top_p=0.95,
-            top_k=40,
-            repeat_penalty=1.1,
-            stream=False,
-        )
-        print(f"🔍 PREFIX DEBUG: LLaMA.cpp response received")
+        try:
+            response = self.model.create_chat_completion(
+                messages=messages,  # type: ignore
+                temperature=temperature,
+                max_tokens=self.max_tokens,  # Use configurable max tokens
+                top_p=self.top_p,  # Use configurable top_p
+                top_k=self.top_k,  # Use configurable top_k
+                repeat_penalty=self.repeat_penalty,  # Use configurable repeat penalty
+                stream=False,
+                mirostat_mode=self.mirostat_mode,  # Use configurable mirostat mode
+                mirostat_tau=self.mirostat_tau,  # Use configurable mirostat tau
+                mirostat_eta=self.mirostat_eta,  # Use configurable mirostat eta
+            )
+            print(f"🔍 PREFIX DEBUG: LLaMA.cpp response received")
+            
+        except Exception as e:
+            print(f"⚠️  Error during inference: {e}")
+            # Try to recover by reinitializing the model context
+            try:
+                print(f"🔄 Attempting to recover from inference error...")
+                # Force a small warmup inference to reset context
+                self.model.create_chat_completion(
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1,
+                    temperature=0.0,
+                    stream=False,
+                )
+                print(f"✅ Recovery successful, retrying original request...")
+                # Retry the original request
+                response = self.model.create_chat_completion(
+                    messages=messages,  # type: ignore
+                    temperature=temperature,
+                    max_tokens=self.max_tokens,  # Use configurable max tokens
+                    top_p=self.top_p,  # Use configurable top_p
+                    top_k=self.top_k,  # Use configurable top_k
+                    repeat_penalty=self.repeat_penalty,  # Use configurable repeat penalty
+                    stream=False,
+                )
+            except Exception as retry_e:
+                print(f"❌ Recovery failed: {retry_e}")
+                return ""
         
         # Calculate timing
         end_time = time.time()
@@ -186,6 +273,42 @@ class GGUFClient:
                 "context_processed": False,
                 "timestamp": time.time()
             }
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics for monitoring"""
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "hit_rate": hit_rate,
+            "cache_size": len(self.context_cache),
+            "max_cache_size": self.max_cache_size
+        }
+    
+    def clear_cache(self):
+        """Clear the context cache to free memory"""
+        self.context_cache.clear()
+        self.cache_hits = 0
+        self.cache_misses = 0
+        print("🧹 Context cache cleared")
+    
+    def _get_context_key(self, messages: List[Dict[str, str]]) -> str:
+        """Generate a cache key for the message context"""
+        # Create a hash of the message content for caching
+        import hashlib
+        content = "".join([msg.get("content", "") for msg in messages])
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _manage_cache_size(self):
+        """Manage cache size to prevent memory issues"""
+        if len(self.context_cache) > self.max_cache_size:
+            # Remove oldest entries (simple FIFO)
+            keys_to_remove = list(self.context_cache.keys())[:len(self.context_cache) - self.max_cache_size]
+            for key in keys_to_remove:
+                del self.context_cache[key]
+            print(f"🧹 Removed {len(keys_to_remove)} old cache entries")
     
     def unload(self):
         """Unload the model and clean up resources"""
