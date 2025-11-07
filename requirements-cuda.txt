@@ -1,0 +1,6 @@
+# CUDA-specific requirements for NVIDIA GPU acceleration
+# Install with: pip install -r requirements-base.txt -r requirements-cuda.txt
+
+# llama-cpp-python with CUDA support
+# This will be installed with CMAKE_ARGS for CUDA support
+# The actual installation is handled by the run scripts

@@ -1,0 +1,14 @@
+# Base requirements for Jarvis LLM Proxy API
+# These are installed on all platforms
+
+fastapi
+uvicorn[standard]
+httpx
+python-dotenv
+sentencepiece==0.2.0
+debugpy
+
+# Platform-specific ML libraries are installed separately:
+# - llama-cpp-python (with appropriate acceleration)
+# - mlx-lm (macOS only)
+# - vllm (optional, high-performance inference)

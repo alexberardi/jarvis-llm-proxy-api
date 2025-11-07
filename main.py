@@ -1,3 +1,11 @@
+import multiprocessing
+# Fix for vLLM CUDA multiprocessing issue - set spawn method early
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    # Already set, ignore
+    pass
+
 from fastapi import FastAPI, Request, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Dict, Optional
@@ -14,7 +22,9 @@ load_dotenv()
 app = FastAPI()
 
 model_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
-lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND", "OLLAMA").upper()
+lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND")
+if lightweight_model_backend:
+    lightweight_model_backend = lightweight_model_backend.upper()
 
 # Debug setup - only enable when DEBUG=true
 debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
@@ -488,12 +498,24 @@ async def reset_lightweight_model(version: int):
 @app.get("/api/v{version:int}/health")
 async def health(version: int):
     """Health check endpoint"""
+    # Determine if vLLM sharing is active
+    is_vllm_sharing = (
+        model_backend == "VLLM" and 
+        (not lightweight_model_backend or lightweight_model_backend == "VLLM") and
+        (not lightweight_model_path or lightweight_model_path == main_model_path)
+    )
+    
+    # Show actual backend being used
+    actual_lightweight_backend = "VLLM (shared)" if is_vllm_sharing else lightweight_model_backend
+    actual_lightweight_model = main_model_path if is_vllm_sharing else lightweight_model_path
+    
     return {
         "status": "healthy",
         "model_backend": model_backend,
-        "lightweight_model_backend": lightweight_model_backend,
+        "lightweight_model_backend": actual_lightweight_backend,
         "main_model": main_model_path,
-        "lightweight_model": lightweight_model_path,
+        "lightweight_model": actual_lightweight_model,
+        "vllm_sharing": is_vllm_sharing,
         "cache": {
             "type": os.getenv("JARVIS_CACHE_TYPE", "local"),
             "session_count": cache_manager.get_cache().get_session_count(),

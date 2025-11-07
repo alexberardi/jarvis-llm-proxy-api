@@ -263,4 +263,9 @@ tmp/
 # Configuration files with sensitive data
 config.ini
 secrets.json
-credentials.json 
+credentials.json # Setup configuration (contains local paths and hardware info)
+.setup_config
+
+# Production environment files
+prod.env
+*.env

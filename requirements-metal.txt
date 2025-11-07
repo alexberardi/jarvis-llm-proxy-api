@@ -1,0 +1,9 @@
+# Metal-specific requirements for Apple Silicon GPU acceleration
+# Install with: pip install -r requirements-base.txt -r requirements-metal.txt
+
+# MLX for Apple Silicon
+mlx-lm
+
+# llama-cpp-python with Metal support
+# This will be installed with CMAKE_ARGS for Metal support
+# The actual installation is handled by the run scripts

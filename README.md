@@ -21,35 +21,54 @@ git clone <repository-url>
 cd jarvis-llm-proxy-api
 ```
 
-### 2. Install Dependencies
+### 2. Platform Setup
+
+Run the interactive setup to configure your platform and hardware acceleration:
 
 ```bash
-pip install -r requirements.txt
+./setup.sh
 ```
+
+This will detect your OS and hardware, then prompt you to select the appropriate acceleration method (CPU, CUDA, Metal, or ROCm).
 
 ### 3. Configure Environment
 
-Copy the example environment file and configure your settings:
+Copy the environment template and configure your settings:
 
 ```bash
-cp rest-backend-example.env .env
-# Edit .env with your configuration
+cp env.template .env
+# Edit .env with your model paths and preferences
 ```
 
 ### 4. Run the Application
 
 ```bash
-# Development
-python main.py
+# Development (automatically installs dependencies)
+./run.sh
 
 # Production
 ./run-prod.sh
 ```
 
+For detailed setup instructions, including platform-specific requirements and troubleshooting, see [SETUP.md](SETUP.md).
+
 ## Backend Options
 
+### GGUF Backend (Recommended)
+- **Use Case**: Local inference with hardware acceleration
+- **Inference Engines**:
+  - **llama.cpp** (default): Reliable, well-tested inference
+  - **vLLM**: High-performance, optimized for throughput
+- **Acceleration**: 
+  - **CUDA**: NVIDIA GPU acceleration (Linux/Windows)
+  - **Metal**: Apple Silicon optimization (macOS)
+  - **ROCm**: AMD GPU acceleration (Linux, experimental)
+  - **CPU**: Fallback for any system
+- **Setup**: Set `JARVIS_MODEL_BACKEND=GGUF` and `JARVIS_MODEL_NAME=/path/to/model.gguf`
+- **vLLM**: Set `JARVIS_INFERENCE_ENGINE=vllm` for high-performance inference
+
 ### MLX Backend
-- **Use Case**: Local inference with Apple Silicon optimization
+- **Use Case**: Apple Silicon-specific optimization (macOS only)
 - **Setup**: Set `JARVIS_MODEL_BACKEND=MLX` and `JARVIS_MODEL_NAME=/path/to/model`
 
 ### GGUF Backend

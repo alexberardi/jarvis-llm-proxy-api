@@ -1,39 +1,47 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Production run script
 
-set -e
+# Load common functions
+source "$(dirname "$0")/scripts/common.sh"
 
-PYTHON_VERSION="3.11.9"
-ENV_FILE="prod.env"
+# Initialize common variables
+init_common_vars
+ENV_FILE="${ENV_FILE:-prod.env}"
 
-echo "🐍 Ensuring Python $PYTHON_VERSION with pyenv"
-if ! pyenv versions --bare | grep -q "$PYTHON_VERSION"; then
-  echo "⬇️  Installing Python $PYTHON_VERSION via pyenv..."
-  pyenv install "$PYTHON_VERSION"
+# Production-specific configuration
+ENABLE_RELOAD="false"  # Always disable reload in production
+SERVER_HOST="${SERVER_HOST:-0.0.0.0}"
+SERVER_PORT="${SERVER_PORT:-8000}"
+
+echo -e "${GREEN}🚀 Jarvis LLM Proxy API - Production Mode${NC}"
+echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
+
+# Setup and configuration
+check_setup
+load_env "$ENV_FILE"
+
+# Create virtual environment (production strategy)
+create_venv_prod
+echo -e "${GREEN}🐍 Using Python: $PY${NC}"
+
+# Install requirements
+install_base_requirements
+install_conditional_requirements
+
+# Install llama-cpp-python only if needed
+if [[ "$(needs_llama_cpp)" == "true" ]]; then
+    echo -e "${BLUE}🔍 llama-cpp-python needed for current configuration${NC}"
+    should_install=$(should_install_llama_cpp "$ACCELERATION")
+    install_acceleration_requirements "$ACCELERATION" "$should_install"
+else
+    echo -e "${YELLOW}⏭️  Skipping llama-cpp-python installation (not needed for current backends)${NC}"
 fi
 
-echo "$PYTHON_VERSION" > .python-version
-eval "$(pyenv init -)"
-eval "$(pyenv virtualenv-init -)"
+# Run diagnostics
+run_diagnostics
 
-if [ ! -d "venv" ]; then
-  echo "📦 Creating virtual environment"
-  pyenv local "$PYTHON_VERSION"
-  python -m venv venv
-fi
+# Setup cleanup handlers
+setup_signal_handlers
 
-echo "📦 Installing requirements"
-source venv/bin/activate
-pip install -U pip setuptools
-pip install -r requirements.txt
-
-echo "🧪 Checking for $ENV_FILE"
-if [ ! -f "$ENV_FILE" ]; then
-  echo "❌ Missing $ENV_FILE file. Aborting."
-  exit 1
-fi
-
-echo "🚀 Running app with $ENV_FILE"
-export $(grep -v '^#' "$ENV_FILE" | xargs)
-SERVER_HOST=${SERVER_HOST:-"0.0.0.0"}
-SERVER_PORT=${SERVER_PORT:-"8000"}
-uvicorn main:app --host $SERVER_HOST --port $SERVER_PORT 
+# Start production server
+start_server "$ENABLE_RELOAD" "$SERVER_HOST" "$SERVER_PORT"
