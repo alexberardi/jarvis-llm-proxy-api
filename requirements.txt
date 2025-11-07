@@ -1,13 +1,17 @@
-fastapi
-uvicorn[standard]
-httpx
-python-dotenv
-mlx-lm
-sentencepiece==0.2.0
-llama-cpp-python
-debugpy
-# Transformers backend dependencies
-transformers
-torch
-accelerate
-bitsandbytes
+# Main requirements file - install base requirements and run setup
+# 
+# SETUP INSTRUCTIONS:
+# 1. Run ./setup.sh to configure your platform
+# 2. Run ./run.sh to install platform-specific dependencies and start the server
+#
+# For manual installation:
+# pip install -r requirements-base.txt
+# Then install platform-specific requirements based on your setup
+
+-r requirements-base.txt
+
+# Platform-specific requirements are installed by run scripts based on .setup_config
+# - requirements-cpu.txt (CPU only)
+# - requirements-cuda.txt (NVIDIA GPU)
+# - requirements-metal.txt (Apple Silicon)
+# - requirements-rocm.txt (AMD GPU - experimental)

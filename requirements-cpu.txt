@@ -1,0 +1,6 @@
+# CPU-only requirements (no GPU acceleration)
+# Install with: pip install -r requirements-base.txt -r requirements-cpu.txt
+
+# llama-cpp-python without GPU acceleration
+# This will be installed without special CMAKE_ARGS
+# The actual installation is handled by the run scripts

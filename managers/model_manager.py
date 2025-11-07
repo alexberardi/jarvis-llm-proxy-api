@@ -9,7 +9,9 @@ class ModelManager:
     def _initialize_models(self):
         # Get environment variables
         model_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
-        lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND", "OLLAMA").upper()
+        lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND")
+        if lightweight_model_backend:
+            lightweight_model_backend = lightweight_model_backend.upper()
         
         main_model_path = os.getenv("JARVIS_MODEL_NAME")
         lightweight_model_path = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME")
@@ -19,6 +21,23 @@ class ModelManager:
         lightweight_stop_tokens = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_STOP_TOKENS")
         main_context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "512"))
         lightweight_context_window = int(os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", "512"))
+        
+        # Check if we should share vLLM models (same name or empty lightweight name/backend)
+        should_share_vllm = (
+            model_backend == "VLLM" and 
+            (not lightweight_model_backend or lightweight_model_backend == "VLLM") and
+            (not lightweight_model_path or lightweight_model_path == main_model_path)
+        )
+        
+        if should_share_vllm:
+            print(f"🔄 vLLM Memory Optimization: Using shared model instance")
+            if not lightweight_model_backend:
+                print(f"   → Lightweight backend empty, defaulting to shared vLLM: {main_model_path}")
+            elif not lightweight_model_path:
+                print(f"   → Lightweight model name empty, using main: {main_model_path}")
+            else:
+                print(f"   → Identical model names detected: {main_model_path}")
+            print(f"   → Memory savings: ~50% (single model instance)")
         
         # Initialize main model
         if model_backend == "MLX":
@@ -30,6 +49,9 @@ class ModelManager:
         elif model_backend == "TRANSFORMERS":
             from backends.transformers_backend import TransformersClient
             self.main_model = TransformersClient(main_model_path, main_chat_format, main_stop_tokens, main_context_window)
+        elif model_backend == "VLLM":
+            from backends.vllm_backend import VLLMClient
+            self.main_model = VLLMClient(main_model_path, main_chat_format, main_stop_tokens, main_context_window)
         elif model_backend == "REST":
             from backends.rest_backend import RestClient
             rest_url = os.getenv("JARVIS_REST_MODEL_URL")
@@ -40,10 +62,14 @@ class ModelManager:
             # from backends.ollama_backend import OllamaClient
             # self.main_model = OllamaClient()
         else:
-            raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'REST', or 'OLLAMA'.")
+            raise ValueError("Unsupported MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
 
         # Initialize lightweight model
-        if lightweight_model_backend == "MLX":
+        if should_share_vllm:
+            # Share the main vLLM model instance to save memory
+            self.lightweight_model = self.main_model
+            print(f"✅ Lightweight model sharing main vLLM instance")
+        elif lightweight_model_backend == "MLX":
             from backends.mlx_backend import MlxClient
             self.lightweight_model = MlxClient(lightweight_model_path)
         elif lightweight_model_backend == "GGUF":
@@ -52,6 +78,9 @@ class ModelManager:
         elif lightweight_model_backend == "TRANSFORMERS":
             from backends.transformers_backend import TransformersClient
             self.lightweight_model = TransformersClient(lightweight_model_path, lightweight_chat_format, lightweight_stop_tokens, lightweight_context_window)
+        elif lightweight_model_backend == "VLLM":
+            from backends.vllm_backend import VLLMClient
+            self.lightweight_model = VLLMClient(lightweight_model_path, lightweight_chat_format, lightweight_stop_tokens, lightweight_context_window)
         elif lightweight_model_backend == "REST":
             from backends.rest_backend import RestClient
             rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")
@@ -62,7 +91,10 @@ class ModelManager:
             # from backends.ollama_backend import OllamaClient
             # self.lightweight_model = OllamaClient()
         else:
-            raise ValueError("Unsupported LIGHTWEIGHT_MODEL_BACKEND. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'REST', or 'OLLAMA'.")
+            if not lightweight_model_backend:
+                raise ValueError("JARVIS_LIGHTWEIGHT_MODEL_BACKEND must be set when not using vLLM model sharing. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
+            else:
+                raise ValueError(f"Unsupported LIGHTWEIGHT_MODEL_BACKEND '{lightweight_model_backend}'. Use 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
     
     def swap_main_model(self, new_model: str, new_model_backend: str, new_model_chat_format: str, new_model_context_window: int = None):
         try:
@@ -80,6 +112,9 @@ class ModelManager:
             elif new_model_backend.upper() == "TRANSFORMERS":
                 from backends.transformers_backend import TransformersClient
                 self.main_model = TransformersClient(new_model, new_model_chat_format, None, new_model_context_window)
+            elif new_model_backend.upper() == "VLLM":
+                from backends.vllm_backend import VLLMClient
+                self.main_model = VLLMClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
                 rest_url = os.getenv("JARVIS_REST_MODEL_URL")
@@ -110,6 +145,9 @@ class ModelManager:
             elif new_model_backend.upper() == "TRANSFORMERS":
                 from backends.transformers_backend import TransformersClient
                 self.lightweight_model = TransformersClient(new_model, new_model_chat_format, None, new_model_context_window)
+            elif new_model_backend.upper() == "VLLM":
+                from backends.vllm_backend import VLLMClient
+                self.lightweight_model = VLLMClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
                 rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")

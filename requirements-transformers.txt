@@ -1,0 +1,16 @@
+# Transformers backend dependencies
+# Install with: pip install -r requirements-base.txt -r requirements-transformers.txt
+
+# Core transformers libraries
+transformers>=4.30.0
+torch>=2.0.0
+accelerate>=0.20.0
+
+# Quantization support (optional but recommended)
+bitsandbytes>=0.39.0
+
+# Additional optimization libraries
+xformers  # Memory efficient attention (optional)
+
+# Tokenizers for fast processing
+tokenizers>=0.13.0

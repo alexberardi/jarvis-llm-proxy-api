@@ -1,4 +1,3 @@
-from llama_cpp import Llama
 import os
 import time
 from typing import List, Dict, Any, Union, Optional
@@ -60,8 +59,10 @@ class GGUFClient:
         self.mirostat_tau = float(os.getenv("JARVIS_MIROSTAT_TAU", "5.0"))
         self.mirostat_eta = float(os.getenv("JARVIS_MIROSTAT_ETA", "0.1"))
         
-        print(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
-        print(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
+        # Check inference engine preference
+        inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "llama_cpp").lower()
+        
+        print(f"🔍 Debug: Inference engine: {inference_engine}")
         print(f"🔍 Debug: Model path: {model_path}")
         print(f"🔍 Debug: Chat format: {chat_format}")
         print(f"🔍 Debug: Context window: {context_window}")
@@ -73,7 +74,44 @@ class GGUFClient:
         print(f"🔍 Debug: F16 KV cache: {'enabled' if f16_kv else 'disabled'}")
         print(f"🔍 Debug: Matrix multiplication: {'enabled' if mul_mat_q else 'disabled'}")
         
-        # Optimized initialization with better memory management
+        if inference_engine == "vllm":
+            print(f"🚀 Using vLLM inference engine")
+            self._init_vllm(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
+        else:
+            print(f"🦙 Using llama.cpp inference engine")
+            self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
+
+    def _init_vllm(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
+        """Initialize vLLM backend"""
+        try:
+            from .vllm_backend import VLLMClient
+            self.backend = VLLMClient(model_path, chat_format, stop_tokens, context_window)
+            self.inference_engine = "vllm"
+        except ValueError as e:
+            if "vLLM requires HuggingFace model names" in str(e):
+                print(f"")
+                print(f"🔧 CONFIGURATION SUGGESTION:")
+                print(f"   For GGUF files, use: JARVIS_INFERENCE_ENGINE=llama_cpp")
+                print(f"   For vLLM, switch to TRANSFORMERS backend with HF models:")
+                print(f"   ")
+                print(f"   JARVIS_MODEL_BACKEND=TRANSFORMERS")
+                print(f"   JARVIS_MODEL_NAME=microsoft/Phi-3-mini-4k-instruct")
+                print(f"   JARVIS_INFERENCE_ENGINE=vllm")
+                print(f"")
+                print(f"🔄 Falling back to llama.cpp for GGUF file...")
+                self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
+            else:
+                raise
+
+    def _init_llama_cpp(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, ctx_window: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
+        """Initialize llama.cpp backend"""
+        from llama_cpp import Llama
+        
+        print(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
+        print(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
+        print(f"🔍 Debug: Loading model with n_gpu_layers={n_gpu_layers}")
+        
+        # Stable initialization with llama-cpp-python
         self.model = Llama(
             model_path=model_path,
             n_threads=n_threads,
@@ -87,6 +125,8 @@ class GGUFClient:
             mul_mat_q=mul_mat_q,  # Use configurable matrix multiplication
             f16_kv=f16_kv,  # Use configurable F16 KV cache
         )
+        self.backend = self
+        self.inference_engine = "llama_cpp"
         
         # Debug: Check model loading results
         print(f"✅ Model loaded successfully!")
@@ -113,11 +153,36 @@ class GGUFClient:
         return self.chat_with_temperature(messages, temperature)
     
     def chat_with_temperature(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+        """Delegate to appropriate backend with thread safety"""
         # Use thread lock to prevent concurrent access issues
         with self._lock:
-            return self._chat_internal(messages, temperature)
+            if self.inference_engine == "vllm":
+                return self._chat_vllm(messages, temperature)
+            else:
+                return self._chat_llama_cpp(messages, temperature)
     
-    def _chat_internal(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+    def _chat_vllm(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+        """Chat using vLLM backend"""
+        print(f"🚀 vLLM chat with {len(messages)} messages, temperature: {temperature}")
+        
+        try:
+            response_text, usage = self.backend.generate(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=int(os.getenv("JARVIS_MAX_TOKENS", "7000")),
+                top_p=0.95
+            )
+            
+            # Update last usage
+            self.last_usage = time.time()
+            
+            return response_text
+            
+        except Exception as e:
+            print(f"❌ vLLM chat error: {e}")
+            raise
+    
+    def _chat_llama_cpp(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         # Start timing
         start_time = time.time()
 

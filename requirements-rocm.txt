@@ -1,0 +1,8 @@
+# ROCm-specific requirements for AMD GPU acceleration
+# Install with: pip install -r requirements-base.txt -r requirements-rocm.txt
+
+# llama-cpp-python with ROCm support
+# This will be installed with CMAKE_ARGS for ROCm support
+# The actual installation is handled by the run scripts
+
+# Note: ROCm support is experimental and may require additional system setup

@@ -1,0 +1,10 @@
+# vLLM requirements for high-performance inference
+# Install with: pip install -r requirements-base.txt -r requirements-vllm.txt
+
+# vLLM - High-performance LLM inference engine
+vllm>=0.2.0
+
+# Additional dependencies for vLLM
+torch>=2.0.0
+transformers>=4.30.0
+xformers  # Optional but recommended for memory efficiency

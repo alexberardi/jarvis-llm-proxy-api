@@ -48,6 +48,10 @@ class TransformersClient:
         self.torch_dtype = self._get_torch_dtype()
         self.trust_remote_code = os.getenv("JARVIS_TRUST_REMOTE_CODE", "false").lower() == "true"
         
+        # Check if vLLM inference should be used
+        self.inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "transformers").lower()
+        self.vllm_backend = None
+        
         print(f"🔍 Debug: Model path: {model_path}")
         print(f"🔍 Debug: Chat format: {chat_format}")
         print(f"🔍 Debug: Context window: {context_window}")
@@ -55,9 +59,13 @@ class TransformersClient:
         print(f"🔍 Debug: Quantization: {'enabled' if self.use_quantization else 'disabled'}")
         print(f"🔍 Debug: Torch dtype: {self.torch_dtype}")
         print(f"🔍 Debug: Trust remote code: {self.trust_remote_code}")
+        print(f"🔍 Debug: Inference engine: {self.inference_engine}")
         
-        # Initialize model and tokenizer
-        self._load_model()
+        # Initialize model and tokenizer based on inference engine
+        if self.inference_engine == "vllm":
+            self._init_vllm()
+        else:
+            self._load_model()
         
         print(f"✅ Transformers model loaded successfully!")
         
@@ -123,6 +131,35 @@ class TransformersClient:
         except ImportError:
             print("⚠️  bitsandbytes not installed, disabling quantization")
             return None
+    
+    def _init_vllm(self):
+        """Initialize vLLM backend for transformers"""
+        try:
+            from .vllm_backend import VLLMClient
+            print("🚀 Initializing vLLM backend for Transformers model")
+            
+            self.vllm_backend = VLLMClient(
+                self.model_path, 
+                self.chat_format, 
+                self.stop_tokens, 
+                self.context_window
+            )
+            
+            # Set a dummy tokenizer for compatibility
+            from transformers import AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path,
+                trust_remote_code=self.trust_remote_code
+            )
+            
+            print("✅ vLLM backend initialized successfully")
+            
+        except ImportError:
+            print("❌ vLLM not installed. Install with: pip install vllm")
+            raise
+        except Exception as e:
+            print(f"❌ Failed to initialize vLLM backend: {e}")
+            raise
     
     def _load_model(self):
         """Load the model and tokenizer"""
@@ -375,7 +412,34 @@ class TransformersClient:
     def chat_with_temperature(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat with temperature control and thread safety"""
         with self._lock:
-            return self._chat_internal(messages, temperature)
+            if self.inference_engine == "vllm" and self.vllm_backend:
+                return self._chat_vllm(messages, temperature)
+            else:
+                return self._chat_internal(messages, temperature)
+    
+    def _chat_vllm(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+        """Chat using vLLM backend"""
+        print(f"🚀 vLLM Transformers chat with {len(messages)} messages, temperature: {temperature}")
+        
+        try:
+            response_text, usage = self.vllm_backend.generate(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=self.max_tokens,
+                top_p=self.top_p
+            )
+            
+            # Store usage information for compatibility
+            self.last_usage = usage
+            
+            # Update last usage time
+            self.last_usage = time.time()
+            
+            return response_text
+            
+        except Exception as e:
+            print(f"❌ vLLM Transformers chat error: {e}")
+            return ""
     
     def _chat_internal(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Internal chat implementation"""
