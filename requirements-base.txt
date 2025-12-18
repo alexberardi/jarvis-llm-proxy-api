@@ -7,6 +7,9 @@ httpx
 python-dotenv
 sentencepiece==0.2.0
 debugpy
+Pillow
+num2words
+Pillow
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python (with appropriate acceleration)

@@ -6,25 +6,28 @@ except RuntimeError:
     # Already set, ignore
     pass
 
-from fastapi import FastAPI, Request, BackgroundTasks
-from pydantic import BaseModel
-from typing import List, Dict, Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional, Union, Any
 import os
 import time
 import uuid
 import asyncio
+import base64
+import re
 from dotenv import load_dotenv
 from managers.model_manager import ModelManager
-from cache.cache_manager import CacheManager
+from managers.chat_types import (
+    NormalizedMessage,
+    TextPart,
+    ImagePart,
+    GenerationParams,
+    ChatResult,
+)
 
 load_dotenv()
 
 app = FastAPI()
-
-model_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
-lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND")
-if lightweight_model_backend:
-    lightweight_model_backend = lightweight_model_backend.upper()
 
 # Debug setup - only enable when DEBUG=true
 debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
@@ -37,43 +40,49 @@ if debug_enabled:
     except ImportError:
         print("❌ debugpy is not installed, but DEBUG is set to true")
 
-# Get model paths and chat formats
-main_model_path = os.getenv("JARVIS_MODEL_NAME")
-lightweight_model_path = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME")
-main_chat_format = os.getenv("JARVIS_MODEL_CHAT_FORMAT")
-lightweight_chat_format = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CHAT_FORMAT")
-main_context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "512"))
-lightweight_context_window = int(os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", "512"))
-
-print(main_chat_format)
-
 # Initialize model manager
 model_manager = ModelManager()
 
-# Initialize conversation cache manager
-cache_manager = CacheManager()
 
-# OpenAI-style request models
+# ============================================================================
+# OpenAI-compatible request/response models
+# ============================================================================
+
+class ImageUrl(BaseModel):
+    url: str
+    detail: Optional[str] = None
+
+
+class ContentPart(BaseModel):
+    type: str
+    text: Optional[str] = None
+    image_url: Optional[ImageUrl] = None
+
+
 class Message(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[ContentPart]]
+
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "jarvis-llm"
-    temperature: Optional[float] = 0.7
+    model: str = "full"
     messages: List[Message]
-    conversation_id: Optional[str] = None  # Optional conversation ID for conversation continuity
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
 
-# OpenAI-style response models
+
 class ChatCompletionChoice(BaseModel):
     index: int
     message: Message
     finish_reason: str
 
+
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
 
 class ChatCompletionResponse(BaseModel):
     id: str
@@ -83,34 +92,147 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionChoice]
     usage: Usage
 
-class ModelSwapRequest(BaseModel):
-    new_model: str
-    new_model_backend: str
-    new_model_chat_format: str
-    new_model_context_window: int = None  # Optional, will use env var if not provided
 
-def get_model_name(model_instance) -> str:
-    """Extract model name from model instance"""
-    if hasattr(model_instance, 'model_path'):
-        return model_instance.model_path
-    elif hasattr(model_instance, 'model_name'):
-        return model_instance.model_name
-    else:
-        return "jarvis-llm"
+class ErrorDetail(BaseModel):
+    type: str
+    message: str
+    code: Optional[str] = None
 
-def create_openai_response(content: str, model_name: str, usage: Dict = None) -> ChatCompletionResponse:
-    """Create OpenAI-style response"""
-    # Generate random ID
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = 0
+    owned_by: str = "jarvis"
+
+
+class ModelListResponse(BaseModel):
+    object: str = "list"
+    data: List[ModelInfo]
+
+
+# ============================================================================
+# Helper functions for message normalization
+# ============================================================================
+
+def parse_data_url(data_url: str) -> tuple[bytes, str]:
+    """
+    Parse a data URL and return (image_bytes, mime_type).
     
-    # Get current timestamp
+    Expected format: data:image/png;base64,iVBORw0KG...
+    """
+    match = re.match(r'^data:([^;]+);base64,(.+)$', data_url)
+    if not match:
+        raise ValueError("Invalid data URL format. Expected: data:<mime_type>;base64,<data>")
+    
+    mime_type = match.group(1)
+    b64_data = match.group(2)
+    
+    try:
+        image_bytes = base64.b64decode(b64_data)
+    except Exception as e:
+        raise ValueError(f"Failed to decode base64 image data: {e}")
+    
+    return image_bytes, mime_type
+
+
+def normalize_message(message: Message) -> NormalizedMessage:
+    """
+    Convert an OpenAI-style message to a NormalizedMessage.
+    
+    Handles both:
+    - content as string: {"role": "user", "content": "Hello"}
+    - content as array: {"role": "user", "content": [{"type": "text", "text": "..."}, {"type": "image_url", ...}]}
+    """
+    content_parts: List[Union[TextPart, ImagePart]] = []
+    
+    if isinstance(message.content, str):
+        # Simple string content
+        content_parts.append(TextPart(text=message.content))
+    elif isinstance(message.content, list):
+        # Structured content array
+        for part in message.content:
+            if part.type == "text" and part.text is not None:
+                content_parts.append(TextPart(text=part.text))
+            elif part.type == "image_url" and part.image_url is not None:
+                url = part.image_url.url
+                # For now, only support data URLs
+                if not url.startswith("data:"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "Only data URLs are supported for images. HTTP(S) URLs are not yet supported.",
+                                "code": None,
+                            }
+                        }
+                    )
+                image_bytes, mime_type = parse_data_url(url)
+                content_parts.append(
+                    ImagePart(
+                        data=image_bytes,
+                        mime_type=mime_type,
+                        detail=part.image_url.detail,
+                    )
+                )
+            else:
+                # Unknown part type or missing required field
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": f"Unsupported content part type or missing field: {part.type}",
+                            "code": None,
+                        }
+                    }
+                )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Message content must be either a string or an array of content parts",
+                    "code": None,
+                }
+            }
+        )
+    
+    return NormalizedMessage(role=message.role, content=content_parts)
+
+
+def normalize_messages(messages: List[Message]) -> List[NormalizedMessage]:
+    """Convert a list of OpenAI-style messages to NormalizedMessage format"""
+    return [normalize_message(msg) for msg in messages]
+
+
+def has_images(messages: List[NormalizedMessage]) -> bool:
+    """Check if any message contains an ImagePart"""
+    for msg in messages:
+        for part in msg.content:
+            if isinstance(part, ImagePart):
+                return True
+    return False
+
+
+def create_openai_response(
+    content: str,
+    model_name: str,
+    usage: Optional[Dict] = None,
+) -> ChatCompletionResponse:
+    """Create an OpenAI-style chat completion response"""
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     created = int(time.time())
     
-    # Default usage if not provided
     if usage is None:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     
-    # Create response
     return ChatCompletionResponse(
         id=response_id,
         created=created,
@@ -119,438 +241,216 @@ def create_openai_response(content: str, model_name: str, usage: Dict = None) ->
             ChatCompletionChoice(
                 index=0,
                 message=Message(role="assistant", content=content),
-                finish_reason="stop"
+                finish_reason="stop",
             )
         ],
-        usage=Usage(**usage)
+        usage=Usage(**usage),
     )
 
-@app.post("/api/v{version:int}/chat")
-async def chat(version: int, req: ChatCompletionRequest):
-    # Debug logging
-    print(f"🔍 Debug: Received chat request with {len(req.messages)} messages")
-    if req.conversation_id:
-        print(f"🔍 Debug: Conversation ID: {req.conversation_id}")
-    for i, msg in enumerate(req.messages):
-        print(f"🔍 Debug: Message {i}: role='{msg.role}', content_length={len(msg.content)}")
-        if len(msg.content) < 200:
-            print(f"🔍 Debug: Message {i} content: {msg.content}")
-        else:
-            print(f"🔍 Debug: Message {i} content preview: {msg.content[:200]}...")
-    
-    # Convert Pydantic messages to dict format for backend
-    messages = [{"role": msg.role, "content": msg.content} for msg in req.messages]
-    
-    # Cache implementation removed - client handles conversation history
-    
-    # Debug: Show final messages being sent to LLM
-    print(f"📤 Sending {len(messages)} messages to LLM:")
-    for i, msg in enumerate(messages):
-        role = msg["role"]
-        content_preview = msg["content"][:100] + "..." if len(msg["content"]) > 100 else msg["content"]
-        print(f"   {i+1}. [{role}] {content_preview}")
-    
 
-    
-    # Get model response with temperature
-    if hasattr(model_manager.main_model, 'chat_with_temperature'):
-        if asyncio.iscoroutinefunction(model_manager.main_model.chat_with_temperature):
-            output = await model_manager.main_model.chat_with_temperature(messages, req.temperature)
-        else:
-            output = model_manager.main_model.chat_with_temperature(messages, req.temperature)
-    else:
-        if asyncio.iscoroutinefunction(model_manager.main_model.chat):
-            output = await model_manager.main_model.chat(messages)
-        else:
-            output = model_manager.main_model.chat(messages)
-    
-    # Cache update removed - client handles conversation history
-    
-    # Get model name
-    model_name = get_model_name(model_manager.main_model)
-    
-    # Get usage information if available
-    usage = None
-    if hasattr(model_manager.main_model, 'last_usage'):
-        usage = model_manager.main_model.last_usage
-    
-    # Create OpenAI-style response
-    response = create_openai_response(output, model_name, usage)
-    
-    # Debug logging for response
-    print(f"🔍 Debug: Model response length: {len(output)}")
-    print(f"🔍 Debug: Model response preview: {output[:200]}...")
-    
-    return response
-
-@app.post("/api/v{version:int}/chat/conversation/{conversation_id}/warmup")
-async def warmup_session(version: int, conversation_id: str, req: ChatCompletionRequest, background_tasks: BackgroundTasks):
-    """Warm up a conversation by processing context asynchronously"""
-    print(f"🔥 Starting warm-up for conversation {conversation_id}")
-    
-    # Convert Pydantic messages to dict format
-    messages = [{"role": msg.role, "content": msg.content} for msg in req.messages]
-    
-    # Add warm-up task to background
-    background_tasks.add_task(process_warmup_context, conversation_id, messages)
-    
-    # Return immediately - don't wait for LLM processing
-    return {"status": "warmup_started", "conversation_id": conversation_id, "message": "Context processing started in background"}
-
-async def process_warmup_context(conversation_id: str, messages: List[Dict]):
-    """Background task to process warm-up context"""
-    try:
-        print(f"🔥 Processing warm-up context for conversation {conversation_id}")
-        
-        # Get the cache
-        cache = cache_manager.get_cache()
-        
-        # Store the messages in cache (this creates the session if it doesn't exist)
-        cache.create_or_update_session(conversation_id, messages)
-        
-        # Set warm-up status to "in_progress"
-        cache.set_warmup_status(conversation_id, "in_progress")
-        print(f"🔄 Set warm-up status to 'in_progress' for conversation {conversation_id}")
-        
-        # Process the context with the LLM to create "processed context"
-        # We'll use a minimal inference to process the context without generating a response
-        if hasattr(model_manager.main_model, 'process_context'):
-            # If the backend supports context processing
-            if asyncio.iscoroutinefunction(model_manager.main_model.process_context):
-                processed_context = await model_manager.main_model.process_context(messages)
-            else:
-                processed_context = model_manager.main_model.process_context(messages)
-            # Store the processed context
-            cache.update_processed_context(conversation_id, processed_context)
-            
-            # Set warm-up status to "completed"
-            cache.set_warmup_status(conversation_id, "completed")
-            print(f"✅ Context processed and stored for conversation {conversation_id}")
-            print(f"✅ Set warm-up status to 'completed' for conversation {conversation_id}")
-        else:
-            # Fallback: just store the raw messages
-            print(f"⚠️  Backend doesn't support context processing, storing raw messages for conversation {conversation_id}")
-            
-            # Set warm-up status to "completed" even for fallback
-            cache.set_warmup_status(conversation_id, "completed")
-            print(f"✅ Set warm-up status to 'completed' for conversation {conversation_id} (fallback mode)")
-            
-    except Exception as e:
-        print(f"❌ Error processing warm-up context for conversation {conversation_id}: {e}")
-        # Set warm-up status to "pending" on error so it can be retried
-        try:
-            cache.set_warmup_status(conversation_id, "pending")
-            print(f"🔄 Reset warm-up status to 'pending' for conversation {conversation_id} due to error")
-        except Exception as status_error:
-            print(f"⚠️  Failed to reset warm-up status: {status_error}")
-
-@app.post("/api/v{version:int}/lightweight/chat")
-async def lightweight_chat(version: int, req: ChatCompletionRequest):
-    # Debug logging
-    print(f"🔍 Debug: Received lightweight chat request with {len(req.messages)} messages")
-    if req.conversation_id:
-        print(f"🔍 Debug: Conversation ID: {req.conversation_id}")
-    
-    # Convert Pydantic messages to dict format for backend
-    messages = [{"role": msg.role, "content": msg.content} for msg in req.messages]
-    
-    # Cache implementation removed - client handles conversation history
-    
-    # Debug: Show final messages being sent to lightweight LLM
-    print(f"📤 Sending {len(messages)} messages to lightweight LLM:")
-    for i, msg in enumerate(messages):
-        role = msg["role"]
-        content_preview = msg["content"][:100] + "..." if len(msg["content"]) > 100 else msg["content"]
-        print(f"   {i+1}. [{role}] {content_preview}")
-    
-
-    
-    # Get model response with temperature
-    if hasattr(model_manager.lightweight_model, 'chat_with_temperature'):
-        if asyncio.iscoroutinefunction(model_manager.lightweight_model.chat_with_temperature):
-            output = await model_manager.lightweight_model.chat_with_temperature(messages, req.temperature)
-        else:
-            output = model_manager.lightweight_model.chat_with_temperature(messages, req.temperature)
-    else:
-        if asyncio.iscoroutinefunction(model_manager.lightweight_model.chat):
-            output = await model_manager.lightweight_model.chat(messages)
-        else:
-            output = model_manager.lightweight_model.chat(messages)
-    
-    # Cache update removed - client handles conversation history
-    
-    # Get model name
-    model_name = get_model_name(model_manager.lightweight_model)
-    
-    # Get usage information if available
-    usage = None
-    if hasattr(model_manager.lightweight_model, 'last_usage'):
-        usage = model_manager.lightweight_model.last_usage
-    
-    # Create OpenAI-style response
-    response = create_openai_response(output, model_name, usage)
-    
-    return response
-
-@app.post("/api/v{version:int}/lightweight/chat/conversation/{conversation_id}/warmup")
-async def lightweight_warmup_session(version: int, conversation_id: str, req: ChatCompletionRequest, background_tasks: BackgroundTasks):
-    """Warm up a lightweight conversation by processing context asynchronously"""
-    print(f"🔥 Starting lightweight warm-up for conversation {conversation_id}")
-    
-    # Convert Pydantic messages to dict format
-    messages = [{"role": msg.role, "content": msg.content} for msg in req.messages]
-    
-    # Add warm-up task to background
-    background_tasks.add_task(process_lightweight_warmup_context, conversation_id, messages)
-    
-    # Return immediately - don't wait for LLM processing
-    return {"status": "warmup_started", "conversation_id": conversation_id, "message": "Context processing started in background"}
-
-async def process_lightweight_warmup_context(conversation_id: str, messages: List[Dict]):
-    """Background task to process lightweight warm-up context"""
-    try:
-        print(f"🔥 Processing lightweight warm-up context for conversation {conversation_id}")
-        
-        # Get the cache
-        cache = cache_manager.get_cache()
-        
-        # Store the messages in cache (this creates the session if it doesn't exist)
-        cache.create_or_update_session(conversation_id, messages)
-        
-        # Set warm-up status to "in_progress"
-        cache.set_warmup_status(conversation_id, "in_progress")
-        print(f"🔄 Set lightweight warm-up status to 'in_progress' for conversation {conversation_id}")
-        
-        # Process the context with the lightweight LLM to create "processed context"
-        if hasattr(model_manager.lightweight_model, 'process_context'):
-            # If the backend supports context processing
-            if asyncio.iscoroutinefunction(model_manager.lightweight_model.process_context):
-                processed_context = await model_manager.lightweight_model.process_context(messages)
-            else:
-                processed_context = model_manager.lightweight_model.process_context(messages)
-            # Store the processed context
-            cache.update_processed_context(conversation_id, processed_context)
-            
-            # Set warm-up status to "completed"
-            cache.set_warmup_status(conversation_id, "completed")
-            print(f"✅ Lightweight context processed and stored for conversation {conversation_id}")
-            print(f"✅ Set lightweight warm-up status to 'completed' for conversation {conversation_id}")
-        else:
-            # Fallback: just store the raw messages
-            print(f"⚠️  Lightweight backend doesn't support context processing, storing raw messages for conversation {conversation_id}")
-            
-            # Set warm-up status to "completed" even for fallback
-            cache.set_warmup_status(conversation_id, "completed")
-            print(f"✅ Set lightweight warm-up status to 'completed' for conversation {conversation_id} (fallback mode)")
-            
-    except Exception as e:
-        print(f"❌ Error processing lightweight warm-up context for conversation {conversation_id}: {e}")
-        # Set warm-up status to "pending" on error so it can be retried
-        try:
-            cache.set_warmup_status(conversation_id, "pending")
-            print(f"🔄 Reset lightweight warm-up status to 'pending' for conversation {conversation_id} due to error")
-        except Exception as status_error:
-            print(f"⚠️  Failed to reset lightweight warm-up status: {status_error}")
-
-@app.post("/api/v{version:int}/model-swap")
-async def model_swap(version: int, req: ModelSwapRequest):
-    return model_manager.swap_main_model(
-        req.new_model, 
-        req.new_model_backend, 
-        req.new_model_chat_format, 
-        req.new_model_context_window
-    )
-
-@app.post("/api/v{version:int}/lightweight/model-swap")
-async def lightweight_model_swap(version: int, req: ModelSwapRequest):
-    return model_manager.swap_lightweight_model(
-        req.new_model, 
-        req.new_model_backend, 
-        req.new_model_chat_format, 
-        req.new_model_context_window
-    )
-
-@app.get("/api/v{version:int}/conversation/{conversation_id}/status")
-async def get_conversation_status(version: int, conversation_id: str):
-    """Get the status of a conversation"""
-    try:
-        cache = cache_manager.get_cache()
-        
-        # Check if conversation exists
-        existing_session = cache.get_session(conversation_id)
-        
-        if not existing_session:
-            return {"error": "Conversation not found"}, 404
-        
-        # Get warm-up status
-        warmup_status = cache.get_warmup_status(conversation_id)
-        
-        # Prepare response based on status
-        if warmup_status == "pending":
-            # Return 202 Accepted for "check back later" scenario
-            return {
-                "conversation_id": conversation_id,
-                "status": "pending",
-                "message": "Conversation is pending warm-up. Check back later.",
-                "created_at": existing_session.get("created_at"),
-                "last_accessed": existing_session.get("last_accessed"),
-                "message_count": len(existing_session.get("messages", [])),
-                "ttl_seconds": int(os.getenv("JARVIS_SESSION_TTL", "600"))
-            }, 202
-        elif warmup_status == "in_progress":
-            # Return 202 Accepted for "check back later" scenario
-            return {
-                "conversation_id": conversation_id,
-                "status": "in_progress",
-                "message": "Conversation warm-up in progress. Check back later.",
-                "created_at": existing_session.get("created_at"),
-                "last_accessed": existing_session.get("last_accessed"),
-                "message_count": len(existing_session.get("messages", [])),
-                "ttl_seconds": int(os.getenv("JARVIS_SESSION_TTL", "600"))
-            }, 202
-        elif warmup_status == "completed":
-            # Return 200 OK for completed conversations
-            return {
-                "conversation_id": conversation_id,
-                "status": "completed",
-                "message": "Conversation warm-up completed and ready for use.",
-                "created_at": existing_session.get("created_at"),
-                "last_accessed": existing_session.get("last_accessed"),
-                "message_count": len(existing_session.get("messages", [])),
-                "ttl_seconds": int(os.getenv("JARVIS_SESSION_TTL", "600")),
-                "processed_context_available": cache.get_processed_context(conversation_id) is not None
-            }, 200
-        else:
-            # Return 200 OK for unknown status
-            return {
-                "conversation_id": conversation_id,
-                "status": warmup_status or "unknown",
-                "message": "Conversation status unknown.",
-                "created_at": existing_session.get("created_at"),
-                "last_accessed": existing_session.get("last_accessed"),
-                "message_count": len(existing_session.get("messages", [])),
-                "ttl_seconds": int(os.getenv("JARVIS_SESSION_TTL", "600"))
-            }, 200
-            
-    except Exception as e:
-        return {"error": f"Failed to get conversation status: {str(e)}"}, 500
-
-@app.post("/api/v{version:int}/model/reset")
-async def reset_model(version: int):
-    """Reset the main model to clear any context contamination"""
-    try:
-        print("🔄 Resetting main model...")
-        
-        # Check if the model has a reset method
-        if hasattr(model_manager.main_model, 'reset'):
-            model_manager.main_model.reset()
-            print("✅ Main model reset successfully")
-            return {
-                "status": "success",
-                "message": "Main model reset successfully",
-                "model": get_model_name(model_manager.main_model)
+def openai_error(error_type: str, message: str, status_code: int = 400):
+    """Create an OpenAI-style error response"""
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "type": error_type,
+                "message": message,
+                "code": None,
             }
-        else:
-            print("⚠️  Main model does not support reset method")
-            return {
-                "status": "warning",
-                "message": "Main model does not support reset method",
-                "model": get_model_name(model_manager.main_model)
-            }, 200
-            
-    except Exception as e:
-        print(f"❌ Error resetting main model: {e}")
-        return {
-            "status": "error",
-            "message": f"Failed to reset main model: {str(e)}"
-        }, 500
+        }
+    )
 
-@app.post("/api/v{version:int}/lightweight/model/reset")
-async def reset_lightweight_model(version: int):
-    """Reset the lightweight model to clear any context contamination"""
+
+# ============================================================================
+# Routes
+# ============================================================================
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(req: ChatCompletionRequest):
+    """
+    OpenAI-compatible chat completions endpoint.
+    
+    Supports:
+    - Text-only messages (string content)
+    - Multimodal messages (structured content with text + images)
+    - Model selection via model field (supports aliases: full, lightweight, vision, cloud)
+    """
+    print(f"🔍 Received chat completion request for model: {req.model}")
+    print(f"🔍 Messages: {len(req.messages)}, Temperature: {req.temperature}")
+    
+    # 1. Resolve model
+    model_config = model_manager.get_model_config(req.model)
+    if not model_config:
+        openai_error(
+            "model_not_found",
+            f"Model '{req.model}' does not exist. Available models: {list(model_manager.registry.keys())} and aliases: {list(model_manager.aliases.keys())}",
+            404,
+        )
+    
+    # 2. Normalize messages
     try:
-        print("🔄 Resetting lightweight model...")
-        
-        # Check if the model has a reset method
-        if hasattr(model_manager.lightweight_model, 'reset'):
-            model_manager.lightweight_model.reset()
-            print("✅ Lightweight model reset successfully")
-            return {
-                "status": "success",
-                "message": "Lightweight model reset successfully",
-                "model": get_model_name(model_manager.lightweight_model)
-            }
-        else:
-            print("⚠️  Lightweight model does not support reset method")
-            return {
-                "status": "warning",
-                "message": "Lightweight model does not support reset method",
-                "model": get_model_name(model_manager.lightweight_model)
-            }, 200
-            
+        normalized_messages = normalize_messages(req.messages)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ Error resetting lightweight model: {e}")
-        return {
-            "status": "error",
-            "message": f"Failed to reset lightweight model: {str(e)}"
-        }, 500
+        openai_error("invalid_request_error", f"Failed to parse messages: {str(e)}")
+    
+    # 3. Detect images
+    has_images_flag = has_images(normalized_messages)
+    if has_images_flag:
+        print(f"🖼️  Detected images in request")
+    
+    # 4. Check model capabilities
+    if has_images_flag and not model_config.supports_images:
+        openai_error(
+            "invalid_request_error",
+            f"Model '{req.model}' does not support images. Use a vision-capable model instead (try 'vision' alias or a model with supports_images=true).",
+        )
+    
+    # 5. Get backend instance
+    backend = model_config.backend_instance
+    
+    # 6. Prepare generation parameters
+    params = GenerationParams(
+        temperature=req.temperature or 0.7,
+        max_tokens=req.max_tokens,
+        stream=req.stream or False,
+    )
+    
+    # 7. Dispatch to appropriate backend method
+    try:
+        start_time = time.time()
+        
+        if has_images_flag:
+            # Vision path
+            print(f"🎨 Routing to vision backend: {model_config.backend_type}")
+            if not hasattr(backend, "generate_vision_chat"):
+                openai_error(
+                    "internal_server_error",
+                    f"Backend '{model_config.backend_type}' does not support vision (missing generate_vision_chat method).",
+                    500,
+                )
+            
+            if asyncio.iscoroutinefunction(backend.generate_vision_chat):
+                result: ChatResult = await backend.generate_vision_chat(
+                    model_config, normalized_messages, params
+                )
+            else:
+                result: ChatResult = backend.generate_vision_chat(
+                    model_config, normalized_messages, params
+                )
+        else:
+            # Text-only path
+            print(f"📝 Routing to text backend: {model_config.backend_type}")
+            
+            # Check if backend has modern generate_text_chat method
+            if hasattr(backend, "generate_text_chat"):
+                # Use modern interface with NormalizedMessage
+                if asyncio.iscoroutinefunction(backend.generate_text_chat):
+                    result: ChatResult = await backend.generate_text_chat(
+                        model_config, normalized_messages, params
+                    )
+                else:
+                    result: ChatResult = backend.generate_text_chat(
+                        model_config, normalized_messages, params
+                    )
+            else:
+                # Convert NormalizedMessage back to simple dict format for legacy backends
+                legacy_messages = []
+                for msg in normalized_messages:
+                    # Concatenate all text parts
+                    text_content = " ".join(
+                        part.text for part in msg.content if isinstance(part, TextPart)
+                    )
+                    legacy_messages.append({"role": msg.role, "content": text_content})
+                
+                # Use the existing chat methods on backends
+                if hasattr(backend, 'chat_with_temperature'):
+                    if asyncio.iscoroutinefunction(backend.chat_with_temperature):
+                        output = await backend.chat_with_temperature(legacy_messages, params.temperature)
+                    else:
+                        output = backend.chat_with_temperature(legacy_messages, params.temperature)
+                else:
+                    if asyncio.iscoroutinefunction(backend.chat):
+                        output = await backend.chat(legacy_messages)
+                    else:
+                        output = backend.chat(legacy_messages)
+                
+                # Create ChatResult from string output
+                usage = None
+                if hasattr(backend, 'last_usage'):
+                    usage = backend.last_usage
+                result = ChatResult(content=output, usage=usage)
+        
+        end_time = time.time()
+        print(f"⏱️  Request completed in {end_time - start_time:.2f}s")
+        
+        # 8. Convert to OpenAI response format
+        response = create_openai_response(
+            content=result.content,
+            model_name=model_config.model_id,
+            usage=result.usage,
+        )
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error during chat completion: {e}")
+        import traceback
+        traceback.print_exc()
+        openai_error("internal_server_error", f"Internal error: {str(e)}", 500)
 
-@app.get("/api/v{version:int}/health")
-async def health(version: int):
+
+@app.get("/v1/models", response_model=ModelListResponse)
+async def list_models():
+    """List all available models in OpenAI-compatible format"""
+    models = model_manager.list_models()
+    return ModelListResponse(object="list", data=models)
+
+
+@app.get("/v1/health")
+async def health():
     """Health check endpoint"""
-    # Determine if vLLM sharing is active
-    is_vllm_sharing = (
-        model_backend == "VLLM" and 
-        (not lightweight_model_backend or lightweight_model_backend == "VLLM") and
-        (not lightweight_model_path or lightweight_model_path == main_model_path)
-    )
+    # Get backend info
+    model_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
+    lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND", "").upper()
+    vision_model_backend = os.getenv("JARVIS_VISION_MODEL_BACKEND", "").upper()
+    cloud_model_backend = os.getenv("JARVIS_CLOUD_MODEL_BACKEND", "REST").upper()
     
-    # Show actual backend being used
-    actual_lightweight_backend = "VLLM (shared)" if is_vllm_sharing else lightweight_model_backend
-    actual_lightweight_model = main_model_path if is_vllm_sharing else lightweight_model_path
+    # Count models
+    model_count = len(model_manager.registry)
+    alias_count = len(model_manager.aliases)
     
     return {
         "status": "healthy",
-        "model_backend": model_backend,
-        "lightweight_model_backend": actual_lightweight_backend,
-        "main_model": main_model_path,
-        "lightweight_model": actual_lightweight_model,
-        "vllm_sharing": is_vllm_sharing,
-        "cache": {
-            "type": os.getenv("JARVIS_CACHE_TYPE", "local"),
-            "session_count": cache_manager.get_cache().get_session_count(),
-            "ttl_seconds": int(os.getenv("JARVIS_SESSION_TTL", "600")),
-            "cleanup_interval": int(os.getenv("JARVIS_CACHE_CLEANUP_INTERVAL", "30"))
-        }
+        "models": {
+            "total": model_count,
+            "aliases": alias_count,
+            "registry": list(model_manager.registry.keys()),
+            "aliases_map": model_manager.aliases,
+        },
+        "backends": {
+            "main": model_backend,
+            "lightweight": lightweight_model_backend or "shared",
+            "vision": vision_model_backend or "not configured",
+            "cloud": cloud_model_backend if model_manager.cloud_model else "not configured",
+        },
     }
 
-@app.post("/api/v{version:int}/debug-request")
-async def debug_request(version: int, request: Request):
-    """Debug endpoint to inspect incoming requests"""
-    try:
-        # Get raw body
-        body = await request.body()
-        body_str = body.decode('utf-8')
-        
-        # Get headers
-        headers = dict(request.headers)
-        
-        # Try to parse as JSON
-        try:
-            import json
-            parsed_json = json.loads(body_str)
-            json_valid = True
-        except json.JSONDecodeError as e:
-            json_valid = False
-            json_error = str(e)
-        
-        return {
-            "body_length": len(body),
-            "body_preview": body_str[:500] + "..." if len(body_str) > 500 else body_str,
-            "headers": {k: v for k, v in headers.items() if k.lower() in ['content-type', 'content-length', 'user-agent', 'accept']},
-            "json_valid": json_valid,
-            "json_error": json_error if not json_valid else None,
-            "content_type": headers.get('content-type', 'not-set')
-        }
-    except Exception as e:
-        return {"error": str(e)}
+
+# Legacy routes removed per PRD:
+# - /api/v{version:int}/chat
+# - /api/v{version:int}/lightweight/chat
+# - /api/v{version:int}/chat/conversation/{conversation_id}/warmup
+# - /api/v{version:int}/lightweight/chat/conversation/{conversation_id}/warmup
+# - /api/v{version:int}/model-swap
+# - /api/v{version:int}/lightweight/model-swap
+# - /api/v{version:int}/conversation/{conversation_id}/status
+# - /api/v{version:int}/model/reset
+# - /api/v{version:int}/lightweight/model/reset
+# - /api/v{version:int}/debug-request
+#
+# All chat interactions now use /v1/chat/completions with model selection.

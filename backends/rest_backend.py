@@ -5,6 +5,8 @@ import json
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
+from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+
 class RestClient:
     def __init__(self, base_url: str, model_name: str = "jarvis-llm", model_type: str = "main"):
         """
@@ -155,6 +157,36 @@ class RestClient:
         else:
             # Last resort: return the whole response as string
             return str(response_data)
+
+    async def chat_completion(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        stream: bool = False,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Send an OpenAI-style chat completion request. Supports structured content.
+
+        The method intentionally keeps streaming disabled for now; callers can
+        choose to stream responses at a higher layer using the returned content.
+        """
+        payload: Dict[str, Any] = {
+            "model": model or self.model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        endpoint = self._get_endpoint_for_provider()
+        url = urljoin(self.base_url, endpoint)
+
+        response = await self.client.post(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        return response.json()
     
     def _estimate_usage(self, content: str):
         """Estimate token usage when provider doesn't provide it"""
@@ -261,6 +293,84 @@ class RestClient:
                 "backend": "rest",
                 "provider": self.provider
             }
+    
+    async def generate_vision_chat(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """
+        Generate a vision chat response by converting NormalizedMessage to OpenAI format
+        and calling the remote API.
+        
+        This method converts NormalizedMessage (which can contain ImagePart) to the
+        OpenAI-style structured content format expected by remote APIs.
+        """
+        start_time = time.time()
+        
+        # Convert NormalizedMessage to OpenAI-style messages with structured content
+        openai_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            content_parts: List[Dict[str, Any]] = []
+            
+            for part in msg.content:
+                if isinstance(part, TextPart):
+                    content_parts.append({
+                        "type": "text",
+                        "text": part.text
+                    })
+                elif isinstance(part, ImagePart):
+                    # Convert ImagePart back to data URL format
+                    data_url = part.to_data_url()
+                    image_part: Dict[str, Any] = {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url
+                        }
+                    }
+                    if part.detail:
+                        image_part["image_url"]["detail"] = part.detail
+                    content_parts.append(image_part)
+            
+            openai_messages.append({
+                "role": msg.role,
+                "content": content_parts
+            })
+        
+        print(f"🖼️  Sending vision request to {self.provider} with {len(messages)} messages")
+        
+        try:
+            # Use the chat_completion method which supports structured content
+            response_data = await self.chat_completion(
+                messages=openai_messages,
+                temperature=params.temperature or 0.7,
+                max_tokens=params.max_tokens,
+                stream=False,  # For now, no streaming
+                model=self.model_name,
+            )
+            
+            # Parse response
+            content = self._parse_response_for_provider(response_data)
+            
+            # Calculate timing
+            end_time = time.time()
+            total_time = end_time - start_time
+            
+            # Print performance metrics
+            if self.last_usage:
+                completion_tokens = self.last_usage.get("completion_tokens", 0)
+                tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
+                print(f"🚀 [Vision] Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+                print(f"📊 Usage: {self.last_usage}")
+            else:
+                print(f"🚀 [Vision] Generated response in {total_time:.2f}s")
+            
+            return ChatResult(content=content.strip(), usage=self.last_usage)
+            
+        except Exception as e:
+            print(f"❌ Error in vision chat: {e}")
+            raise
     
     async def unload(self):
         """Clean up resources"""

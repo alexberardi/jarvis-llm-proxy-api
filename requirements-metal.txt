@@ -3,6 +3,7 @@
 
 # MLX for Apple Silicon
 mlx-lm
+mlx-vlm
 
 # llama-cpp-python with Metal support
 # This will be installed with CMAKE_ARGS for Metal support
