@@ -9,7 +9,7 @@ init_common_vars
 ENV_FILE="${ENV_FILE:-.env}"
 
 # Development-specific configuration
-ENABLE_RELOAD="${JARVIS_ENABLE_RELOAD:-true}"
+ENABLE_RELOAD="false"
 
 echo -e "${GREEN}🚀 Jarvis LLM Proxy API - Development Mode${NC}"
 echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
@@ -17,6 +17,8 @@ echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
 # Setup and configuration
 check_setup
 load_env "$ENV_FILE"
+# Disable reload unconditionally (overrides any .env ENABLE_RELOAD)
+ENABLE_RELOAD="false"
 
 # Create virtual environment (development strategy)
 create_venv_dev
@@ -41,5 +43,83 @@ run_diagnostics
 # Setup cleanup handlers
 setup_signal_handlers
 
-# Start development server
-start_server "$ENABLE_RELOAD"
+# Start development server + queue worker (aggregated logs)
+RUN_QUEUE_WORKER="${RUN_QUEUE_WORKER:-true}"
+
+echo -e "${BLUE}📜 Aggregated logs: [api] for server, [worker] for queue worker${NC}"
+
+# Ensure fork-safety env for macOS workers (Objective-C libs)
+export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=${OBJC_DISABLE_INITIALIZE_FORK_SAFETY:-YES}
+
+# Start model service if configured
+MODEL_SERVICE_PORT="${MODEL_SERVICE_PORT:-8008}"
+RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
+MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
+MODEL_SERVICE_TOKEN_EXPORT="${MODEL_SERVICE_TOKEN:-${LLM_PROXY_INTERNAL_TOKEN:-}}"
+
+# Start API server in background with prefixed logs (reload always disabled here)
+( start_server "false" ) | sed -e 's/^/[api] /' &
+API_PID=$!
+echo -e "${BLUE}🔢 API_PID=${API_PID}${NC}"
+
+# Start model service in background
+MODEL_PID=""
+if [[ "$RUN_MODEL_SERVICE" == "true" ]]; then
+  ( MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" ) | sed -e 's/^/[model] /' &
+  MODEL_PID=$!
+  echo -e "${BLUE}🔢 MODEL_PID=${MODEL_PID}${NC}"
+fi
+
+# Optionally start queue worker
+WORKER_PID=""
+if [[ "$RUN_QUEUE_WORKER" == "true" ]]; then
+    ( "$PY" scripts/queue_worker.py ) | sed -e 's/^/[worker] /' &
+    WORKER_PID=$!
+    echo -e "${BLUE}🔢 WORKER_PID=${WORKER_PID}${NC}"
+fi
+
+# Wait for either process to exit (portable wait-any loop)
+PIDS=("$API_PID")
+if [[ -n "$WORKER_PID" ]]; then
+  PIDS+=("$WORKER_PID")
+fi
+if [[ -n "$MODEL_PID" ]]; then
+  PIDS+=("$MODEL_PID")
+fi
+
+DEAD_PID=""
+DEAD_STATUS=""
+while true; do
+  for pid in "${PIDS[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      DEAD_PID="$pid"
+      # Try to collect an exit code for the dead process for easier debugging
+      if wait "$pid" 2>/dev/null; then
+        DEAD_STATUS=$?
+      else
+        DEAD_STATUS="unknown"
+      fi
+      break
+    fi
+  done
+  if [[ -n "$DEAD_PID" ]]; then
+    ROLE="unknown"
+    if [[ "$DEAD_PID" == "$API_PID" ]]; then ROLE="api"; fi
+    if [[ "$DEAD_PID" == "$MODEL_PID" ]]; then ROLE="model"; fi
+    if [[ "$DEAD_PID" == "$WORKER_PID" ]]; then ROLE="worker"; fi
+    echo -e "${YELLOW}⚠️  Process $DEAD_PID exited (role=${ROLE}, status=${DEAD_STATUS}). Stopping others...${NC}"
+    break
+  fi
+  sleep 1
+done
+
+# If one exits, stop the other
+if ps -p $API_PID >/dev/null 2>&1; then
+  kill $API_PID 2>/dev/null || true
+fi
+if [[ -n "$WORKER_PID" ]] && ps -p $WORKER_PID >/dev/null 2>&1; then
+  kill $WORKER_PID 2>/dev/null || true
+fi
+if [[ -n "$MODEL_PID" ]] && ps -p $MODEL_PID >/dev/null 2>&1; then
+  kill $MODEL_PID 2>/dev/null || true
+fi

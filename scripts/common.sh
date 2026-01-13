@@ -303,6 +303,7 @@ cleanup() {
     pkill -f "VLLM::EngineCore" 2>/dev/null || true
     pkill -f "vllm" 2>/dev/null || true
     pkill -f "uvicorn" 2>/dev/null || true
+    pkill -f "queue_worker.py" 2>/dev/null || true
     
     # Clear CUDA cache if available
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -351,7 +352,8 @@ start_server() {
         echo -e "${YELLOW}   → vLLM handles request batching internally for optimal throughput${NC}"
         "$VENV/bin/uvicorn" main:app --host "$host" --port "$port" --loop asyncio --limit-concurrency 1000
     else
-        echo -e "${GREEN}⚡ Production mode: using 4 workers for parallel requests${NC}"
-        "$VENV/bin/uvicorn" main:app --host "$host" --port "$port" --workers 4
+        local workers="${UVICORN_WORKERS:-1}"
+        echo -e "${GREEN}⚡ Production mode: using ${workers} worker(s) for parallel requests${NC}"
+        "$VENV/bin/uvicorn" main:app --host "$host" --port "$port" --workers "$workers"
     fi
 }

@@ -91,7 +91,8 @@ class VLLMClient:
         self.last_usage = time.time()
 
     def generate(self, messages: List[Dict[str, str]], max_tokens: int = None, temperature: float = 0.7, 
-                 top_p: float = 0.9, stop: List[str] = None, stream: bool = False) -> Union[str, Any]:
+                 top_p: float = 0.9, stop: List[str] = None, stream: bool = False, 
+                 response_format: Optional[Dict[str, Any]] = None) -> Union[str, Any]:
         """Generate response using vLLM"""
         
         # Update last usage
@@ -104,11 +105,28 @@ class VLLMClient:
         max_tokens = max_tokens or int(os.getenv("JARVIS_MAX_TOKENS", "2048"))
         stop_tokens = stop or self.stop_tokens or []
         
+        # Handle JSON structured output if requested
+        guided_json = None
+        if response_format and response_format.get("type") == "json_object":
+            # vLLM supports guided_json for JSON schema enforcement
+            # For basic JSON object, we can use a simple schema
+            # More complex schemas can be passed via json_schema in response_format
+            if "json_schema" in response_format:
+                guided_json = response_format["json_schema"]
+            else:
+                # Default: allow any JSON object
+                guided_json = {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True
+                }
+        
         sampling_params = SamplingParams(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop_tokens,
+            guided_json=guided_json,  # Add guided JSON if requested
         )
         
         print(f"🚀 vLLM generating with max_tokens={max_tokens}, temp={temperature}, top_p={top_p}")

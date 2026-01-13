@@ -1,0 +1,35 @@
+# Tool-call specific grammar for llama.cpp GBNF.
+# Constrains output to an object with "tool" (string) and "arguments" (any JSON value).
+
+root        ::= tool_call
+
+tool_call   ::= "{" ws "\"tool\"" ws ":" ws string ws "," ws "\"arguments\"" ws ":" ws value ws "}"
+
+object      ::= "{" ws (member ("," ws member)*)? "}" ws
+member      ::= string ws ":" ws value
+
+array       ::= "[" ws (value ("," ws value)*)? "]" ws
+
+value       ::= string
+             | number
+             | object
+             | array
+             | "true"
+             | "false"
+             | "null"
+
+string      ::= "\"" chars "\""
+chars       ::= (char)*
+char        ::= [^"\\\x00-\x1F] | "\\" escape
+escape      ::= "\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t" | "u" hex hex hex hex
+hex         ::= [0-9a-fA-F]
+
+number      ::= "-"? int frac? exp?
+int         ::= "0" | (digit1_9 digit*)
+frac        ::= "." digit+
+exp         ::= ("e" | "E") ("+" | "-")? digit+
+digit       ::= [0-9]
+digit1_9    ::= [1-9]
+
+ws          ::= [ \t\n\r]*
+
