@@ -36,6 +36,7 @@ class GenerationParams:
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     stream: bool = False
+    response_format: Optional[dict] = None  # For JSON output: {"type": "json_object"}
 
 
 @dataclass

@@ -10,6 +10,8 @@ debugpy
 Pillow
 num2words
 Pillow
+redis>=5.0.0
+rq>=1.15.1
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python (with appropriate acceleration)

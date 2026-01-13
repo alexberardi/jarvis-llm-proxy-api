@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvis.llm-proxy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__ROOT__/run-prod.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ENV_FILE</key>
+        <string>prod.env</string>
+        <key>SERVER_HOST</key>
+        <string>0.0.0.0</string>
+        <key>SERVER_PORT</key>
+        <string>8000</string>
+        <key>RUN_MODEL_SERVICE</key>
+        <string>true</string>
+        <key>MODEL_SERVICE_PORT</key>
+        <string>8008</string>
+        <key>RUN_QUEUE_WORKER</key>
+        <string>true</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/__USER__/Library/Logs/jarvis-llm-proxy/out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/__USER__/Library/Logs/jarvis-llm-proxy/err.log</string>
+</dict>
+</plist>
+
+
+
+
+
+

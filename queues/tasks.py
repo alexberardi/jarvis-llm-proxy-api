@@ -1,0 +1,230 @@
+import os
+import time
+import asyncio
+import traceback
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+import httpx
+from fastapi import HTTPException
+
+from queues.redis_queue import current_timestamp_ms
+
+
+def _elapsed_ms(start_ms: int) -> int:
+    return max(0, current_timestamp_ms() - start_ms)
+
+
+def _safe_print(msg: str):
+    try:
+        print(msg, flush=True)
+    except BrokenPipeError:
+        pass
+
+
+def process_llm_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    RQ task: process a queued LLM job and invoke callback.
+    """
+    started_ms = current_timestamp_ms()
+
+    job_id = payload.get("job_id")
+    ttl_seconds = payload.get("ttl_seconds") or 0
+    created_at = payload.get("created_at")
+    callback = payload.get("callback") or {}
+    metadata = payload.get("metadata") or {}
+    callback_type = (callback.get("type") or "").lower()
+    request_body = payload.get("request") or {}
+    trace_id = payload.get("trace_id")
+
+    per_attempt_timeout = (
+        payload.get("request", {}).get("timeouts", {}).get("per_attempt_seconds")
+        or os.getenv("LLM_PROXY_PER_ATTEMPT_TIMEOUT", None)
+    )
+    per_attempt_timeout = float(per_attempt_timeout) if per_attempt_timeout else None
+
+    # Expiry check
+    now_s = time.time()
+    if ttl_seconds and created_at:
+        try:
+            created_s = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            try:
+                created_s = float(created_at)
+            except Exception:
+                created_s = now_s
+        if created_s + ttl_seconds < now_s:
+            return _send_callback(
+                callback,
+                job_id,
+                status="failed",
+                error={"code": "expired", "message": "Job expired before processing"},
+                result=None,
+                timing={"processing_ms": _elapsed_ms(started_ms)},
+                trace_id=trace_id,
+            )
+
+    status = "failed"
+    result = None
+    error: Optional[Dict[str, Any]] = None
+    processing_ms = 0
+
+    _safe_print(f"📦 Payload: {payload}")
+    _safe_print(f"▶️  Starting job_id={job_id} job_type={payload.get('job_type')} model={request_body.get('model')}")
+
+    try:
+        # Direct call via model service if configured, otherwise in-process
+        from models.api_models import ChatCompletionRequest
+        import httpx
+
+        sampling = (request_body.get("sampling") or {})
+        response_format = request_body.get("response_format")
+
+        req_obj = ChatCompletionRequest(
+            model=request_body.get("model"),
+            messages=request_body.get("messages") or [],
+            temperature=sampling.get("temperature", request_body.get("temperature", 0.7)),
+            max_tokens=sampling.get("max_tokens") or request_body.get("max_tokens"),
+            stream=False,
+            response_format=response_format,
+        )
+
+        model_service_url = os.getenv("MODEL_SERVICE_URL")
+        internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
+        if model_service_url:
+            url = model_service_url.rstrip("/") + "/internal/model/chat"
+            headers = {}
+            if internal_token:
+                headers["X-Internal-Token"] = internal_token
+            timeout_s = float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
+            _safe_print(f"🌐 Posting to model service {url} timeout={timeout_s}s job_id={job_id}")
+            with httpx.Client(timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))) as client:
+                resp = client.post(url, json=req_obj.dict(), headers=headers)
+                processing_ms = _elapsed_ms(started_ms)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Model service error {resp.status_code}: {resp.text}")
+                data = resp.json()
+                result = {"content": data.get("content")}
+                status = "succeeded"
+        else:
+            from services.chat_runner import run_chat_completion
+            from main import model_manager
+            resp = asyncio.run(run_chat_completion(model_manager, req_obj, allow_images=False))
+            processing_ms = _elapsed_ms(started_ms)
+            result = {
+                "content": resp.content
+            }
+            status = "succeeded"
+        _safe_print(f"✅ Completed job_id={job_id} status={status} processing_ms={processing_ms}")
+    except HTTPException as he:
+        processing_ms = _elapsed_ms(started_ms)
+        error = {"code": he.detail.get("error", {}).get("type", "llm_error"), "message": str(he.detail)}
+        _safe_print(f"❌ Job failed (HTTPException) job_id={job_id} code={error.get('code')} msg={error.get('message')}")
+    except Exception as exc:
+        processing_ms = _elapsed_ms(started_ms)
+        tb = traceback.format_exc()
+        error = {"code": "exception", "message": str(exc), "traceback": tb}
+        _safe_print(f"❌ Job exception job_id={job_id} error={exc}\n{tb}")
+
+    timing = {"processing_ms": processing_ms}
+    return _send_callback(
+        callback,
+        job_id=job_id,
+        job_type=payload.get("job_type"),
+        status=status,
+        error=error,
+        result=result,
+        timing=timing,
+        trace_id=trace_id,
+        metadata=metadata,
+    )
+
+
+def _build_callback_envelope(
+    job_id: str,
+    job_type: Optional[str],
+    status: str,
+    result: Optional[Dict[str, Any]],
+    error: Optional[Dict[str, Any]],
+    timing: Dict[str, Any],
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "job_type": job_type,
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": status,
+        "result": result,
+        "error": error,
+        "timing": timing,
+        "metadata": metadata,
+    }
+
+
+def _send_callback(
+    callback: Dict[str, Any],
+    job_id: str,
+    job_type: Optional[str],
+    status: str,
+    error: Optional[Dict[str, Any]],
+    result: Optional[Dict[str, Any]],
+    timing: Dict[str, Any],
+    trace_id: Optional[str],
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    cb_type = (callback.get("auth_type") or "").lower()
+    url = callback.get("url")
+    auth_type = callback.get("auth_type")
+    auth_token = callback.get("token")
+    headers = {"Content-Type": "application/json"}
+    if trace_id:
+        headers["X-Trace-Id"] = str(trace_id)
+
+    envelope = _build_callback_envelope(
+        job_id=job_id,
+        job_type=job_type,
+        status=status,
+        result=result,
+        error=error,
+        timing=timing,
+        metadata=metadata,
+    )
+
+    # Dispatch by callback type
+    if cb_type == "internal":
+        # Apply bearer auth if provided
+        if auth_type == "bearer" and auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        # Apply Jarvis app-to-app headers if configured
+        app_id = os.getenv("JARVIS_AUTH_APP_ID")
+        app_key = os.getenv("JARVIS_AUTH_APP_KEY")
+        if app_id and app_key:
+            headers["X-Jarvis-App-Id"] = app_id
+            headers["X-Jarvis-App-Key"] = app_key
+    else:
+        _safe_print(f"⚠️  Callback error: unsupported type '{cb_type}' job_id={job_id}")
+        envelope["callback_status"] = "error"
+        envelope["callback_reason"] = f"unsupported_callback_type:{cb_type}"
+        raise RuntimeError(f"unsupported_callback_type:{cb_type}")
+
+    if not url:
+        _safe_print(f"⚠️  Callback skipped: missing URL job_id={job_id}")
+        envelope["callback_status"] = "skipped"
+        envelope["callback_reason"] = "missing_url"
+        return envelope
+
+    try:
+        _safe_print(f"📬 Posting callback for job_id={job_id} job_type={job_type} to {url}")
+        _safe_print(f"📨 Callback payload job_id={job_id}: {envelope}")
+        with httpx.Client(timeout=float(os.getenv("LLM_PROXY_CALLBACK_TIMEOUT", "10"))) as client:
+            resp = client.post(url, headers=headers, json=envelope)
+            envelope["callback_status"] = resp.status_code
+            envelope["callback_body"] = resp.text[:500]
+            _safe_print(f"📫 Callback response status={resp.status_code} job_id={job_id}")
+            return envelope
+    except Exception as exc:
+        envelope["callback_error"] = str(exc)
+        envelope["callback_error_detail"] = getattr(exc, "args", None)
+        _safe_print(f"⚠️  Callback error job_id={job_id}: {exc} details={getattr(exc, 'args', None)}")
+        return envelope
+
