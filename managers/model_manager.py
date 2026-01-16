@@ -1,6 +1,16 @@
 import os
 from typing import Optional, Dict, Any
 
+
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 class ModelConfig:
     """Configuration for a single model"""
     def __init__(
@@ -49,15 +59,16 @@ class ModelManager:
         lightweight_model_path = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME")
         cloud_model_path = os.getenv("JARVIS_CLOUD_MODEL_NAME")
         vision_model_path = os.getenv("JARVIS_VISION_MODEL_NAME")
+        vision_rest_url = os.getenv("JARVIS_VISION_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))
         main_chat_format = os.getenv("JARVIS_MODEL_CHAT_FORMAT")
         main_stop_tokens = os.getenv("JARVIS_MODEL_STOP_TOKENS")
         lightweight_chat_format = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CHAT_FORMAT")
         lightweight_stop_tokens = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_STOP_TOKENS")
         cloud_chat_format = os.getenv("JARVIS_CLOUD_MODEL_CHAT_FORMAT")
-        main_context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "512"))
-        lightweight_context_window = int(os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", "512"))
-        cloud_context_window = int(os.getenv("JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", "512"))
-        vision_context_window = int(os.getenv("JARVIS_VISION_MODEL_CONTEXT_WINDOW", "131072"))
+        main_context_window = _get_int_env("JARVIS_MODEL_CONTEXT_WINDOW", 512)
+        lightweight_context_window = _get_int_env("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 512)
+        cloud_context_window = _get_int_env("JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 512)
+        vision_context_window = _get_int_env("JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072)
         
         # Check if we should share vLLM models (same name or empty lightweight name/backend)
         should_share_vllm = (
@@ -151,29 +162,36 @@ class ModelManager:
             self.cloud_model_name = resolved_cloud_name
             self.cloud_model = RestClient(cloud_rest_url, resolved_cloud_name, "cloud")
         
-        # Initialize vision model (if configured)
-        if vision_model_backend and vision_model_path:
-            print(f"🔁 Initializing vision model: {vision_model_path}")
+        # Initialize vision model (optional)
+        if vision_model_path or vision_rest_url:
+            if not vision_model_backend:
+                if vision_rest_url:
+                    vision_model_backend = "REST"
+                else:
+                    raise ValueError("JARVIS_VISION_MODEL_BACKEND must be set when JARVIS_VISION_MODEL_NAME is set")
+
+            resolved_vision_name = vision_model_path or "jarvis-vision"
+            print(f"🔁 Initializing vision model: {resolved_vision_name}")
+
             if vision_model_backend == "MOCK":
                 from backends.mock_backend import MockBackend
-                self.vision_model = MockBackend(vision_model_path or "mock-vision")
-                self.vision_model_name = vision_model_path
+                self.vision_model = MockBackend(resolved_vision_name)
+                self.vision_model_name = resolved_vision_name
             elif vision_model_backend in ("MLX", "MLX_VISION"):
                 # Both MLX and MLX_VISION use mlx-vlm for vision models
                 from backends.mlx_vision_backend import MlxVisionClient
-                self.vision_model = MlxVisionClient(vision_model_path)
-                self.vision_model_name = vision_model_path
+                self.vision_model = MlxVisionClient(resolved_vision_name)
+                self.vision_model_name = resolved_vision_name
             elif vision_model_backend == "TRANSFORMERS":
                 from backends.transformers_vision_backend import TransformersVisionClient
-                self.vision_model = TransformersVisionClient(vision_model_path)
-                self.vision_model_name = vision_model_path
+                self.vision_model = TransformersVisionClient(resolved_vision_name)
+                self.vision_model_name = resolved_vision_name
             elif vision_model_backend == "REST":
                 from backends.rest_backend import RestClient
-                rest_url = os.getenv("JARVIS_VISION_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))
-                if not rest_url:
-                    raise ValueError("JARVIS_VISION_REST_MODEL_URL must be set when using REST backend for vision")
-                self.vision_model = RestClient(rest_url, vision_model_path, "vision")
-                self.vision_model_name = vision_model_path
+                if not vision_rest_url:
+                    raise ValueError("JARVIS_VISION_REST_MODEL_URL (or JARVIS_REST_MODEL_URL) must be set when using REST backend for vision")
+                self.vision_model = RestClient(vision_rest_url, resolved_vision_name, "vision")
+                self.vision_model_name = resolved_vision_name
             else:
                 raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', or 'REST'.")
             print(f"✅ Vision model loaded: {self.vision_model_name}")
@@ -301,7 +319,7 @@ class ModelManager:
         if self.vision_model:
             vision_model_id = self.vision_model_name or "jarvis-vision-11b"
             vision_backend = os.getenv("JARVIS_VISION_MODEL_BACKEND", "").upper()
-            vision_context = int(os.getenv("JARVIS_VISION_MODEL_CONTEXT_WINDOW", "131072"))
+            vision_context = _get_int_env("JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072)
             self.registry[vision_model_id] = ModelConfig(
                 model_id=vision_model_id,
                 backend_type=vision_backend,

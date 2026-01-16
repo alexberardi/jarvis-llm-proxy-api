@@ -100,6 +100,17 @@ load_env() {
     fi
 }
 
+# Configure runtime environment for vLLM
+configure_vllm_env() {
+    local using_vllm=false
+    if [[ "${JARVIS_INFERENCE_ENGINE:-}" == "vllm" ]] || [[ "${JARVIS_MODEL_BACKEND:-}" == "VLLM" ]] || [[ "${JARVIS_LIGHTWEIGHT_MODEL_BACKEND:-}" == "VLLM" ]]; then
+        using_vllm=true
+    fi
+    if [[ "$using_vllm" == "true" ]]; then
+        export VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
+    fi
+}
+
 # Install base requirements
 install_base_requirements() {
     echo -e "${BLUE}📦 Installing base requirements${NC}"
@@ -203,18 +214,21 @@ install_llama_cpp() {
 needs_llama_cpp() {
     # llama-cpp-python is needed for:
     # 1. GGUF backend (always)
-    # 2. llama_cpp inference engine (when using other backends)
-    
-    if [[ "${JARVIS_MODEL_BACKEND:-}" == "GGUF" ]] || [[ "${JARVIS_LIGHTWEIGHT_MODEL_BACKEND:-}" == "GGUF" ]]; then
+    # 2. Explicit llama_cpp inference engine
+    local main_backend="${JARVIS_MODEL_BACKEND:-}"
+    local lightweight_backend="${JARVIS_LIGHTWEIGHT_MODEL_BACKEND:-}"
+    local engine="${JARVIS_INFERENCE_ENGINE:-}"
+
+    if [[ "$main_backend" == "GGUF" ]] || [[ "$lightweight_backend" == "GGUF" ]]; then
         echo "true"
         return
     fi
-    
-    if [[ "${JARVIS_INFERENCE_ENGINE:-llama_cpp}" == "llama_cpp" ]]; then
+
+    if [[ "$engine" == "llama_cpp" ]]; then
         echo "true"
         return
     fi
-    
+
     echo "false"
 }
 
@@ -228,8 +242,12 @@ install_conditional_requirements() {
     
     # Check if we need vLLM
     if [[ "${JARVIS_INFERENCE_ENGINE:-}" == "vllm" ]]; then
-        echo -e "${BLUE}📦 Installing vLLM requirements${NC}"
-        "$PIP" install -r requirements-vllm.txt
+        if "$PIP" show vllm >/dev/null 2>&1 && [[ "${FORCE_VLLM_REINSTALL:-}" != "true" ]]; then
+            echo -e "${YELLOW}⏭️  vLLM already installed; skipping requirements-vllm.txt (set FORCE_VLLM_REINSTALL=true to reinstall)${NC}"
+        else
+            echo -e "${BLUE}📦 Installing vLLM requirements${NC}"
+            "$PIP" install -r requirements-vllm.txt
+        fi
     fi
 }
 

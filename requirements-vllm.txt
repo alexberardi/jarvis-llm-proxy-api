@@ -2,9 +2,15 @@
 # Install with: pip install -r requirements-base.txt -r requirements-vllm.txt
 
 # vLLM - High-performance LLM inference engine
-vllm>=0.2.0
+# NOTE: We use GitHub for guided_json support (not yet in PyPI release).
+vllm @ git+https://github.com/vllm-project/vllm.git
+
+# Torch stack aligned with vLLM dev build requirements
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1
+triton==3.5.1
 
 # Additional dependencies for vLLM
-torch>=2.0.0
-transformers>=4.30.0
-xformers  # Optional but recommended for memory efficiency
+transformers>=4.56.0
+# xformers is incompatible with torch 2.9.1 in this setup

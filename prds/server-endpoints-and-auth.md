@@ -88,8 +88,8 @@ Model examples:
 ```
 # Auth
 JARVIS_AUTH_BASE_URL=...              # required for app auth forwarding
-JARVIS_APP_ID=...                     # your app id (outbound, if needed)
-JARVIS_APP_KEY=...                    # your app key (outbound, if needed)
+JARVIS_AUTH_APP_ID=...                # your app id (outbound, if needed)
+JARVIS_AUTH_APP_KEY=...               # your app key (outbound, if needed)
 
 # Backends/models
 JARVIS_MODEL_BACKEND=...

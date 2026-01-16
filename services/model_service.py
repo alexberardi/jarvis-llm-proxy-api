@@ -29,6 +29,8 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     require_internal_token(x_internal_token)
     print(f"[model] ▶️  /internal/model/chat model={req.model} messages={len(req.messages)}")
     result = await run_chat_completion(model_manager, req, allow_images=True)
+    preview = (result.content or "")[:1000]
+    print(f"[model] 🧾 /internal/model/chat response_preview={preview!r}")
     print(f"[model] ✅ /internal/model/chat model={req.model} done")
     return {"content": result.content, "usage": result.usage}
 

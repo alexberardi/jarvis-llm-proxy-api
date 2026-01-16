@@ -55,7 +55,7 @@ app = FastAPI()
 
 # Debug setup - only enable when DEBUG=true
 debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
-skip_debugpy = os.getenv("LLM_PROXY_PROCESS_ROLE", "").lower() == "worker" or os.getenv("JARVIS_DISABLE_DEBUGPY", "false").lower() == "true"
+skip_debugpy = os.getenv("LLM_PROXY_PROCESS_ROLE", "").lower() == "worker"
 debug_port = int(os.getenv("DEBUG_PORT", "5678"))
 if debug_enabled and not skip_debugpy:
     try:
