@@ -17,6 +17,8 @@ echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
 # Setup and configuration
 check_setup
 load_env "$ENV_FILE"
+# Configure runtime env after loading .env
+configure_vllm_env
 # Disable reload unconditionally (overrides any .env ENABLE_RELOAD)
 ENABLE_RELOAD="false"
 

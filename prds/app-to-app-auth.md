@@ -23,7 +23,7 @@ X-Jarvis-App-Key: <your raw key>
 If either is missing/invalid or the app is revoked, you get `401 {"detail": "Missing app credentials"}` or `{"detail": "Invalid app credentials"}`.
 
 ## Environment variables (recommended)
-It is recommended to store your `app_id` and `app_key` as environment variables in your service deployment environment (e.g., `JARVIS_APP_ID`, `JARVIS_APP_KEY`). This keeps secrets out of code and configuration files, and makes rotation and deployment safer and easier. Your HTTP client should read these variables at startup and include them in the headers on every request.
+It is recommended to store your `app_id` and `app_key` as environment variables in your service deployment environment (e.g., `JARVIS_AUTH_APP_ID`, `JARVIS_AUTH_APP_KEY`). This keeps secrets out of code and configuration files, and makes rotation and deployment safer and easier. Your HTTP client should read these variables at startup and include them in the headers on every request.
 
 ## Typical usage
 - Outbound calls from your service to `jarvis-auth` (e.g., token validation, internal endpoints) must include the two headers above.

@@ -305,12 +305,71 @@ def parse_json_response(content: str) -> tuple[str, bool]:
     return content, False
 
 
+def _matches_type(value: Any, schema_type: str) -> bool:
+    if schema_type == "null":
+        return value is None
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return (isinstance(value, int) and not isinstance(value, bool)) or isinstance(value, float)
+    if schema_type == "object":
+        return isinstance(value, dict)
+    if schema_type == "array":
+        return isinstance(value, list)
+    return True
+
+
+def validate_json_schema(value: Any, schema: Dict[str, Any], path: str = "$") -> Optional[str]:
+    if not schema:
+        return None
+
+    schema_type = schema.get("type")
+    if schema_type is not None:
+        if isinstance(schema_type, list):
+            if not any(_matches_type(value, t) for t in schema_type):
+                return f"{path} expected type {schema_type}, got {type(value).__name__}"
+        else:
+            if not _matches_type(value, schema_type):
+                return f"{path} expected type {schema_type}, got {type(value).__name__}"
+
+    if schema_type == "object" or (schema_type is None and isinstance(value, dict)):
+        if not isinstance(value, dict):
+            return f"{path} expected object"
+        required = schema.get("required") or []
+        for key in required:
+            if key not in value:
+                return f"{path}.{key} is required"
+        properties = schema.get("properties") or {}
+        for key, prop_schema in properties.items():
+            if key in value:
+                error = validate_json_schema(value[key], prop_schema, f"{path}.{key}")
+                if error:
+                    return error
+
+    if schema_type == "array" or (schema_type is None and isinstance(value, list)):
+        if not isinstance(value, list):
+            return f"{path} expected array"
+        item_schema = schema.get("items")
+        if item_schema:
+            for idx, item in enumerate(value):
+                error = validate_json_schema(item, item_schema, f"{path}[{idx}]")
+                if error:
+                    return error
+
+    return None
+
+
 async def fix_json_with_retry(
     backend: Any,
     model_config: Any,
     normalized_messages: List[NormalizedMessage],
     params: GenerationParams,
     invalid_content: str,
+    response_schema: Optional[Dict[str, Any]] = None,
     max_retries: int = 1,
 ) -> Optional[str]:
     estimated_output_tokens = len(invalid_content) // 3
@@ -385,6 +444,11 @@ Return the corrected, complete JSON:"""
                 result = ChatResult(content=output, usage=usage)
             fixed_content, is_valid = parse_json_response(result.content)
             if is_valid:
+                if response_schema:
+                    parsed = json.loads(fixed_content)
+                    schema_error = validate_json_schema(parsed, response_schema)
+                    if schema_error:
+                        continue
                 return fixed_content
         except Exception:
             continue
@@ -406,7 +470,7 @@ async def run_chat_completion(
 
     normalized_messages = normalize_messages(req.messages)
 
-    requires_json = False  # JSON enforcement disabled
+    requires_json = False
 
     has_images_flag = has_images(normalized_messages)
     if has_images_flag and not allow_images:
@@ -419,8 +483,15 @@ async def run_chat_completion(
         )
 
     backend = model_config.backend_instance
-    # Disable response_format/grammar handling for now
     response_format_dict = None
+    if req.response_format:
+        response_format_dict = req.response_format.model_dump(exclude_none=True)
+        print(f"🔎 response_format={response_format_dict}")
+        if response_format_dict.get("type") == "json_object":
+            requires_json = True
+
+    if requires_json:
+        normalized_messages = inject_json_system_message(normalized_messages)
 
     params = GenerationParams(
         temperature=req.temperature or 0.7,
@@ -479,6 +550,46 @@ async def run_chat_completion(
                 result = ChatResult(content=output, usage=usage)
 
         final_content = result.content
+
+        if requires_json:
+            response_schema = None
+            if response_format_dict:
+                response_schema = response_format_dict.get("json_schema")
+
+            repaired_content, json_valid = parse_json_response(final_content)
+            schema_error = None
+            if json_valid:
+                if response_schema:
+                    try:
+                        parsed = json.loads(repaired_content)
+                        schema_error = validate_json_schema(parsed, response_schema)
+                    except Exception as e:
+                        schema_error = f"invalid JSON: {e}"
+                    if schema_error:
+                        print(f"⚠️ JSON schema validation failed: {schema_error}")
+                    else:
+                        final_content = repaired_content
+                else:
+                    final_content = repaired_content
+
+            if not json_valid or schema_error:
+                fixed = await fix_json_with_retry(
+                    backend,
+                    model_config,
+                    normalized_messages,
+                    params,
+                    invalid_content=final_content,
+                    response_schema=response_schema,
+                    max_retries=1,
+                )
+                if fixed:
+                    final_content = fixed
+                else:
+                    openai_error(
+                        "invalid_response_error",
+                        "Model returned invalid JSON response.",
+                        500,
+                    )
 
         usage = result.usage
         end_time = time.time()

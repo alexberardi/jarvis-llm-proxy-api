@@ -72,8 +72,8 @@ curl -X POST https://llm-proxy.internal/v1/chat/completions \
 ```python
 import os, requests
 
-APP_ID = os.environ["JARVIS_APP_ID"]
-APP_KEY = os.environ["JARVIS_APP_KEY"]
+APP_ID = os.environ["JARVIS_AUTH_APP_ID"]
+APP_KEY = os.environ["JARVIS_AUTH_APP_KEY"]
 BASE = os.environ.get("LLM_PROXY_URL", "https://llm-proxy.internal")
 
 def chat(messages, model="full"):

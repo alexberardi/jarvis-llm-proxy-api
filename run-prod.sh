@@ -21,6 +21,7 @@ echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
 # Setup and configuration
 check_setup
 load_env "$ENV_FILE"
+configure_vllm_env
 
 # Create virtual environment (production strategy)
 create_venv_prod

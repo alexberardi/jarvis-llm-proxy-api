@@ -7,6 +7,7 @@ except RuntimeError:
     pass
 
 from vllm import LLM, SamplingParams
+import inspect
 import os
 import time
 from typing import List, Dict, Any, Union, Optional
@@ -121,13 +122,19 @@ class VLLMClient:
                     "additionalProperties": True
                 }
         
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            stop=stop_tokens,
-            guided_json=guided_json,  # Add guided JSON if requested
-        )
+        sampling_kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stop": stop_tokens,
+        }
+        if guided_json is not None:
+            supported = "guided_json" in inspect.signature(SamplingParams).parameters
+            if supported:
+                sampling_kwargs["guided_json"] = guided_json
+            else:
+                print("⚠️  vLLM SamplingParams does not support guided_json; ignoring response_format")
+        sampling_params = SamplingParams(**sampling_kwargs)
         
         print(f"🚀 vLLM generating with max_tokens={max_tokens}, temp={temperature}, top_p={top_p}")
         

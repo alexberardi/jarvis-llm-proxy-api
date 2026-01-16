@@ -30,6 +30,7 @@ async def require_app_auth(
     app_ping = jarvis_auth_base.rstrip("/") + "/internal/app-ping"
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         try:
+            print(x_jarvis_app_id, x_jarvis_app_key)
             resp = await client.request(
                 "GET",
                 app_ping,
@@ -52,6 +53,7 @@ async def require_app_auth(
     # Optionally stash calling app in state
     try:
         body = resp.json()
+        print("OK OKAY OKAY")
         request.state.calling_app_id = body.get("app_id")
     except Exception:
         request.state.calling_app_id = None

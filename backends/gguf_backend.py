@@ -428,48 +428,6 @@ class GGUFClient:
                 return ChatResult(content=response_text, usage=usage)
             else:
                 # Use llama.cpp backend
-                # Enable JSON grammar for structured output enforcement
-                # Grammar ensures valid JSON structure at token generation level,
-                # preventing issues like duplicate keys, malformed syntax, etc.
-                # The system message provides schema guidance, while grammar ensures syntax correctness.
-                # Can be disabled via JARVIS_DISABLE_JSON_GRAMMAR=true if causing issues
-                # Note: Qwen3 models have known grammar compatibility issues, so we disable it for them
-                grammar = None
-                grammar_disabled = os.getenv("JARVIS_DISABLE_JSON_GRAMMAR", "false").lower() == "true"
-                
-                # Check if this is a Qwen model (known to have grammar issues with llama.cpp)
-                # Qwen models have reported llama_decode errors and output control problems
-                model_path_lower = self.model_path.lower() if hasattr(self, 'model_path') and self.model_path else ""
-                model_id_lower = ""
-                try:
-                    model_id_lower = model_cfg.model_id.lower() if hasattr(model_cfg, "model_id") and model_cfg.model_id else ""
-                except Exception:
-                    model_id_lower = ""
-                is_qwen = "qwen" in model_path_lower or "qwen" in model_id_lower
-                if is_qwen and not grammar_disabled:
-                    print("⚠️  Qwen model detected - disabling grammar due to known compatibility issues")
-                    print("   (Qwen models have reported llama_decode errors with grammar)")
-                    grammar_disabled = True
-
-                # Global switch: disable grammar by default for JSON enforcement to avoid
-                # runaway generations / truncation; rely on downstream JSON validation +
-                # retry instead. Set JARVIS_ENABLE_JSON_GRAMMAR=true to re-enable.
-                grammar_enabled = os.getenv("JARVIS_ENABLE_JSON_GRAMMAR", "false").lower() == "true"
-                if not grammar_enabled:
-                    grammar_disabled = True
-                    print("⚠️  JSON grammar disabled by default (JARVIS_ENABLE_JSON_GRAMMAR!=true); using validation + retry pipeline")
-                
-                if params.response_format and params.response_format.get("type") == "json_object" and not grammar_disabled:
-                    grammar = self._get_json_grammar()
-                    if grammar is not None:
-                        print("✅ Using JSON grammar for structured output enforcement")
-                    else:
-                        print("⚠️  JSON grammar not available, falling back to system message only")
-                elif grammar_disabled:
-                    print("⚠️  JSON grammar disabled via JARVIS_DISABLE_JSON_GRAMMAR, using system message only")
-                
-                # Call llama.cpp with optional grammar
-                # Note: grammar parameter may not be supported in all versions of llama-cpp-python
                 # Note: llama.cpp's create_chat_completion automatically detects chat format from the model
                 completion_kwargs = {
                     "messages": legacy_messages,  # type: ignore
@@ -483,69 +441,7 @@ class GGUFClient:
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
                 }
-                
-                # Only add grammar if it's available
-                if grammar is not None:
-                    completion_kwargs["grammar"] = grammar
-                
-                # Try calling with grammar, fall back without it if not supported or if it causes errors
-                grammar_failed = False
-                try:
-                    response = self.model.create_chat_completion(**completion_kwargs)
-                except (TypeError, RuntimeError, ValueError) as e:
-                    # Grammar can cause various errors:
-                    # - TypeError: parameter not supported
-                    # - RuntimeError: llama_decode errors (e.g., -3, -1, etc.)
-                    # - ValueError: invalid grammar
-                    error_str = str(e).lower()
-                    error_repr = repr(e).lower()
-                    
-                    # Check if this looks like a grammar-related error
-                    is_grammar_error = (
-                        grammar is not None and (
-                            "grammar" in error_str or 
-                            "llama_decode" in error_str or
-                            "llama_decode" in error_repr or
-                            "decode" in error_str or
-                            "-3" in error_str or
-                            "-3" in error_repr or
-                            "returned -" in error_str or
-                            "returned -" in error_repr
-                        )
-                    )
-                    
-                    if is_grammar_error:
-                        print(f"⚠️  Grammar caused error: {e}")
-                        print("⚠️  Falling back to system message only for JSON enforcement")
-                        grammar_failed = True
-                        # Retry without grammar
-                        completion_kwargs.pop("grammar", None)
-                        try:
-                            response = self.model.create_chat_completion(**completion_kwargs)
-                        except Exception as retry_e:
-                            print(f"❌ Error even without grammar: {retry_e}")
-                            raise
-                    else:
-                        # Not a grammar-related error, re-raise
-                        raise
-                except Exception as e:
-                    # Catch-all for other exceptions - only fall back if grammar was used
-                    if grammar is not None:
-                        error_str = str(e).lower()
-                        # If it's an unexpected error and we're using grammar, try without it
-                        print(f"⚠️  Unexpected error with grammar: {e}")
-                        print("⚠️  Attempting fallback without grammar")
-                        grammar_failed = True
-                        completion_kwargs.pop("grammar", None)
-                        try:
-                            response = self.model.create_chat_completion(**completion_kwargs)
-                        except Exception as retry_e:
-                            # If it still fails, the error is not grammar-related
-                            print(f"❌ Error persists without grammar, re-raising original: {retry_e}")
-                            raise e  # Re-raise original error
-                    else:
-                        # No grammar was used, re-raise
-                        raise
+                response = self.model.create_chat_completion(**completion_kwargs)
                 
                 content = response["choices"][0]["message"]["content"] or ""  # type: ignore
                 usage = response.get("usage", {})  # type: ignore
@@ -553,28 +449,3 @@ class GGUFClient:
                 
                 return ChatResult(content=content, usage=usage)
     
-    def _get_json_grammar(self) -> Optional[Any]:
-        """
-        Get JSON grammar for llama.cpp if supported.
-        Returns None if grammar is not available.
-        """
-        try:
-            from llama_cpp import LlamaGrammar
-            
-            # Create a simple JSON object grammar
-            # This is a basic JSON grammar - can be expanded for more complex schemas
-            json_grammar = r'''
-root ::= object
-object ::= "{" ws ( string ":" ws value ( "," ws string ":" ws value )* )? "}"
-value ::= string | number | object | array | "true" | "false" | "null"
-string ::= "\"" ([^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4}))* "\""
-number ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?
-array ::= "[" ws ( value ( "," ws value )* )? "]"
-ws ::= [ \t\n\r]*
-'''
-            
-            return LlamaGrammar.from_string(json_grammar, verbose=False)
-        except (ImportError, AttributeError, Exception) as e:
-            # Grammar not supported or not available
-            print(f"⚠️  JSON grammar not available: {e}")
-            return None
