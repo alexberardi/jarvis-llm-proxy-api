@@ -151,6 +151,8 @@ except ImportError:
     print('not_installed')
 " 2>/dev/null || echo "not_installed")
     
+    echo -e "${BLUE}🔍 llama-cpp-python build info: ${current_info//$'\n'/, }${NC}"
+    echo -e "${BLUE}🔍 Expected acceleration: ${acceleration_type}${NC}"
     if [[ "$current_info" == *"$acceleration_type"* ]]; then
         echo "false"  # Already installed with correct acceleration
     else

@@ -37,6 +37,7 @@ class GenerationParams:
     max_tokens: Optional[int] = None
     stream: bool = False
     response_format: Optional[dict] = None  # For JSON output: {"type": "json_object"}
+    grammar: Optional[str] = None  # GBNF grammar for constrained generation
 
 
 @dataclass

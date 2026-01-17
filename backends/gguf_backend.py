@@ -441,6 +441,13 @@ class GGUFClient:
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
                 }
+                if params.grammar:
+                    try:
+                        from llama_cpp import LlamaGrammar
+                        completion_kwargs["grammar"] = LlamaGrammar.from_string(params.grammar)
+                        print("🧩 GGUF grammar applied to llama.cpp request")
+                    except Exception as e:
+                        print(f"⚠️ Failed to apply GGUF grammar: {e}")
                 response = self.model.create_chat_completion(**completion_kwargs)
                 
                 content = response["choices"][0]["message"]["content"] or ""  # type: ignore

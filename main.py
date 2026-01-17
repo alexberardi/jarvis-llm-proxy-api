@@ -69,7 +69,6 @@ if debug_enabled and not skip_debugpy:
 print(f"🌐 MODEL_SERVICE_URL={os.getenv('MODEL_SERVICE_URL')}")
 print(f"🔐 MODEL_SERVICE_TOKEN set: {'yes' if os.getenv('MODEL_SERVICE_TOKEN') else 'no'}")
 print(f"🔐 LLM_PROXY_INTERNAL_TOKEN set: {'yes' if os.getenv('LLM_PROXY_INTERNAL_TOKEN') else 'no'}")
-print(f"🔐 JARVIS_AUTH_BASE_URL={os.getenv('JARVIS_AUTH_BASE_URL')}")
 
 # ============================================================================
 # OpenAI-compatible request/response models (imported from models.api_models)
