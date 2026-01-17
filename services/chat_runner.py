@@ -15,6 +15,7 @@ from managers.chat_types import (
     ChatResult,
 )
 from models.api_models import Message, ResponseFormat, ChatCompletionRequest
+from services.json_grammar import schema_to_gbnf
 
 
 # JSON system message to inject when response_format is json_object
@@ -363,6 +364,21 @@ def validate_json_schema(value: Any, schema: Dict[str, Any], path: str = "$") ->
     return None
 
 
+def summarize_json_schema(schema: Optional[Dict[str, Any]]) -> str:
+    if not schema:
+        return ""
+    properties = schema.get("properties") or {}
+    required = schema.get("required") or []
+    prop_types = []
+    for name, prop_schema in properties.items():
+        prop_type = prop_schema.get("type", "any")
+        prop_types.append(f"{name}:{prop_type}")
+    summary = "Required keys: " + ", ".join(required) if required else "Required keys: (none)"
+    if prop_types:
+        summary += "\nAllowed keys: " + ", ".join(prop_types)
+    return summary
+
+
 async def fix_json_with_retry(
     backend: Any,
     model_config: Any,
@@ -382,12 +398,15 @@ async def fix_json_with_retry(
     if is_json_truncated(invalid_content):
         truncation_note = " The response was truncated. Please provide a COMPLETE response."
 
-    correction_text = f"""The previous response was not valid JSON.{truncation_note}
+    schema_hint = summarize_json_schema(response_schema)
+    schema_block = f"\n\nSchema constraints:\n{schema_hint}" if schema_hint else ""
+    correction_text = f"""The previous response was not valid JSON or did not match the required schema.{truncation_note}
 
 Please provide ONLY valid JSON with no explanation text. Ensure:
 - All brackets and braces are properly closed
 - All strings are properly quoted and escaped  
 - The response is complete
+{schema_block}
 
 Previous (truncated/invalid) response preview:
 {invalid_content[:800]}
@@ -412,6 +431,7 @@ Return the corrected, complete JSON:"""
 
     for attempt in range(max_retries):
         try:
+            print(f"⚠️ JSON invalid, retrying ({attempt + 1}/{max_retries})...")
             if hasattr(backend, "generate_text_chat"):
                 if asyncio.iscoroutinefunction(backend.generate_text_chat):
                     result: ChatResult = await backend.generate_text_chat(
@@ -448,6 +468,7 @@ Return the corrected, complete JSON:"""
                     parsed = json.loads(fixed_content)
                     schema_error = validate_json_schema(parsed, response_schema)
                     if schema_error:
+                        print(f"⚠️ JSON schema validation failed on retry: {schema_error}")
                         continue
                 return fixed_content
         except Exception:
@@ -493,11 +514,37 @@ async def run_chat_completion(
     if requires_json:
         normalized_messages = inject_json_system_message(normalized_messages)
 
+    response_schema = None
+    if requires_json and response_format_dict:
+        response_schema = response_format_dict.get("json_schema")
+
+    grammar = None
+    if (
+        response_schema
+        and model_config.backend_type == "GGUF"
+        and hasattr(model_config.backend_instance, "inference_engine")
+        and model_config.backend_instance.inference_engine == "llama_cpp"
+    ):
+        try:
+            grammar = schema_to_gbnf(response_schema)
+            dump_path = os.getenv("JARVIS_DUMP_GBNF_PATH")
+            if dump_path:
+                try:
+                    with open(dump_path, "w", encoding="utf-8") as handle:
+                        handle.write(grammar)
+                    print(f"🧩 GGUF grammar dumped to {dump_path}")
+                except Exception as e:
+                    print(f"⚠️ Failed to dump GGUF grammar: {e}")
+            print("🧩 GGUF JSON grammar enabled for this request")
+        except Exception as e:
+            print(f"⚠️ Failed to build GGUF JSON grammar: {e}")
+
     params = GenerationParams(
         temperature=req.temperature or 0.7,
         max_tokens=req.max_tokens,
         stream=req.stream or False,
         response_format=response_format_dict,
+        grammar=grammar,
     )
 
     try:
@@ -552,10 +599,6 @@ async def run_chat_completion(
         final_content = result.content
 
         if requires_json:
-            response_schema = None
-            if response_format_dict:
-                response_schema = response_format_dict.get("json_schema")
-
             repaired_content, json_valid = parse_json_response(final_content)
             schema_error = None
             if json_valid:
@@ -587,7 +630,7 @@ async def run_chat_completion(
                 else:
                     openai_error(
                         "invalid_response_error",
-                        "Model returned invalid JSON response.",
+                        f"Model returned invalid JSON response. {schema_error or ''}".strip(),
                         500,
                     )
 

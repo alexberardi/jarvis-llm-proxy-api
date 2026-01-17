@@ -76,6 +76,13 @@ class ModelManager:
             (not lightweight_model_backend or lightweight_model_backend == "VLLM") and
             (not lightweight_model_path or lightweight_model_path == main_model_path)
         )
+
+        # Check if we should share GGUF llama.cpp models (same name or empty lightweight name/backend)
+        should_share_gguf = (
+            model_backend == "GGUF" and
+            (not lightweight_model_backend or lightweight_model_backend == "GGUF") and
+            (not lightweight_model_path or lightweight_model_path == main_model_path)
+        )
         
         if should_share_vllm:
             print(f"🔄 vLLM Memory Optimization: Using shared model instance")
@@ -85,6 +92,16 @@ class ModelManager:
                 print(f"   → Lightweight model name empty, using main: {main_model_path}")
             else:
                 print(f"   → Identical model names detected: {main_model_path}")
+            print(f"   → Memory savings: ~50% (single model instance)")
+
+        if should_share_gguf:
+            print(f"🔄 GGUF Memory Optimization: Using shared llama.cpp instance")
+            if not lightweight_model_backend:
+                print(f"   → Lightweight backend empty, defaulting to shared GGUF: {main_model_path}")
+            elif not lightweight_model_path:
+                print(f"   → Lightweight model name empty, using main: {main_model_path}")
+            else:
+                print(f"   → Identical model paths detected: {main_model_path}")
             print(f"   → Memory savings: ~50% (single model instance)")
         
         # Initialize main model
@@ -115,11 +132,17 @@ class ModelManager:
         else:
             raise ValueError("Unsupported MODEL_BACKEND. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
 
-        # Initialize lightweight model
+        # Initialize lightweight model (optional)
         if should_share_vllm:
             # Share the main vLLM model instance to save memory
             self.lightweight_model = self.main_model
             print(f"✅ Lightweight model sharing main vLLM instance")
+        elif should_share_gguf:
+            # Share the main GGUF model instance to save memory
+            self.lightweight_model = self.main_model
+            print(f"✅ Lightweight model sharing main GGUF instance")
+        elif not lightweight_model_backend and not lightweight_model_path:
+            print("ℹ️  Lightweight model not configured; skipping.")
         elif lightweight_model_backend == "MOCK":
             from backends.mock_backend import MockBackend
             self.lightweight_model = MockBackend(lightweight_model_path or "mock-lightweight")
@@ -146,9 +169,8 @@ class ModelManager:
             # self.lightweight_model = OllamaClient()
         else:
             if not lightweight_model_backend:
-                raise ValueError("JARVIS_LIGHTWEIGHT_MODEL_BACKEND must be set when not using vLLM model sharing. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
-            else:
-                raise ValueError(f"Unsupported LIGHTWEIGHT_MODEL_BACKEND '{lightweight_model_backend}'. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
+                raise ValueError("JARVIS_LIGHTWEIGHT_MODEL_BACKEND must be set when JARVIS_LIGHTWEIGHT_MODEL_NAME is provided. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
+            raise ValueError(f"Unsupported LIGHTWEIGHT_MODEL_BACKEND '{lightweight_model_backend}'. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
 
         # Initialize cloud model (REST-backed)
         cloud_rest_url = os.getenv("JARVIS_CLOUD_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))

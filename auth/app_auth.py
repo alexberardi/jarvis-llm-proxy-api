@@ -23,14 +23,12 @@ async def require_app_auth(
         raise HTTPException(status_code=401, detail="Missing app credentials")
 
     jarvis_auth_base = os.getenv("JARVIS_AUTH_BASE_URL")
-    print(jarvis_auth_base)
     if not jarvis_auth_base:
         raise HTTPException(status_code=500, detail="JARVIS_AUTH_BASE_URL not configured")
 
     app_ping = jarvis_auth_base.rstrip("/") + "/internal/app-ping"
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         try:
-            print(x_jarvis_app_id, x_jarvis_app_key)
             resp = await client.request(
                 "GET",
                 app_ping,
@@ -53,7 +51,6 @@ async def require_app_auth(
     # Optionally stash calling app in state
     try:
         body = resp.json()
-        print("OK OKAY OKAY")
         request.state.calling_app_id = body.get("app_id")
     except Exception:
         request.state.calling_app_id = None
