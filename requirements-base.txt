@@ -12,6 +12,10 @@ num2words
 Pillow
 redis>=5.0.0
 rq>=1.15.1
+psutil>=5.9.0  # For process management (vLLM cleanup)
+sqlalchemy>=2.0.23
+alembic>=1.12.1
+psycopg2-binary>=2.9.9
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python (with appropriate acceleration)

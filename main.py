@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Union, Any
 import os
+import subprocess
 import time
 import uuid
 import asyncio
@@ -25,6 +26,7 @@ from managers.chat_types import (
     GenerationParams,
     ChatResult,
 )
+from managers.model_manager import ModelManager
 from models.api_models import (
     ImageUrl,
     ContentPart,
@@ -48,6 +50,7 @@ from queues.redis_queue import (
 )
 
 from auth.app_auth import require_app_auth
+from services.date_keys import get_date_keys_response, is_adapter_trained
 
 load_dotenv()
 
@@ -61,9 +64,28 @@ if debug_enabled and not skip_debugpy:
     try:
         import debugpy
         debugpy.listen(("0.0.0.0", debug_port))
-        print(f"🐛 Debugger listening on port {debug_port}")
+        print(f"Debugger listening on port {debug_port}")
     except ImportError:
-        print("❌ debugpy is not installed, but DEBUG is set to true")
+        print("debugpy is not installed, but DEBUG is set to true")
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"Debug port {debug_port} in use, attempting to free it...")
+            try:
+                subprocess.run(
+                    f"lsof -ti:{debug_port} | xargs kill -9",
+                    shell=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                time.sleep(0.5)
+                debugpy.listen(("0.0.0.0", debug_port))
+                print(f"Debugger listening on port {debug_port} (after clearing)")
+            except Exception as retry_err:
+                print(f"Could not start debugger after retry: {retry_err}")
+        else:
+            print(f"Could not start debugger on port {debug_port}: {e}")
+    except Exception as e:
+        print(f"Could not start debugger on port {debug_port}: {e}")
 
 # Log critical endpoint configs for visibility
 print(f"🌐 MODEL_SERVICE_URL={os.getenv('MODEL_SERVICE_URL')}")
@@ -113,6 +135,14 @@ class QueueRequest(BaseModel):
     timeouts: Optional[TimeoutSettings] = None
 
 
+class AdapterTrainRequest(BaseModel):
+    node_id: str
+    base_model_id: str
+    dataset_ref: dict
+    dataset_hash: Optional[str] = None
+    params: Optional[dict] = None
+
+
 class EnqueueRequest(BaseModel):
     job_id: str
     job_type: str
@@ -123,7 +153,7 @@ class EnqueueRequest(BaseModel):
     job_type_version: str = "v1"
     ttl_seconds: int = 86400
     metadata: Optional[dict] = None
-    request: QueueRequest
+    request: dict
     callback: CallbackInfo
 
 
@@ -354,6 +384,16 @@ def has_images(messages: List[NormalizedMessage]) -> bool:
         for part in msg.content:
             if isinstance(part, ImagePart):
                 return True
+    return False
+
+
+def request_has_images(messages: List[Message]) -> bool:
+    """Check if any raw request message contains image content."""
+    for msg in messages:
+        if isinstance(msg.content, list):
+            for part in msg.content:
+                if part.type == "image_url":
+                    return True
     return False
 
 
@@ -1176,6 +1216,7 @@ def create_openai_response(
     content: str,
     model_name: str,
     usage: Optional[Dict] = None,
+    date_keys: Optional[List[str]] = None,
 ) -> ChatCompletionResponse:
     """Create an OpenAI-style chat completion response"""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
@@ -1196,6 +1237,7 @@ def create_openai_response(
             )
         ],
         usage=Usage(**usage),
+        date_keys=date_keys,
     )
 
 
@@ -1221,12 +1263,22 @@ def openai_error(error_type: str, message: str, status_code: int = 400):
 async def chat_completions(req: ChatCompletionRequest):
     """
     OpenAI-compatible chat completions endpoint.
-    
+
     Supports:
     - Text-only messages (string content)
     - Multimodal messages (structured content with text + images)
     - Model selection via model field (supports aliases: full, lightweight, vision, cloud)
     """
+    # Validate: reject images for non-vision models early
+    if request_has_images(req.messages):
+        model_manager = ModelManager()
+        model_config = model_manager.get_model_config(req.model)
+        if not model_config.supports_images:
+            openai_error(
+                "invalid_request_error",
+                f"Model '{req.model}' does not support images. Use a vision-capable model instead.",
+            )
+
     try:
         model_service_url = os.getenv("MODEL_SERVICE_URL")
         internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
@@ -1237,15 +1289,20 @@ async def chat_completions(req: ChatCompletionRequest):
         headers = {}
         if internal_token:
             headers["X-Internal-Token"] = internal_token
-        async with httpx.AsyncClient(timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))) as client:
+        # Use longer timeout for requests with date context (model loading can take time)
+        base_timeout = float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
+        timeout = base_timeout + 60 if req.include_date_context else base_timeout
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=req.dict(), headers=headers)
             if resp.status_code != 200:
                 openai_error("internal_server_error", f"Model service error {resp.status_code}: {resp.text}", 500)
             data = resp.json()
             content = data.get("content")
             usage = data.get("usage")
+            date_keys = data.get("date_keys")  # Jarvis extension
             model_name = req.model
-            return create_openai_response(content=content, model_name=model_name, usage=usage)
+            return create_openai_response(content=content, model_name=model_name, usage=usage, date_keys=date_keys)
     except HTTPException:
         raise
     except Exception as e:
@@ -1253,12 +1310,6 @@ async def chat_completions(req: ChatCompletionRequest):
         import traceback
         traceback.print_exc()
         openai_error("internal_server_error", f"Internal error: {str(e)}", 500)
-
-
-def _require_internal_token(token: Optional[str]):
-    expected = os.getenv("LLM_PROXY_INTERNAL_TOKEN")
-    if expected and token != expected:
-        raise HTTPException(status_code=401, detail={"error": {"type": "unauthorized", "message": "Invalid internal token", "code": "unauthorized"}})
 
 
 def _parse_created_at(ts: str) -> float:
@@ -1272,19 +1323,36 @@ def _parse_created_at(ts: str) -> float:
 
 
 @app.post("/internal/queue/enqueue", response_model=EnqueueResponse, dependencies=[Depends(require_app_auth)])
-async def enqueue_job_endpoint(req: EnqueueRequest, request: Request, x_internal_token: Optional[str] = Header(default=None)):
+async def enqueue_job_endpoint(req: EnqueueRequest, request: Request):
     """
     Enqueue a job for asynchronous LLM processing.
     """
-    _require_internal_token(x_internal_token)
-
-    # Basic validation for schema requirement
-    if req.request.response_format and req.request.response_format.type == "json_object":
-        if req.request.response_format.json_schema is None:
+    job_type = (req.job_type or "").lower()
+    if job_type == "adapter_train":
+        # Validate adapter training payload
+        try:
+            AdapterTrainRequest(**(req.request or {}))
+        except Exception as e:
             raise HTTPException(
                 status_code=400,
-                detail={"error": {"type": "invalid_request_error", "message": "json_schema required when response_format.type=json_object", "code": "missing_schema"}},
+                detail={"error": {"type": "invalid_request_error", "message": f"Invalid adapter_train request: {e}", "code": "invalid_adapter_request"}},
             )
+    else:
+        # Validate standard LLM request payload
+        try:
+            llm_request = QueueRequest(**(req.request or {}))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"type": "invalid_request_error", "message": f"Invalid request: {e}", "code": "invalid_request"}},
+            )
+        # Basic validation for schema requirement
+        if llm_request.response_format and llm_request.response_format.type == "json_object":
+            if llm_request.response_format.json_schema is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": {"type": "invalid_request_error", "message": "json_schema required when response_format.type=json_object", "code": "missing_schema"}},
+                )
 
     now = time.time()
     created_ts = _parse_created_at(req.created_at)
@@ -1345,6 +1413,24 @@ async def list_models():
         return ModelListResponse(object="list", data=models)
 
 
+@app.get("/v1/adapters/date-keys")
+async def get_date_keys():
+    """
+    Get the vocabulary of supported date keys.
+    
+    This endpoint returns all semantic date keys that the date extraction
+    adapter can recognize and output. Consumers use this to:
+    - Validate their date context dictionary coverage
+    - Generate client-side constants
+    - Stay in sync with supported keys
+    
+    This endpoint is unauthenticated - it only exposes vocabulary, no sensitive data.
+    """
+    response = get_date_keys_response()
+    response["adapter_trained"] = is_adapter_trained()
+    return response
+
+
 @app.get("/v1/health")
 async def health():
     """Health proxy to model service"""
@@ -1363,6 +1449,49 @@ async def health():
             return {"status": "degraded", "reason": f"Model service error {resp.status_code}", "body": resp.text[:200]}
         data = resp.json()
         return {"status": "healthy", "model_service": data}
+
+
+@app.get("/v1/training/status/{job_id}")
+async def get_training_status(job_id: str):
+    """Get training job status by job_id or dataset_hash.
+
+    Args:
+        job_id: Either the job_id or dataset_hash to look up
+
+    Returns:
+        Training job status information
+    """
+    try:
+        from db.session import SessionLocal
+        from db.models import TrainingJob
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Database module not available: {e}")
+
+    db = SessionLocal()
+    try:
+        # Query by job_id or dataset_hash
+        job = db.query(TrainingJob).filter(
+            (TrainingJob.job_id == job_id) | (TrainingJob.dataset_hash == job_id)
+        ).first()
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Training job not found")
+
+        return {
+            "job_id": job.job_id,
+            "dataset_hash": job.dataset_hash,
+            "node_id": job.node_id,
+            "base_model_id": job.base_model_id,
+            "status": job.status,
+            "progress_pct": job.progress_pct,
+            "artifact_path": job.artifact_path,
+            "error_message": job.error_message,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        }
+    finally:
+        db.close()
 
 
 # Legacy routes removed per PRD:
