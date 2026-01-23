@@ -1,14 +1,219 @@
 import os
 import time
+from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
 from .power_metrics import PowerMetrics
 import threading
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
 
+
+class GGUFAdapterNotSupportedError(RuntimeError):
+    """Raised when GGUF LoRA adapter is configured but not currently supported."""
+    pass
+
+
+# =============================================================================
+# ORPHANED CODE: llama.cpp Per-Request Adapter Loading
+# =============================================================================
+#
+# THIS CODE WILL NOT WORK UNTIL LLAMA.CPP FIXES THEIR SCHEDULER BUG
+#
+# Bug: GGML_ASSERT(hash_set.size == hash_set.keys.size) in ggml-backend.c
+# Status: Open as of January 2025
+# Tracking: https://github.com/ggerganov/llama.cpp/issues/7742
+# Related: https://github.com/ggerganov/llama.cpp/issues/4485
+#
+# The llama.cpp scheduler has a bug that causes assertions to fail when
+# using LoRA adapters with certain model/adapter combinations. This happens
+# during the graph scheduling phase when the hash_set size doesn't match
+# the number of keys.
+#
+# When this bug is fixed upstream, uncomment and integrate this code into
+# GGUFClient to enable per-request adapter swapping similar to vLLM.
+#
+# Expected API (llama-cpp-python):
+#   from llama_cpp import Llama
+#
+#   # Initialize with LoRA support
+#   llm = Llama(
+#       model_path="model.gguf",
+#       lora_path="adapter.gguf",  # Optional initial adapter
+#       lora_scale=1.0,
+#   )
+#
+#   # Per-request adapter loading (DOES NOT WORK YET)
+#   # The llama_cpp.Llama class would need to expose methods like:
+#   # llm.load_lora_adapter(path, scale=1.0)
+#   # llm.unload_lora_adapter()
+#
+# =============================================================================
+
+class _GGUFAdapterManager:
+    """
+    ORPHANED: Per-request adapter manager for llama.cpp / GGUF models.
+
+    THIS CLASS IS NOT FUNCTIONAL due to upstream llama.cpp bug.
+    See: https://github.com/ggerganov/llama.cpp/issues/7742
+
+    When the bug is fixed, this class can be used to manage adapter loading:
+
+    Usage (future):
+        manager = _GGUFAdapterManager(llama_model)
+        manager.load_adapter("/path/to/adapter.gguf")
+        response = llama_model.create_chat_completion(...)
+        manager.unload_adapter()
+    """
+
+    def __init__(self, model: Any):
+        """
+        Initialize adapter manager.
+
+        Args:
+            model: A llama_cpp.Llama instance
+        """
+        self._model = model
+        self._current_adapter_path: Optional[str] = None
+        self._adapter_loaded: bool = False
+
+    def load_adapter(self, adapter_path: str, scale: float = 1.0) -> bool:
+        """
+        Load a LoRA adapter for subsequent inference calls.
+
+        THIS METHOD DOES NOT WORK due to llama.cpp scheduler bug.
+        See: https://github.com/ggerganov/llama.cpp/issues/7742
+
+        Args:
+            adapter_path: Path to .gguf adapter file
+            scale: LoRA scaling factor (default 1.0)
+
+        Returns:
+            True if adapter loaded successfully, False otherwise
+
+        Raises:
+            GGUFAdapterNotSupportedError: Always, until bug is fixed
+        """
+        raise GGUFAdapterNotSupportedError(
+            "llama.cpp LoRA adapters are disabled due to upstream scheduler bug. "
+            "Track fix at: https://github.com/ggerganov/llama.cpp/issues/7742"
+        )
+
+        # --- ORPHANED IMPLEMENTATION (uncomment when bug is fixed) ---
+        #
+        # if self._current_adapter_path == adapter_path:
+        #     print(f"🧩 GGUF adapter already loaded: {adapter_path}")
+        #     return True
+        #
+        # adapter_file = Path(adapter_path)
+        # if not adapter_file.exists():
+        #     print(f"⚠️  GGUF adapter not found: {adapter_path}")
+        #     return False
+        #
+        # if adapter_file.suffix.lower() != ".gguf":
+        #     print(f"⚠️  GGUF adapter must be .gguf file: {adapter_path}")
+        #     return False
+        #
+        # try:
+        #     # Unload current adapter if any
+        #     if self._adapter_loaded:
+        #         self.unload_adapter()
+        #
+        #     print(f"🧩 GGUF loading adapter: {adapter_path} (scale={scale})")
+        #     start_time = time.time()
+        #
+        #     # llama-cpp-python API for loading adapters
+        #     # Note: This requires llama-cpp-python built with LoRA support
+        #     # and the underlying llama.cpp scheduler bug to be fixed
+        #     self._model.load_lora_adapter(adapter_path, scale=scale)
+        #
+        #     self._current_adapter_path = adapter_path
+        #     self._adapter_loaded = True
+        #
+        #     elapsed = time.time() - start_time
+        #     print(f"✅ GGUF adapter loaded in {elapsed:.2f}s")
+        #     return True
+        #
+        # except AttributeError as e:
+        #     print(f"⚠️  llama-cpp-python doesn't support load_lora_adapter: {e}")
+        #     print("    This feature requires llama-cpp-python >= X.X.X")
+        #     return False
+        # except Exception as e:
+        #     print(f"⚠️  GGUF adapter load failed: {e}")
+        #     return False
+
+    def unload_adapter(self) -> bool:
+        """
+        Unload current LoRA adapter, reverting to base model.
+
+        THIS METHOD DOES NOT WORK due to llama.cpp scheduler bug.
+        See: https://github.com/ggerganov/llama.cpp/issues/7742
+
+        Returns:
+            True if adapter unloaded successfully, False otherwise
+        """
+        if not self._adapter_loaded:
+            print("🧩 GGUF no adapter to unload (base model)")
+            return True
+
+        raise GGUFAdapterNotSupportedError(
+            "llama.cpp LoRA adapters are disabled due to upstream scheduler bug. "
+            "Track fix at: https://github.com/ggerganov/llama.cpp/issues/7742"
+        )
+
+        # --- ORPHANED IMPLEMENTATION (uncomment when bug is fixed) ---
+        #
+        # try:
+        #     print("🧩 GGUF unloading adapter, reverting to base model...")
+        #     start_time = time.time()
+        #
+        #     self._model.unload_lora_adapter()
+        #
+        #     self._current_adapter_path = None
+        #     self._adapter_loaded = False
+        #
+        #     elapsed = time.time() - start_time
+        #     print(f"✅ GGUF adapter unloaded in {elapsed:.2f}s")
+        #     return True
+        #
+        # except AttributeError as e:
+        #     print(f"⚠️  llama-cpp-python doesn't support unload_lora_adapter: {e}")
+        #     return False
+        # except Exception as e:
+        #     print(f"⚠️  GGUF adapter unload failed: {e}")
+        #     return False
+
+    def get_current_adapter(self) -> Optional[str]:
+        """Return the currently loaded adapter path, or None if base model."""
+        return self._current_adapter_path
+
+    @property
+    def is_adapter_loaded(self) -> bool:
+        """Check if an adapter is currently loaded."""
+        return self._adapter_loaded
+
+
+# =============================================================================
+# END ORPHANED CODE
+# =============================================================================
+
+
 class GGUFClient:
     def __init__(self, model_path: str, chat_format: str, stop_tokens: List[str] = None, context_window: int = None):
         if not model_path:
             raise ValueError("Model path is required")
+        
+        # ----------------------------------------------------------------
+        # GGUF LoRA adapters are currently disabled due to a llama.cpp
+        # scheduler bug (GGML_ASSERT hash_set.size). If an adapter path
+        # is configured, raise an error directing users to vLLM/Transformers.
+        # ----------------------------------------------------------------
+        adapter_path_env = os.getenv("JARVIS_ADAPTER_PATH", "").strip()
+        if adapter_path_env:
+            raise GGUFAdapterNotSupportedError(
+                "GGUF LoRA adapters are currently not supported due to a llama.cpp "
+                "runtime bug (scheduler hash_set assert). Please use the vLLM or "
+                "Transformers backend for adapter-enabled inference. "
+                "To use the GGUF backend without adapters, unset JARVIS_ADAPTER_PATH."
+            )
         
         # Store model name for unload functionality
         self.model_name = model_path
@@ -45,6 +250,7 @@ class GGUFClient:
         # LLaMA.cpp optimization parameters
         n_batch = int(os.getenv("JARVIS_N_BATCH", "512"))
         n_ubatch = int(os.getenv("JARVIS_N_UBATCH", "512"))
+        self.flash_attn = os.getenv("JARVIS_FLASH_ATTN", "true").lower() == "true"
         rope_scaling_type = int(os.getenv("JARVIS_ROPE_SCALING_TYPE", "0"))
         mul_mat_q = os.getenv("JARVIS_MUL_MAT_Q", "true").lower() == "true"
         f16_kv = os.getenv("JARVIS_F16_KV", "true").lower() == "true"
@@ -63,6 +269,9 @@ class GGUFClient:
         # Check inference engine preference
         inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "llama_cpp").lower()
         
+        # GGUF LoRA is disabled - no adapter loading
+        self.lora_path = None
+
         print(f"🔍 Debug: Inference engine: {inference_engine}")
         print(f"🔍 Debug: Model path: {model_path}")
         print(f"🔍 Debug: Chat format: {chat_format}")
@@ -112,7 +321,7 @@ class GGUFClient:
         print(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
         print(f"🔍 Debug: Loading model with n_gpu_layers={n_gpu_layers}")
         
-        # Stable initialization with llama-cpp-python
+        # Stable initialization with llama-cpp-python (no LoRA - disabled)
         self.model = Llama(
             model_path=model_path,
             n_threads=n_threads,
@@ -125,6 +334,7 @@ class GGUFClient:
             rope_scaling_type=rope_scaling_type,  # Use configurable RoPE scaling
             mul_mat_q=mul_mat_q,  # Use configurable matrix multiplication
             f16_kv=f16_kv,  # Use configurable F16 KV cache
+            flash_attn=self.flash_attn,
         )
         self.backend = self
         self.inference_engine = "llama_cpp"

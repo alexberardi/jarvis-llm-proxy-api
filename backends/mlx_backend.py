@@ -1,6 +1,7 @@
 import io
 import time
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 from mlx_lm.generate import generate
@@ -9,13 +10,135 @@ from mlx_lm.utils import load
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
 
+
 class MlxClient:
-    def __init__(self, model_path: str):
+    """MLX backend with optional per-request LoRA adapter support.
+
+    Adapter Loading:
+        MLX-LM supports LoRA adapters via the load() function's adapter_path parameter.
+        Adapters can be swapped dynamically using load_adapters() and removed with
+        remove_lora_layers().
+
+    Per-Request Adapter Swapping:
+        Unlike vLLM which has native per-request LoRARequest support, MLX requires
+        calling load_adapters(model, adapter_path) to switch adapters. This modifies
+        the model in-place by loading new weights.
+
+        The workflow is:
+        1. Load base model once at init
+        2. For each request with adapter_settings.hash:
+           - If hash differs from current, call load_adapters()
+           - If no adapter requested, call remove_lora_layers()
+        3. Run generation
+
+    References:
+        - https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/LORA.md
+        - https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/tuner/utils.py
+    """
+
+    def __init__(self, model_path: str, adapter_path: Optional[str] = None):
         print("🔁 Loading MLX model...")
         self.model_name = model_path
         self.model_path = model_path
-        self.model, self.tokenizer = load(model_path)
+        self._current_adapter_path: Optional[str] = None
+        self._lora_layers_applied: bool = False
         self.last_usage = None
+
+        # Load model with optional initial adapter
+        if adapter_path:
+            print(f"🧩 Loading MLX model with adapter: {adapter_path}")
+            self.model, self.tokenizer = load(model_path, adapter_path=adapter_path)
+            self._current_adapter_path = adapter_path
+            self._lora_layers_applied = True
+        else:
+            self.model, self.tokenizer = load(model_path)
+
+    def load_adapter(self, adapter_path: str) -> None:
+        """Load or swap a LoRA adapter dynamically.
+
+        This method supports per-request adapter swapping for MLX models.
+        It handles three cases:
+        1. Same adapter already loaded: no-op
+        2. Different adapter requested: load new adapter weights
+        3. First adapter on base model: apply LoRA layers + load weights
+
+        Args:
+            adapter_path: Path to adapter directory containing adapters.safetensors
+                         and adapter_config.json
+
+        Note:
+            The adapter directory must contain:
+            - adapters.safetensors: The adapter weights
+            - adapter_config.json: LoRA configuration (num_layers, rank, etc.)
+
+            If adapter_config.json is missing, you may need to create it:
+            {
+                "num_layers": 16,
+                "rank": 8,
+                "alpha": 16,
+                "dropout": 0.0,
+                "scale": 2.0
+            }
+        """
+        if self._current_adapter_path == adapter_path:
+            print(f"🧩 MLX adapter already loaded: {adapter_path}")
+            return
+
+        try:
+            from mlx_lm.tuner.utils import load_adapters
+
+            print(f"🧩 MLX loading adapter: {adapter_path}")
+            start_time = time.time()
+
+            # load_adapters modifies model in-place and returns it
+            self.model = load_adapters(self.model, adapter_path)
+            self._current_adapter_path = adapter_path
+            self._lora_layers_applied = True
+
+            elapsed = time.time() - start_time
+            print(f"✅ MLX adapter loaded in {elapsed:.2f}s")
+
+        except ImportError as e:
+            print(f"⚠️  MLX LoRA tuner not available: {e}")
+            print("    Install with: pip install mlx-lm[lora]")
+        except FileNotFoundError as e:
+            print(f"⚠️  MLX adapter files not found: {e}")
+            print(f"    Expected: {adapter_path}/adapters.safetensors")
+            print(f"    And:      {adapter_path}/adapter_config.json")
+        except Exception as e:
+            print(f"⚠️  MLX adapter load failed: {e}")
+
+    def remove_adapter(self) -> None:
+        """Remove LoRA adapter and revert to base model.
+
+        This is useful when a request explicitly wants the base model
+        without any adapter applied.
+        """
+        if not self._lora_layers_applied:
+            print("🧩 MLX no adapter to remove (base model)")
+            return
+
+        try:
+            from mlx_lm.tuner.utils import remove_lora_layers
+
+            print("🧩 MLX removing adapter, reverting to base model...")
+            start_time = time.time()
+
+            self.model = remove_lora_layers(self.model)
+            self._current_adapter_path = None
+            self._lora_layers_applied = False
+
+            elapsed = time.time() - start_time
+            print(f"✅ MLX adapter removed in {elapsed:.2f}s")
+
+        except ImportError as e:
+            print(f"⚠️  MLX LoRA tuner not available: {e}")
+        except Exception as e:
+            print(f"⚠️  MLX adapter removal failed: {e}")
+
+    def get_current_adapter(self) -> Optional[str]:
+        """Return the currently loaded adapter path, or None if base model."""
+        return self._current_adapter_path
 
     def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""
@@ -101,6 +224,17 @@ class MlxClient:
         messages: List[NormalizedMessage],
         params: GenerationParams,
     ) -> ChatResult:
+        # Log adapter settings (Phase 1b: no-op, just logging)
+        # Phase 1e will actually call self.load_adapter() here
+        if params.adapter_settings:
+            adapter_hash = params.adapter_settings.get("hash", "unknown")
+            adapter_scale = params.adapter_settings.get("scale", 1.0)
+            print(f"🧩 [MLX] Adapter requested: hash={adapter_hash}, scale={adapter_scale}")
+            print(f"🧩 [MLX] TODO: Per-request adapter loading not yet implemented")
+            # Future implementation:
+            # adapter_path = resolve_adapter_from_hash(adapter_hash)
+            # self.load_adapter(adapter_path)
+
         formatted = self._to_dict_messages(messages)
         content = self.chat_with_temperature(formatted, params.temperature)
         return ChatResult(content=content, usage=self.last_usage)

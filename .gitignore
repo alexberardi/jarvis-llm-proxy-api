@@ -268,3 +268,7 @@ credentials.json # Setup configuration (contains local paths and hardware info)
 # Production environment files
 prod.env
 *.env
+adapters/
+storage/
+spike_*.json
+tools/

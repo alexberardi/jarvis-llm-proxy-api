@@ -26,6 +26,13 @@ def process_llm_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     RQ task: process a queued LLM job and invoke callback.
     """
+    job_type = (payload.get("job_type") or "").lower()
+    if job_type == "adapter_train":
+        return _process_adapter_train_job(payload)
+    return _process_chat_job(payload)
+
+
+def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     started_ms = current_timestamp_ms()
 
     job_id = payload.get("job_id")
@@ -33,7 +40,6 @@ def process_llm_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     created_at = payload.get("created_at")
     callback = payload.get("callback") or {}
     metadata = payload.get("metadata") or {}
-    callback_type = (callback.get("type") or "").lower()
     request_body = payload.get("request") or {}
     trace_id = payload.get("trace_id")
 
@@ -140,6 +146,72 @@ def process_llm_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _process_adapter_train_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    started_ms = current_timestamp_ms()
+    job_id = payload.get("job_id")
+    ttl_seconds = payload.get("ttl_seconds") or 0
+    created_at = payload.get("created_at")
+    callback = payload.get("callback") or {}
+    metadata = payload.get("metadata") or {}
+    request_body = payload.get("request") or {}
+    trace_id = payload.get("trace_id")
+
+    # Expiry check
+    now_s = time.time()
+    if ttl_seconds and created_at:
+        try:
+            created_s = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            try:
+                created_s = float(created_at)
+            except Exception:
+                created_s = now_s
+        if created_s + ttl_seconds < now_s:
+            return _send_callback(
+                callback,
+                job_id,
+                status="failed",
+                error={"code": "expired", "message": "Job expired before processing"},
+                result=None,
+                timing={"processing_ms": _elapsed_ms(started_ms)},
+                trace_id=trace_id,
+            )
+
+    status = "failed"
+    result = None
+    error: Optional[Dict[str, Any]] = None
+    processing_ms = 0
+
+    _safe_print(f"📦 Payload: {payload}")
+    _safe_print(f"▶️  Starting job_id={job_id} job_type=adapter_train node_id={request_body.get('node_id')}")
+
+    try:
+        from services.adapter_training import run_adapter_training
+
+        result = run_adapter_training(request_body, job_id=job_id, ttl_seconds=ttl_seconds)
+        processing_ms = _elapsed_ms(started_ms)
+        status = "succeeded"
+        _safe_print(f"✅ Completed job_id={job_id} status={status} processing_ms={processing_ms}")
+    except Exception as exc:
+        processing_ms = _elapsed_ms(started_ms)
+        tb = traceback.format_exc()
+        error = {"code": "exception", "message": str(exc), "traceback": tb}
+        _safe_print(f"❌ Job exception job_id={job_id} error={exc}\n{tb}")
+
+    timing = {"processing_ms": processing_ms}
+    return _send_callback(
+        callback,
+        job_id=job_id,
+        job_type=payload.get("job_type"),
+        status=status,
+        error=error,
+        result=result,
+        timing=timing,
+        trace_id=trace_id,
+        metadata=metadata,
+    )
+
+
 def _build_callback_envelope(
     job_id: str,
     job_type: Optional[str],
@@ -173,6 +245,8 @@ def _send_callback(
     metadata: Dict[str, Any],
 ) -> Dict[str, Any]:
     cb_type = (callback.get("auth_type") or "").lower()
+    if not cb_type:
+        cb_type = "internal"
     url = callback.get("url")
     auth_type = callback.get("auth_type")
     auth_token = callback.get("token")
@@ -205,7 +279,7 @@ def _send_callback(
         _safe_print(f"⚠️  Callback error: unsupported type '{cb_type}' job_id={job_id}")
         envelope["callback_status"] = "error"
         envelope["callback_reason"] = f"unsupported_callback_type:{cb_type}"
-        raise RuntimeError(f"unsupported_callback_type:{cb_type}")
+        return envelope
 
     if not url:
         _safe_print(f"⚠️  Callback skipped: missing URL job_id={job_id}")

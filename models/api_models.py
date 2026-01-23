@@ -37,6 +37,26 @@ class ResponseFormat(APIModel):
     json_schema: Optional[Dict[str, Any]] = None
 
 
+class AdapterSettings(APIModel):
+    """Settings for per-request LoRA adapter loading.
+
+    Enables dynamic adapter selection on a per-node basis. The adapter is
+    identified by its hash (from the adapter store) and can be tuned with
+    optional parameters.
+
+    Attributes:
+        hash: Required. Unique identifier for the adapter (e.g., "b2b8ccb4").
+              Used to locate the adapter in S3/cache.
+        scale: LoRA scaling factor. Higher values = stronger adapter influence.
+               Default 1.0 means full adapter strength.
+        enabled: Toggle to easily disable adapter without removing the object.
+                 Useful for A/B testing or quick fallback to base model.
+    """
+    hash: str
+    scale: float = 1.0
+    enabled: bool = True
+
+
 class ChatCompletionRequest(APIModel):
     model: str
     messages: List[Message]
@@ -44,6 +64,9 @@ class ChatCompletionRequest(APIModel):
     max_tokens: Optional[int] = None
     stream: Optional[bool] = None
     response_format: Optional[ResponseFormat] = None
+    # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
+    include_date_context: Optional[bool] = None  # If true, extract date keys from input
+    adapter_settings: Optional[AdapterSettings] = None  # Per-request LoRA adapter selection
 
 
 class ChatCompletionChoice(APIModel):
@@ -65,6 +88,8 @@ class ChatCompletionResponse(APIModel):
     model: str
     choices: List[ChatCompletionChoice]
     usage: Usage
+    # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
+    date_keys: Optional[List[str]] = None  # Extracted date keys when include_date_context=true
 
 
 class ErrorDetail(APIModel):

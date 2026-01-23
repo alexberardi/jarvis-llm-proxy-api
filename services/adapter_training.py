@@ -79,11 +79,12 @@ def _build_paths(
     dataset_hash: str,
     job_id: str,
 ) -> Tuple[Path, Path, Path, Path]:
-    root = Path(os.getenv("JARVIS_ADAPTER_WORK_DIR", "/tmp/jarvis-adapters"))
-    store_root = Path(os.getenv("JARVIS_ADAPTER_STORE_DIR", str(root / "store")))
-    work_root = root / "work" / node_id / base_model_id / job_id
+    # Use same env var as adapter_storage for consistency
+    adapter_dir = Path(os.getenv("LLM_PROXY_ADAPTER_DIR", "/tmp/jarvis-adapters"))
+    work_root = adapter_dir / "work" / job_id
     output_dir = work_root / "adapter"
-    artifact_dir = store_root / node_id / base_model_id / dataset_hash
+    # Flat structure: adapters stored directly by hash
+    artifact_dir = adapter_dir / dataset_hash
     artifact_path = artifact_dir / "adapter.zip"
     return work_root, output_dir, artifact_dir, artifact_path
 
