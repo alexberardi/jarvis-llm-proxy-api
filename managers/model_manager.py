@@ -286,6 +286,33 @@ class ModelManager:
             
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    def unload_all(self):
+        """Unload all model backends (best-effort)."""
+        import asyncio
+        import inspect
+        
+        for name in ("main_model", "lightweight_model", "cloud_model", "vision_model"):
+            model = getattr(self, name, None)
+            if model and hasattr(model, "unload"):
+                try:
+                    result = model.unload()
+                    # Handle async unload methods (e.g., RestClient)
+                    if inspect.iscoroutine(result):
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                # Can't await in sync context with running loop
+                                asyncio.ensure_future(result)
+                                print(f"⚠️  Async unload for {name} scheduled (may complete later)")
+                            else:
+                                loop.run_until_complete(result)
+                        except RuntimeError:
+                            # No event loop, create one
+                            asyncio.run(result)
+                    print(f"🔄 Unloaded model: {name}")
+                except Exception as e:
+                    print(f"⚠️  Failed to unload {name}: {e}")
     
     def _populate_registry(self):
         """Populate the model registry and aliases after models are initialized"""

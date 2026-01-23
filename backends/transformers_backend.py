@@ -21,6 +21,7 @@ class TransformersClient:
         self.chat_format = chat_format
         self.stop_tokens = stop_tokens or []
         self.last_usage = None
+        self.last_used_at = None
         self._lock = threading.Lock()  # Add thread safety
         
         # Get context window from parameter or environment variable
@@ -51,6 +52,8 @@ class TransformersClient:
         # Check if vLLM inference should be used
         self.inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "transformers").lower()
         self.vllm_backend = None
+        # Note: Dynamic per-request adapters only supported on vLLM backend
+        # Transformers backend runs base model only
         
         print(f"🔍 Debug: Model path: {model_path}")
         print(f"🔍 Debug: Chat format: {chat_format}")
@@ -182,10 +185,17 @@ class TransformersClient:
         
         # Load model
         print("🤖 Loading model...")
+        device_map_env = os.getenv("JARVIS_TRANSFORMERS_DEVICE_MAP", "").strip().lower()
+        if device_map_env in {"", "auto"}:
+            device_map = "auto" if self.device == "cuda" else None
+        elif device_map_env in {"none", "off", "false", "no"}:
+            device_map = None
+        else:
+            device_map = device_map_env
         model_kwargs = {
             "trust_remote_code": self.trust_remote_code,
             "torch_dtype": self.torch_dtype,
-            "device_map": "auto" if self.device == "cuda" else None,
+            "device_map": device_map,
         }
         
         if quantization_config is not None:
@@ -199,13 +209,13 @@ class TransformersClient:
             **model_kwargs
         )
         
-        # Move model to device if not using device_map
-        if self.device != "cuda" or quantization_config is None:
+        # Move model to device only when not using device_map/offload
+        if model_kwargs.get("device_map") is None:
             self.model = self.model.to(self.device)
         
         # Set model to evaluation mode
         self.model.eval()
-        
+
         print(f"🔍 Debug: Model loaded on device: {next(self.model.parameters()).device}")
         print(f"🔍 Debug: Model dtype: {next(self.model.parameters()).dtype}")
         print(f"🔍 Debug: Tokenizer vocab size: {len(self.tokenizer)}")
@@ -214,6 +224,18 @@ class TransformersClient:
         self._detect_model_context_window()
         print(f"🔍 Debug: Model context window: {self._actual_context_window or 'unknown'}")
         print(f"🔍 Debug: Using context window: {self.context_window}")
+
+    def _get_input_device(self) -> str:
+        """Pick a safe input device when using accelerate device_map."""
+        device_map = getattr(self.model, "hf_device_map", None)
+        if isinstance(device_map, dict) and device_map:
+            first_device = next(iter(device_map.values()))
+            if isinstance(first_device, int):
+                return f"cuda:{first_device}"
+            if isinstance(first_device, str) and first_device.isdigit():
+                return f"cuda:{first_device}"
+            return str(first_device)
+        return self.device
     
     def _detect_model_context_window(self):
         """Detect the model's actual context window from config"""
@@ -319,7 +341,7 @@ class TransformersClient:
             truncation=True,
             max_length=max_input_length,
             padding=False
-        ).to(self.device)
+        ).to(self._get_input_device())
         
         # Check if input is too long and warn
         input_length = inputs.input_ids.shape[1]
@@ -420,7 +442,6 @@ class TransformersClient:
     def _chat_vllm(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat using vLLM backend"""
         print(f"🚀 vLLM Transformers chat with {len(messages)} messages, temperature: {temperature}")
-        
         try:
             response_text, usage = self.vllm_backend.generate(
                 messages=messages,
@@ -433,7 +454,7 @@ class TransformersClient:
             self.last_usage = usage
             
             # Update last usage time
-            self.last_usage = time.time()
+            self.last_used_at = time.time()
             
             return response_text
             
@@ -447,7 +468,7 @@ class TransformersClient:
         
         print(f"🔍 DEBUG: Starting chat with {len(messages)} messages")
         print(f"🔍 DEBUG: Temperature: {temperature}")
-        
+
         try:
             # Generate response
             response = self._generate_response(messages, temperature)
@@ -495,7 +516,7 @@ class TransformersClient:
                 truncation=True,
                 max_length=self.context_window - 1,  # Leave room for at least 1 token generation
                 padding=False
-            ).to(self.device)
+            ).to(self._get_input_device())
             
             # Run a forward pass to process the context
             with torch.no_grad():
@@ -524,6 +545,15 @@ class TransformersClient:
     
     def unload(self):
         """Unload the model and clean up resources"""
+        # IMPORTANT: Unload vLLM backend first - this kills the EngineCore subprocess
+        if hasattr(self, 'vllm_backend') and self.vllm_backend is not None:
+            print(f"🔌 Unloading vLLM backend for {self.model_name}...", flush=True)
+            try:
+                self.vllm_backend.unload()
+            except Exception as e:
+                print(f"⚠️  vLLM backend unload error: {e}", flush=True)
+            self.vllm_backend = None
+        
         if hasattr(self, 'model'):
             del self.model
             self.model = None
@@ -535,7 +565,7 @@ class TransformersClient:
         if self.device == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        print(f"🔄 Unloaded model: {self.model_name}")
+        print(f"🔄 Unloaded model: {self.model_name}", flush=True)
     
     def __del__(self):
         """Clean up on destruction"""

@@ -133,6 +133,25 @@ EOF
 
 echo -e "${GREEN}✅ Configuration saved to .setup_config${NC}"
 echo ""
+
+LLAMA_CPP_DIR="$ROOT/tools/llama.cpp"
+if [[ ! -f "$LLAMA_CPP_DIR/convert-lora-to-gguf.py" ]]; then
+    echo -e "${YELLOW}llama.cpp not found (needed for GGUF LoRA conversion).${NC}"
+    read -p "Clone llama.cpp into tools/llama.cpp? [Y/n]: " clone_llama
+    clone_llama=${clone_llama:-Y}
+    if [[ "$clone_llama" =~ ^[Yy]$ ]]; then
+        if command -v git >/dev/null 2>&1; then
+            echo -e "${BLUE}Cloning llama.cpp...${NC}"
+            git clone https://github.com/ggerganov/llama.cpp "$LLAMA_CPP_DIR"
+            echo -e "${GREEN}✅ llama.cpp cloned to $LLAMA_CPP_DIR${NC}"
+        else
+            echo -e "${RED}git not found. Please install git or clone manually.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}Skipping llama.cpp clone.${NC}"
+    fi
+fi
+
 echo -e "${BLUE}Next steps:${NC}"
 echo "1. Run './run.sh' to install dependencies and start the development server"
 echo "2. Or run './run-prod.sh' to start the production server"

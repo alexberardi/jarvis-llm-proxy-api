@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
-from typing import List, Optional, Union
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Union
 
 
 @dataclass
@@ -38,6 +38,8 @@ class GenerationParams:
     stream: bool = False
     response_format: Optional[dict] = None  # For JSON output: {"type": "json_object"}
     grammar: Optional[str] = None  # GBNF grammar for constrained generation
+    # Per-request adapter settings: {"hash": str, "scale": float, "enabled": bool}
+    adapter_settings: Optional[dict] = None
 
 
 @dataclass

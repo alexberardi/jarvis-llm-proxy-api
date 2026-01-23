@@ -16,6 +16,7 @@ psutil>=5.9.0  # For process management (vLLM cleanup)
 sqlalchemy>=2.0.23
 alembic>=1.12.1
 psycopg2-binary>=2.9.9
+boto3>=1.34.0  # S3/MinIO adapter storage
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python (with appropriate acceleration)

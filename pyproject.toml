@@ -1,0 +1,27 @@
+[project]
+name = "jarvis-llm-proxy-api"
+version = "0.1.0"
+description = "LLM proxy API for Jarvis voice assistant"
+requires-python = ">=3.10"
+# Dependencies managed via requirements*.txt for platform flexibility
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backends*", "models*", "managers*", "services*", "auth*", "cache*", "queues*", "storage*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]  # Line length handled by formatter

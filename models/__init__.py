@@ -7,6 +7,7 @@ from .api_models import (  # noqa: F401
     ContentPart,
     Message,
     ResponseFormat,
+    AdapterSettings,
     ChatCompletionRequest,
     ChatCompletionChoice,
     Usage,

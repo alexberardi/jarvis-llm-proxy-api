@@ -103,6 +103,9 @@ JARVIS_TORCH_DTYPE=auto  # auto, float16, float32, bfloat16
 JARVIS_USE_QUANTIZATION=false
 JARVIS_QUANTIZATION_TYPE=4bit  # 4bit, 8bit
 
+# vLLM Quantization (optional, vLLM backend only)
+JARVIS_VLLM_QUANTIZATION=      # awq, gptq, fp8
+
 # Generation Parameters
 JARVIS_MAX_TOKENS=2048
 JARVIS_TOP_P=0.95
@@ -117,7 +120,62 @@ JARVIS_MODEL_CONTEXT_WINDOW=4096
 # Memory Optimization
 JARVIS_USE_CACHE=true
 JARVIS_TRUST_REMOTE_CODE=false
+JARVIS_TRANSFORMERS_DEVICE_MAP=auto  # auto|none
 ```
+
+### Adapter Training Worker (optional)
+
+```bash
+# Command to run adapter training (required for adapter_train jobs)
+JARVIS_ADAPTER_TRAIN_CMD="python3 scripts/train_adapter.py"
+
+# Work/output directories
+JARVIS_ADAPTER_WORK_DIR=/tmp/jarvis-adapters
+JARVIS_ADAPTER_STORE_DIR=/tmp/jarvis-adapters/store
+
+# Optional public URL prefix for artifacts
+JARVIS_ADAPTER_PUBLIC_URL_PREFIX=
+
+# Training timeout (seconds). Defaults to job ttl if unset.
+JARVIS_ADAPTER_TRAIN_TIMEOUT_SECONDS=
+```
+
+Training defaults (can be overridden by `request.params`):
+```
+JARVIS_ADAPTER_MAX_SEQ_LEN=2048
+JARVIS_ADAPTER_BATCH_SIZE=1
+JARVIS_ADAPTER_GRAD_ACCUM=4
+JARVIS_ADAPTER_EPOCHS=1
+JARVIS_ADAPTER_LEARNING_RATE=2e-4
+JARVIS_ADAPTER_LORA_R=16
+JARVIS_ADAPTER_LORA_ALPHA=32
+JARVIS_ADAPTER_LORA_DROPOUT=0.05
+JARVIS_ADAPTER_TRAIN_DTYPE=auto  # auto, bf16, fp16
+JARVIS_ADAPTER_TRAIN_LOAD_IN_4BIT=false
+JARVIS_ADAPTER_TRAIN_LOAD_IN_8BIT=false
+```
+
+GGUF LoRA training (when `base_model_id` is `.gguf`):
+```
+# HF base model id used for training (required for GGUF base models)
+JARVIS_ADAPTER_HF_BASE_MODEL_ID=
+# Command template to convert PEFT LoRA to GGUF. Available placeholders:
+# {lora_dir} {hf_base_model_id} {output_path}
+# Note: convert_lora_to_gguf.py expects lora_path as a positional argument.
+# If you ran setup.sh with the llama.cpp clone, the script lives at:
+# tools/llama.cpp/convert-lora-to-gguf.py
+JARVIS_ADAPTER_GGUF_CONVERT_CMD=
+```
+
+vLLM LoRA settings (for dynamic per-request adapter loading):
+```
+JARVIS_VLLM_MAX_LORA_RANK=64
+JARVIS_VLLM_MAX_LORAS=1
+```
+
+Debug-only helper:
+- When `DEBUG=true`, the training worker will temporarily unload the model service before training
+  and reload it afterward to free GPU memory.
 
 ### Supported Features
 

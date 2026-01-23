@@ -264,14 +264,6 @@ def parse_json_response(content: str) -> tuple[str, bool]:
             return repaired_duplicates, True
         except json.JSONDecodeError:
             pass
-    repaired_quotes = repair_unescaped_quotes(content)
-    if repaired_quotes:
-        try:
-            final_repaired = repair_duplicate_keys(repaired_quotes) or repaired_quotes
-            json.loads(final_repaired)
-            return final_repaired, True
-        except json.JSONDecodeError:
-            pass
     extracted = extract_json_from_text(content)
     if extracted:
         try:
@@ -296,6 +288,14 @@ def parse_json_response(content: str) -> tuple[str, bool]:
                         return final_repaired, True
                     except json.JSONDecodeError:
                         pass
+    repaired_quotes = repair_unescaped_quotes(content)
+    if repaired_quotes:
+        try:
+            final_repaired = repair_duplicate_keys(repaired_quotes) or repaired_quotes
+            json.loads(final_repaired)
+            return final_repaired, True
+        except json.JSONDecodeError:
+            pass
     repaired = repair_truncated_json(content)
     if repaired:
         try:
@@ -539,12 +539,19 @@ async def run_chat_completion(
         except Exception as e:
             print(f"⚠️ Failed to build GGUF JSON grammar: {e}")
 
+    # Extract adapter settings if provided and enabled
+    adapter_settings_dict = None
+    if req.adapter_settings and req.adapter_settings.enabled:
+        adapter_settings_dict = req.adapter_settings.model_dump()
+        print(f"🧩 Adapter settings: hash={req.adapter_settings.hash}, scale={req.adapter_settings.scale}")
+
     params = GenerationParams(
         temperature=req.temperature or 0.7,
         max_tokens=req.max_tokens,
         stream=req.stream or False,
         response_format=response_format_dict,
         grammar=grammar,
+        adapter_settings=adapter_settings_dict,
     )
 
     try:
