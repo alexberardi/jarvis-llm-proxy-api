@@ -18,6 +18,9 @@ alembic>=1.12.1
 psycopg2-binary>=2.9.9
 boto3>=1.34.0  # S3/MinIO adapter storage
 
+# jarvis-log-client installed from local mount at runtime
+# (provides centralized logging to jarvis-logs server)
+
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python (with appropriate acceleration)
 # - mlx-lm (macOS only)
