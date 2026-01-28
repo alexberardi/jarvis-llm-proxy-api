@@ -18,9 +18,10 @@ except ImportError:
     Qwen3VLForConditionalGeneration = None
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.base import LLMBackendBase
 
 
-class TransformersVisionClient:
+class TransformersVisionClient(LLMBackendBase):
     """
     Vision backend using HuggingFace transformers (e.g., Qwen2-VL).
 
@@ -67,6 +68,7 @@ class TransformersVisionClient:
         self.model.to(self.device)
         self.model.eval()
         self.last_usage = None
+        self.inference_engine = "transformers_vision"  # HuggingFace Transformers vision backend
 
     def _get_device(self) -> str:
         if torch.backends.mps.is_available():
@@ -243,4 +245,26 @@ class TransformersVisionClient:
         }
 
         return ChatResult(content=text, usage=self.last_usage)
+
+    def generate_text_chat(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """Vision-only backend does not support text-only chat."""
+        raise NotImplementedError(
+            "TransformersVisionClient is vision-only. Use TransformersClient for text generation."
+        )
+
+    def unload(self) -> None:
+        """Unload vision model from memory."""
+        if hasattr(self, "model") and self.model is not None:
+            del self.model
+            self.model = None
+        if hasattr(self, "processor") and self.processor is not None:
+            del self.processor
+            self.processor = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 

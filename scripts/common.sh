@@ -315,16 +315,134 @@ except Exception as e:
     fi
 }
 
+# PID file location
+PID_FILE="${ROOT:-.}/.llm-proxy.pids"
+
+# Write PID to file for tracking
+write_pid() {
+    local name="$1"
+    local pid="$2"
+    echo "${name}=${pid}" >> "$PID_FILE"
+}
+
+# Read PIDs from file
+read_pids() {
+    if [[ -f "$PID_FILE" ]]; then
+        cat "$PID_FILE"
+    fi
+}
+
+# Kill process and its children by PID
+kill_tree() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+
+    # Get all children first
+    local children
+    children=$(pgrep -P "$pid" 2>/dev/null || true)
+
+    # Kill children recursively
+    for child in $children; do
+        kill_tree "$child" "$signal"
+    done
+
+    # Kill the process itself
+    kill -"$signal" "$pid" 2>/dev/null || true
+}
+
+# Wait for a process to die, with timeout
+wait_for_death() {
+    local pid="$1"
+    local timeout="${2:-10}"
+    local waited=0
+
+    while kill -0 "$pid" 2>/dev/null && [[ $waited -lt $timeout ]]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    ! kill -0 "$pid" 2>/dev/null
+}
+
+# Find uvicorn PIDs by port
+find_uvicorn_by_port() {
+    local port="$1"
+    lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+}
+
 # Cleanup function for graceful shutdown
 cleanup() {
     echo -e "\n${YELLOW}🧹 Cleaning up processes...${NC}"
-    
-    # Kill vLLM processes
-    pkill -f "VLLM::EngineCore" 2>/dev/null || true
-    pkill -f "vllm" 2>/dev/null || true
-    pkill -f "uvicorn" 2>/dev/null || true
-    pkill -f "queue_worker.py" 2>/dev/null || true
-    
+
+    # Collect all PIDs to kill (uvicorn processes on our ports)
+    local pids_to_kill=()
+    local api_port="${SERVER_PORT:-8000}"
+    local model_port="${MODEL_SERVICE_PORT:-8008}"
+
+    # Find uvicorn processes by port (more reliable than tracking pipeline PIDs)
+    for port in "$api_port" "$model_port"; do
+        local port_pids
+        port_pids=$(find_uvicorn_by_port "$port")
+        for pid in $port_pids; do
+            pids_to_kill+=("$pid")
+            echo -e "${BLUE}   Found process on port $port: PID $pid${NC}"
+        done
+    done
+
+    # Also check PID file for any tracked processes
+    if [[ -f "$PID_FILE" ]]; then
+        while IFS='=' read -r name pid; do
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                pids_to_kill+=("$pid")
+                echo -e "${BLUE}   Found tracked process $name: PID $pid${NC}"
+            fi
+        done < "$PID_FILE"
+        rm -f "$PID_FILE"
+    fi
+
+    # Phase 1: Send SIGTERM to all uvicorn processes (triggers FastAPI shutdown + atexit)
+    echo -e "${BLUE}📤 Sending SIGTERM to processes...${NC}"
+    for pid in "${pids_to_kill[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Phase 2: Wait for graceful shutdown (gives vLLM time to clean up children)
+    echo -e "${BLUE}⏳ Waiting for graceful shutdown (up to 10s)...${NC}"
+    local all_dead=true
+    for pid in "${pids_to_kill[@]}"; do
+        if ! wait_for_death "$pid" 10; then
+            all_dead=false
+            echo -e "${YELLOW}   PID $pid still alive after timeout${NC}"
+        fi
+    done
+
+    # Phase 3: Force kill any remaining uvicorn processes
+    if [[ "$all_dead" != "true" ]]; then
+        echo -e "${YELLOW}🔪 Force killing remaining processes...${NC}"
+        for pid in "${pids_to_kill[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill_tree "$pid" KILL
+            fi
+        done
+        sleep 1
+    fi
+
+    # Phase 4: Clean up any orphaned vLLM processes
+    local vllm_pids
+    vllm_pids=$(pgrep -f "VLLM::EngineCore" 2>/dev/null || true)
+    if [[ -n "$vllm_pids" ]]; then
+        echo -e "${YELLOW}🔪 Killing orphaned vLLM processes: $vllm_pids${NC}"
+        for pid in $vllm_pids; do
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+    fi
+
     # Clear CUDA cache if available
     if command -v nvidia-smi >/dev/null 2>&1; then
         echo -e "${BLUE}🧹 Clearing CUDA cache...${NC}"
@@ -338,13 +456,17 @@ except ImportError:
     pass
 " 2>/dev/null || true
     fi
-    
+
     echo -e "${GREEN}✅ Cleanup completed${NC}"
 }
 
 # Set up signal handlers
 setup_signal_handlers() {
-    trap cleanup EXIT INT TERM
+    # Remove stale PID file
+    rm -f "$PID_FILE"
+
+    # Trap signals for cleanup
+    trap cleanup EXIT INT TERM HUP
 }
 
 # Start server with appropriate configuration

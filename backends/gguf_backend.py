@@ -1,10 +1,15 @@
+import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
+
 from .power_metrics import PowerMetrics
-import threading
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
+from backends.base import LLMBackendBase
+
+logger = logging.getLogger("uvicorn")
 
 
 class GGUFAdapterNotSupportedError(RuntimeError):
@@ -151,7 +156,7 @@ class _GGUFAdapterManager:
             True if adapter unloaded successfully, False otherwise
         """
         if not self._adapter_loaded:
-            print("🧩 GGUF no adapter to unload (base model)")
+            logger.debug("🧩 GGUF no adapter to unload (base model)")
             return True
 
         raise GGUFAdapterNotSupportedError(
@@ -196,7 +201,7 @@ class _GGUFAdapterManager:
 # =============================================================================
 
 
-class GGUFClient:
+class GGUFClient(LLMBackendBase):
     def __init__(self, model_path: str, chat_format: str, stop_tokens: List[str] = None, context_window: int = None):
         if not model_path:
             raise ValueError("Model path is required")
@@ -272,23 +277,23 @@ class GGUFClient:
         # GGUF LoRA is disabled - no adapter loading
         self.lora_path = None
 
-        print(f"🔍 Debug: Inference engine: {inference_engine}")
-        print(f"🔍 Debug: Model path: {model_path}")
-        print(f"🔍 Debug: Chat format: {chat_format}")
-        print(f"🔍 Debug: Context window: {context_window}")
-        print(f"🔍 Debug: Threads: {n_threads}")
-        print(f"🔍 Debug: GPU layers: {n_gpu_layers}")
-        print(f"🔍 Debug: Context cache: {'enabled' if self.enable_cache else 'disabled'}")
-        print(f"🔍 Debug: Batch size: {n_batch}")
-        print(f"🔍 Debug: Micro batch size: {n_ubatch}")
-        print(f"🔍 Debug: F16 KV cache: {'enabled' if f16_kv else 'disabled'}")
-        print(f"🔍 Debug: Matrix multiplication: {'enabled' if mul_mat_q else 'disabled'}")
-        
+        logger.debug(f"🔍 Debug: Inference engine: {inference_engine}")
+        logger.debug(f"🔍 Debug: Model path: {model_path}")
+        logger.debug(f"🔍 Debug: Chat format: {chat_format}")
+        logger.debug(f"🔍 Debug: Context window: {context_window}")
+        logger.debug(f"🔍 Debug: Threads: {n_threads}")
+        logger.debug(f"🔍 Debug: GPU layers: {n_gpu_layers}")
+        logger.debug(f"🔍 Debug: Context cache: {'enabled' if self.enable_cache else 'disabled'}")
+        logger.debug(f"🔍 Debug: Batch size: {n_batch}")
+        logger.debug(f"🔍 Debug: Micro batch size: {n_ubatch}")
+        logger.debug(f"🔍 Debug: F16 KV cache: {'enabled' if f16_kv else 'disabled'}")
+        logger.debug(f"🔍 Debug: Matrix multiplication: {'enabled' if mul_mat_q else 'disabled'}")
+
         if inference_engine == "vllm":
-            print(f"🚀 Using vLLM inference engine")
+            logger.info(f"🚀 Using vLLM inference engine")
             self._init_vllm(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
         else:
-            print(f"🦙 Using llama.cpp inference engine")
+            logger.info(f"🦙 Using llama.cpp inference engine")
             self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
 
     def _init_vllm(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
@@ -299,16 +304,13 @@ class GGUFClient:
             self.inference_engine = "vllm"
         except ValueError as e:
             if "vLLM requires HuggingFace model names" in str(e):
-                print(f"")
-                print(f"🔧 CONFIGURATION SUGGESTION:")
-                print(f"   For GGUF files, use: JARVIS_INFERENCE_ENGINE=llama_cpp")
-                print(f"   For vLLM, switch to TRANSFORMERS backend with HF models:")
-                print(f"   ")
-                print(f"   JARVIS_MODEL_BACKEND=TRANSFORMERS")
-                print(f"   JARVIS_MODEL_NAME=microsoft/Phi-3-mini-4k-instruct")
-                print(f"   JARVIS_INFERENCE_ENGINE=vllm")
-                print(f"")
-                print(f"🔄 Falling back to llama.cpp for GGUF file...")
+                logger.warning("🔧 CONFIGURATION SUGGESTION:")
+                logger.warning("   For GGUF files, use: JARVIS_INFERENCE_ENGINE=llama_cpp")
+                logger.warning("   For vLLM, switch to TRANSFORMERS backend with HF models:")
+                logger.warning("   JARVIS_MODEL_BACKEND=TRANSFORMERS")
+                logger.warning("   JARVIS_MODEL_NAME=microsoft/Phi-3-mini-4k-instruct")
+                logger.warning("   JARVIS_INFERENCE_ENGINE=vllm")
+                logger.info(f"🔄 Falling back to llama.cpp for GGUF file...")
                 self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
             else:
                 raise
@@ -316,10 +318,10 @@ class GGUFClient:
     def _init_llama_cpp(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, ctx_window: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
         """Initialize llama.cpp backend"""
         from llama_cpp import Llama
-        
-        print(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
-        print(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
-        print(f"🔍 Debug: Loading model with n_gpu_layers={n_gpu_layers}")
+
+        logger.debug(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
+        logger.debug(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
+        logger.debug(f"🔍 Debug: Loading model with n_gpu_layers={n_gpu_layers}")
         
         # Stable initialization with llama-cpp-python (no LoRA - disabled)
         self.model = Llama(
@@ -340,24 +342,24 @@ class GGUFClient:
         self.inference_engine = "llama_cpp"
         
         # Debug: Check model loading results
-        print(f"✅ Model loaded successfully!")
-        print(f"🔍 Debug: Model context size: {self.model.n_ctx()}")
-        print(f"🔍 Debug: Model vocab size: {self.model.n_vocab()}")
-        
+        logger.info(f"✅ Model loaded successfully!")
+        logger.debug(f"🔍 Debug: Model context size: {self.model.n_ctx()}")
+        logger.debug(f"🔍 Debug: Model vocab size: {self.model.n_vocab()}")
+
         # Warm up the model with a small inference
         try:
-            print(f"🔍 Debug: Warming up model...")
+            logger.debug(f"🔍 Debug: Warming up model...")
             warmup_response = self.model.create_chat_completion(
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=1,
                 temperature=0.0,
                 stream=False,
             )
-            print(f"🔍 Debug: Model warmup completed successfully")
+            logger.debug(f"🔍 Debug: Model warmup completed successfully")
         except Exception as e:
-            print(f"⚠️  Debug: Model warmup failed: {e}")
-            
-        print(f"🔍 Debug: Model initialization complete")
+            logger.warning(f"⚠️  Debug: Model warmup failed: {e}")
+
+        logger.debug(f"🔍 Debug: Model initialization complete")
 
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""
@@ -374,8 +376,8 @@ class GGUFClient:
     
     def _chat_vllm(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat using vLLM backend"""
-        print(f"🚀 vLLM chat with {len(messages)} messages, temperature: {temperature}")
-        
+        logger.debug(f"🚀 vLLM chat with {len(messages)} messages, temperature: {temperature}")
+
         try:
             response_text, usage = self.backend.generate(
                 messages=messages,
@@ -383,14 +385,14 @@ class GGUFClient:
                 max_tokens=int(os.getenv("JARVIS_MAX_TOKENS", "7000")),
                 top_p=0.95
             )
-            
+
             # Update last usage
             self.last_usage = time.time()
-            
+
             return response_text
-            
+
         except Exception as e:
-            print(f"❌ vLLM chat error: {e}")
+            logger.error(f"❌ vLLM chat error: {e}")
             raise
     
     def _chat_llama_cpp(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
@@ -398,28 +400,28 @@ class GGUFClient:
         start_time = time.time()
 
         # Enhanced logging for prefix matching diagnosis
-        print(f"🔍 PREFIX DEBUG: Starting chat with {len(messages)} messages")
-        print(f"🔍 PREFIX DEBUG: Temperature: {temperature}")
-        
+        logger.debug(f"🔍 PREFIX DEBUG: Starting chat with {len(messages)} messages")
+        logger.debug(f"🔍 PREFIX DEBUG: Temperature: {temperature}")
+
         # Log each message in detail for prefix matching analysis
         for i, msg in enumerate(messages):
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             content_preview = content[:100] + "..." if len(content) > 100 else content
-            print(f"🔍 PREFIX DEBUG: Message {i+1} [{role}]: {content_preview}")
-            print(f"🔍 PREFIX DEBUG: Message {i+1} length: {len(content)} chars, {len(content.split())} words")
-        
+            logger.debug(f"🔍 PREFIX DEBUG: Message {i+1} [{role}]: {content_preview}")
+            logger.debug(f"🔍 PREFIX DEBUG: Message {i+1} length: {len(content)} chars, {len(content.split())} words")
+
         # Capture initial power metrics (if available)
         initial_gpu_power = self.power_metrics.gpu_power
         initial_cpu_power = self.power_metrics.cpu_power
-        
+
         # llama_cpp supports structured chat messages directly
-        print(f"🔍 PREFIX DEBUG: Calling LLaMA.cpp create_chat_completion...")
-        
+        logger.debug(f"🔍 PREFIX DEBUG: Calling LLaMA.cpp create_chat_completion...")
+
         # Log the exact messages being sent to help diagnose prefix matching
-        print(f"🔍 PREFIX DEBUG: Raw messages being sent to LLaMA.cpp:")
+        logger.debug(f"🔍 PREFIX DEBUG: Raw messages being sent to LLaMA.cpp:")
         for i, msg in enumerate(messages):
-            print(f"🔍 PREFIX DEBUG: Raw[{i}]: {msg}")
+            logger.debug(f"🔍 PREFIX DEBUG: Raw[{i}]: {msg}")
         
         try:
             # llama.cpp's create_chat_completion automatically detects chat format from the model
@@ -435,13 +437,13 @@ class GGUFClient:
                 mirostat_tau=self.mirostat_tau,  # Use configurable mirostat tau
                 mirostat_eta=self.mirostat_eta,  # Use configurable mirostat eta
             )
-            print(f"🔍 PREFIX DEBUG: LLaMA.cpp response received")
-            
+            logger.debug(f"🔍 PREFIX DEBUG: LLaMA.cpp response received")
+
         except Exception as e:
-            print(f"⚠️  Error during inference: {e}")
+            logger.warning(f"⚠️  Error during inference: {e}")
             # Try to recover by reinitializing the model context
             try:
-                print(f"🔄 Attempting to recover from inference error...")
+                logger.info(f"🔄 Attempting to recover from inference error...")
                 # Force a small warmup inference to reset context
                 self.model.create_chat_completion(
                     messages=[{"role": "user", "content": "test"}],
@@ -449,7 +451,7 @@ class GGUFClient:
                     temperature=0.0,
                     stream=False,
                 )
-                print(f"✅ Recovery successful, retrying original request...")
+                logger.info(f"✅ Recovery successful, retrying original request...")
                 # Retry the original request
                 response = self.model.create_chat_completion(
                     messages=messages,  # type: ignore
@@ -461,7 +463,7 @@ class GGUFClient:
                     stream=False,
                 )
             except Exception as retry_e:
-                print(f"❌ Recovery failed: {retry_e}")
+                logger.error(f"❌ Recovery failed: {retry_e}")
                 return ""
         
         # Calculate timing
@@ -493,22 +495,22 @@ class GGUFClient:
             first_token_time = total_time / completion_tokens if completion_tokens > 0 else 0
             
             # Enhanced performance stats
-            print(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-            print(f"📊 Prompt: {prompt_tokens} tokens | Completion: {completion_tokens} tokens | Total: {total_tokens} tokens")
-            print(f"⚡ First token latency: ~{first_token_time*1000:.0f}ms")
-            print(f"🌡️  Temperature: {temperature}")
-            
+            logger.debug(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+            logger.debug(f"📊 Prompt: {prompt_tokens} tokens | Completion: {completion_tokens} tokens | Total: {total_tokens} tokens")
+            logger.debug(f"⚡ First token latency: ~{first_token_time*1000:.0f}ms")
+            logger.debug(f"🌡️  Temperature: {temperature}")
+
             # Power metrics (if available)
             if self.power_metrics.sudo_available:
-                print(f"🔋 GPU Power: {avg_gpu_power:.0f}mW ({avg_gpu_power/1000:.1f}W) | CPU Power: {avg_cpu_power:.0f}mW ({avg_cpu_power/1000:.1f}W)")
-                print(f"⚙️  GPU: {self.power_metrics.gpu_frequency}MHz @ {self.power_metrics.gpu_utilization:.1f}% utilization")
-                
+                logger.debug(f"🔋 GPU Power: {avg_gpu_power:.0f}mW ({avg_gpu_power/1000:.1f}W) | CPU Power: {avg_cpu_power:.0f}mW ({avg_cpu_power/1000:.1f}W)")
+                logger.debug(f"⚙️  GPU: {self.power_metrics.gpu_frequency}MHz @ {self.power_metrics.gpu_utilization:.1f}% utilization")
+
                 # Energy efficiency
                 if tokens_per_second > 0:
                     energy_per_token = (avg_gpu_power + avg_cpu_power) / tokens_per_second
-                    print(f"🌱 Energy efficiency: {energy_per_token:.1f}mW per token/s")
+                    logger.debug(f"🌱 Energy efficiency: {energy_per_token:.1f}mW per token/s")
             else:
-                print("💡 For power monitoring, run: sudo powermetrics --samplers gpu_power,cpu_power --sample-count 1 -n 1")
+                logger.debug("💡 For power monitoring, run: sudo powermetrics --samplers gpu_power,cpu_power --sample-count 1 -n 1")
             
             return content
             
@@ -539,11 +541,11 @@ class GGUFClient:
                 "timestamp": time.time()
             }
             
-            print(f"🔥 Context processed for {len(messages)} messages")
+            logger.debug(f"🔥 Context processed for {len(messages)} messages")
             return processed_context
-            
+
         except Exception as e:
-            print(f"⚠️  Error processing context: {e}")
+            logger.warning(f"⚠️  Error processing context: {e}")
             # Fallback to storing raw messages
             return {
                 "messages": messages,
@@ -569,7 +571,7 @@ class GGUFClient:
         self.context_cache.clear()
         self.cache_hits = 0
         self.cache_misses = 0
-        print("🧹 Context cache cleared")
+        logger.debug("🧹 Context cache cleared")
     
     def _get_context_key(self, messages: List[Dict[str, str]]) -> str:
         """Generate a cache key for the message context"""
@@ -585,7 +587,7 @@ class GGUFClient:
             keys_to_remove = list(self.context_cache.keys())[:len(self.context_cache) - self.max_cache_size]
             for key in keys_to_remove:
                 del self.context_cache[key]
-            print(f"🧹 Removed {len(keys_to_remove)} old cache entries")
+            logger.debug(f"🧹 Removed {len(keys_to_remove)} old cache entries")
     
     def unload(self):
         """Unload the model and clean up resources"""
@@ -594,7 +596,7 @@ class GGUFClient:
             self.model = None
         if hasattr(self, 'power_metrics'):
             self.power_metrics.stop_monitoring()
-        print(f"🔄 Unloaded model: {self.model_path}")
+        logger.info(f"🔄 Unloaded model: {self.model_path}")
     
     def __del__(self):
         """Clean up power monitoring on destruction"""
@@ -655,9 +657,9 @@ class GGUFClient:
                     try:
                         from llama_cpp import LlamaGrammar
                         completion_kwargs["grammar"] = LlamaGrammar.from_string(params.grammar)
-                        print("🧩 GGUF grammar applied to llama.cpp request")
+                        logger.info("🧩 GGUF grammar applied to llama.cpp request")
                     except Exception as e:
-                        print(f"⚠️ Failed to apply GGUF grammar: {e}")
+                        logger.warning(f"⚠️ Failed to apply GGUF grammar: {e}")
                 response = self.model.create_chat_completion(**completion_kwargs)
                 
                 content = response["choices"][0]["message"]["content"] or ""  # type: ignore

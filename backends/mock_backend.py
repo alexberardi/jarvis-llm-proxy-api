@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from managers.chat_types import ChatResult, ImagePart, NormalizedMessage, TextPart
+from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.base import LLMBackendBase
 
 
-class MockBackend:
+class MockBackend(LLMBackendBase):
     """Lightweight backend used for tests and local development."""
 
     def __init__(self, name: str = "mock-backend") -> None:
         self.name = name
+        self.model_name = name
+        self.inference_engine = "mock"
+        self.last_usage = None
 
     async def generate_text_chat(
         self,
@@ -56,4 +60,8 @@ class MockBackend:
             "total_tokens": len(combined.split()) + len(content.split()),
         }
         return ChatResult(content=content, usage=usage)
+
+    def unload(self) -> None:
+        """No-op for mock backend."""
+        pass
 

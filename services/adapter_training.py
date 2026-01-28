@@ -125,9 +125,25 @@ def _create_training_job(
     node_id: str,
     base_model_id: str,
 ) -> None:
-    """Create a new training job record in PENDING status."""
+    """Get or create a training job record, updating to PENDING status.
+
+    If the job was created at enqueue time with QUEUED status, updates it.
+    If no record exists, creates a new one with PENDING status.
+    """
     try:
         from db.models import TrainingJob
+
+        # Check if job already exists (created at enqueue time)
+        existing = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+        if existing:
+            # Update existing record from QUEUED to PENDING
+            existing.status = "PENDING"
+            existing.dataset_hash = dataset_hash  # May have been computed after enqueue
+            db.commit()
+            logger.info(f"Updated training job {job_id} from QUEUED to PENDING")
+            return
+
+        # Create new record if not found (fallback for older behavior)
         job = TrainingJob(
             job_id=job_id,
             dataset_hash=dataset_hash,
@@ -140,7 +156,7 @@ def _create_training_job(
         logger.info(f"Created training job {job_id} with status PENDING")
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to create training job: {e}")
+        logger.error(f"Failed to create/update training job: {e}")
 
 
 def _update_training_job_status(
@@ -216,49 +232,47 @@ def _run_training_command(env: Dict[str, str], timeout_s: int) -> None:
             try:
                 log_text = Path(log_path).read_text(encoding="utf-8")[-8000:]
                 if log_text.strip():
-                    print("📄 Adapter training output (tail):")
-                    print(log_text)
+                    logger.info("📄 Adapter training output (tail):")
+                    logger.info(log_text)
                 else:
-                    print("📄 Adapter training output is empty.")
+                    logger.info("📄 Adapter training output is empty.")
             except Exception as log_exc:
-                print(f"⚠️  Failed to read training log: {log_exc}")
+                logger.warning(f"⚠️  Failed to read training log: {log_exc}")
         raise AdapterTrainingError(f"Training command failed with exit code {exc.returncode}") from exc
 
 
 def _wait_for_gpu_memory(min_free_gb: float = 6.0, timeout_s: int = 30) -> bool:
     """Wait for GPU memory to be freed before training."""
-    import sys
     try:
         import torch
         if not torch.cuda.is_available():
-            print("⚠️  CUDA not available, skipping GPU memory wait", flush=True)
+            logger.warning("⚠️  CUDA not available, skipping GPU memory wait")
             return True
-        
+
         import time
         start = time.time()
-        print(f"🔍 Starting GPU memory check (need {min_free_gb} GiB free, timeout {timeout_s}s)", flush=True)
-        
+        logger.info(f"🔍 Starting GPU memory check (need {min_free_gb} GiB free, timeout {timeout_s}s)")
+
         while time.time() - start < timeout_s:
             free_mem_gb = torch.cuda.mem_get_info()[0] / (1024**3)
             total_mem_gb = torch.cuda.mem_get_info()[1] / (1024**3)
-            
+
             if free_mem_gb >= min_free_gb:
-                print(f"✅ GPU memory ready: {free_mem_gb:.2f}/{total_mem_gb:.2f} GiB free", flush=True)
+                logger.info(f"✅ GPU memory ready: {free_mem_gb:.2f}/{total_mem_gb:.2f} GiB free")
                 return True
-            
-            print(f"⏳ Waiting for GPU memory... {free_mem_gb:.2f}/{total_mem_gb:.2f} GiB free (need {min_free_gb} GiB)", flush=True)
-            sys.stdout.flush()
+
+            logger.debug(f"⏳ Waiting for GPU memory... {free_mem_gb:.2f}/{total_mem_gb:.2f} GiB free (need {min_free_gb} GiB)")
             time.sleep(2)
-        
+
         # Timeout - log warning but continue anyway
         free_mem_gb = torch.cuda.mem_get_info()[0] / (1024**3)
-        print(f"⚠️  GPU memory wait timeout. {free_mem_gb:.2f} GiB free, may be insufficient", flush=True)
+        logger.warning(f"⚠️  GPU memory wait timeout. {free_mem_gb:.2f} GiB free, may be insufficient")
         return False
     except ImportError:
-        print("⚠️  torch not available, skipping GPU memory wait", flush=True)
+        logger.warning("⚠️  torch not available, skipping GPU memory wait")
         return True
     except Exception as e:
-        print(f"⚠️  GPU memory check failed: {e}", flush=True)
+        logger.warning(f"⚠️  GPU memory check failed: {e}")
         return True
 
 
@@ -266,7 +280,7 @@ def _debug_pause_model_service() -> None:
     debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
     model_service_url = os.getenv("MODEL_SERVICE_URL")
     if not debug_enabled or not model_service_url:
-        print("⏭️  Debug pause skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)", flush=True)
+        logger.debug("⏭️  Debug pause skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
         return
 
     token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
@@ -275,25 +289,25 @@ def _debug_pause_model_service() -> None:
         headers["X-Internal-Token"] = token
 
     unload_url = model_service_url.rstrip("/") + "/internal/model/unload"
-    print(f"🔌 Requesting model unload from {unload_url}...", flush=True)
+    logger.info(f"🔌 Requesting model unload from {unload_url}...")
     try:
         with httpx.Client(timeout=60.0) as client:  # Longer timeout for vLLM cleanup
             resp = client.post(unload_url, headers=headers)
             if resp.status_code != 200:
-                print(f"⚠️  Debug pause: unload failed {resp.status_code}: {resp.text}", flush=True)
+                logger.warning(f"⚠️  Debug pause: unload failed {resp.status_code}: {resp.text}")
             else:
-                print("🧊 Debug pause: model service unloaded successfully", flush=True)
+                logger.info("🧊 Debug pause: model service unloaded successfully")
                 # Wait for GPU memory to actually be freed
                 _wait_for_gpu_memory(min_free_gb=6.0, timeout_s=30)
     except Exception as exc:
-        print(f"⚠️  Debug pause: unload request failed: {exc}", flush=True)
+        logger.warning(f"⚠️  Debug pause: unload request failed: {exc}")
 
 
 def _debug_resume_model_service() -> None:
     debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
     model_service_url = os.getenv("MODEL_SERVICE_URL")
     if not debug_enabled or not model_service_url:
-        print("⏭️  Debug resume skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)", flush=True)
+        logger.debug("⏭️  Debug resume skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
         return
 
     # Force garbage collection to release training memory
@@ -304,16 +318,16 @@ def _debug_resume_model_service() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            print("🧹 Forced CUDA cache clear after training", flush=True)
+            logger.info("🧹 Forced CUDA cache clear after training")
     except ImportError:
         pass
     except Exception as e:
-        print(f"⚠️  CUDA cleanup warning: {e}", flush=True)
+        logger.warning(f"⚠️  CUDA cleanup warning: {e}")
 
     # Wait for training's GPU memory to be released before attempting reload
     # vLLM at 75% utilization on a 12GB card needs ~9GB free
     min_free_for_vllm = 9.0  # Conservative estimate for 3B model on 12GB card
-    print(f"🧹 Waiting for training memory to be released (need ~{min_free_for_vllm} GiB for vLLM)...", flush=True)
+    logger.info(f"🧹 Waiting for training memory to be released (need ~{min_free_for_vllm} GiB for vLLM)...")
     _wait_for_gpu_memory(min_free_gb=min_free_for_vllm, timeout_s=60)
 
     token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
@@ -322,16 +336,16 @@ def _debug_resume_model_service() -> None:
         headers["X-Internal-Token"] = token
 
     reload_url = model_service_url.rstrip("/") + "/internal/model/reload"
-    print(f"🔄 Requesting model reload from {reload_url}...", flush=True)
+    logger.info(f"🔄 Requesting model reload from {reload_url}...")
     try:
         with httpx.Client(timeout=120.0) as client:  # Longer timeout for model loading
             resp = client.post(reload_url, headers=headers)
             if resp.status_code != 200:
-                print(f"⚠️  Debug resume: reload failed {resp.status_code}: {resp.text}", flush=True)
+                logger.warning(f"⚠️  Debug resume: reload failed {resp.status_code}: {resp.text}")
             else:
-                print("🔥 Debug resume: model service reloaded successfully", flush=True)
+                logger.info("🔥 Debug resume: model service reloaded successfully")
     except Exception as exc:
-        print(f"⚠️  Debug resume: reload request failed: {exc}", flush=True)
+        logger.warning(f"⚠️  Debug resume: reload request failed: {exc}")
 
 
 def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int) -> Dict[str, Any]:
@@ -354,6 +368,18 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
 
     if artifact_path.exists():
         adapter_format = _detect_adapter_format(artifact_path)
+        # Create database record for cached hits too
+        db = _get_db_session()
+        if db:
+            _create_training_job(db, job_id, dataset_hash, node_id, base_model_id)
+            _update_training_job_status(
+                db,
+                job_id,
+                "COMPLETE",
+                completed_at=datetime.now(timezone.utc),
+                artifact_path=str(artifact_path),
+            )
+            db.close()
         return {
             "artifact_url": _artifact_url(artifact_path),
             "artifact_metadata": {

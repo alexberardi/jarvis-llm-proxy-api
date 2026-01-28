@@ -1,16 +1,23 @@
+import logging
 import os
+import threading
 import time
-import torch
 from typing import List, Dict, Any, Optional
+
+import torch
 from transformers import (
-    AutoModelForCausalLM, 
-    AutoTokenizer, 
+    AutoModelForCausalLM,
+    AutoTokenizer,
     GenerationConfig,
     BitsAndBytesConfig
 )
-import threading
 
-class TransformersClient:
+from backends.base import LLMBackendBase
+
+logger = logging.getLogger("uvicorn")
+
+
+class TransformersClient(LLMBackendBase):
     def __init__(self, model_path: str, chat_format: str = None, stop_tokens: List[str] = None, context_window: int = None):
         if not model_path:
             raise ValueError("Model path is required")
@@ -55,14 +62,14 @@ class TransformersClient:
         # Note: Dynamic per-request adapters only supported on vLLM backend
         # Transformers backend runs base model only
         
-        print(f"🔍 Debug: Model path: {model_path}")
-        print(f"🔍 Debug: Chat format: {chat_format}")
-        print(f"🔍 Debug: Context window: {context_window}")
-        print(f"🔍 Debug: Device: {self.device}")
-        print(f"🔍 Debug: Quantization: {'enabled' if self.use_quantization else 'disabled'}")
-        print(f"🔍 Debug: Torch dtype: {self.torch_dtype}")
-        print(f"🔍 Debug: Trust remote code: {self.trust_remote_code}")
-        print(f"🔍 Debug: Inference engine: {self.inference_engine}")
+        logger.debug(f"🔍 Debug: Model path: {model_path}")
+        logger.debug(f"🔍 Debug: Chat format: {chat_format}")
+        logger.debug(f"🔍 Debug: Context window: {context_window}")
+        logger.debug(f"🔍 Debug: Device: {self.device}")
+        logger.debug(f"🔍 Debug: Quantization: {'enabled' if self.use_quantization else 'disabled'}")
+        logger.debug(f"🔍 Debug: Torch dtype: {self.torch_dtype}")
+        logger.debug(f"🔍 Debug: Trust remote code: {self.trust_remote_code}")
+        logger.debug(f"🔍 Debug: Inference engine: {self.inference_engine}")
         
         # Initialize model and tokenizer based on inference engine
         if self.inference_engine == "vllm":
@@ -70,12 +77,12 @@ class TransformersClient:
         else:
             self._load_model()
         
-        print(f"✅ Transformers model loaded successfully!")
-        
+        logger.info(f"✅ Transformers model loaded successfully!")
+
         # Warm up the model
         self._warmup_model()
-        
-        print(f"🔍 Debug: Model initialization complete")
+
+        logger.debug(f"🔍 Debug: Model initialization complete")
     
     def _get_device(self) -> str:
         """Determine the best device for inference"""
@@ -129,47 +136,47 @@ class TransformersClient:
                     load_in_8bit=True,
                 )
             else:
-                print(f"⚠️  Unknown quantization type: {self.quantization_type}")
+                logger.warning(f"⚠️  Unknown quantization type: {self.quantization_type}")
                 return None
         except ImportError:
-            print("⚠️  bitsandbytes not installed, disabling quantization")
+            logger.warning("⚠️  bitsandbytes not installed, disabling quantization")
             return None
     
     def _init_vllm(self):
         """Initialize vLLM backend for transformers"""
         try:
             from .vllm_backend import VLLMClient
-            print("🚀 Initializing vLLM backend for Transformers model")
-            
+            logger.info("🚀 Initializing vLLM backend for Transformers model")
+
             self.vllm_backend = VLLMClient(
-                self.model_path, 
-                self.chat_format, 
-                self.stop_tokens, 
+                self.model_path,
+                self.chat_format,
+                self.stop_tokens,
                 self.context_window
             )
-            
+
             # Set a dummy tokenizer for compatibility
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_path,
                 trust_remote_code=self.trust_remote_code
             )
-            
-            print("✅ vLLM backend initialized successfully")
-            
+
+            logger.info("✅ vLLM backend initialized successfully")
+
         except ImportError:
-            print("❌ vLLM not installed. Install with: pip install vllm")
+            logger.error("❌ vLLM not installed. Install with: pip install vllm")
             raise
         except Exception as e:
-            print(f"❌ Failed to initialize vLLM backend: {e}")
+            logger.error(f"❌ Failed to initialize vLLM backend: {e}")
             raise
     
     def _load_model(self):
         """Load the model and tokenizer"""
-        print(f"🔁 Loading Transformers model: {self.model_path}")
-        
+        logger.info(f"🔁 Loading Transformers model: {self.model_path}")
+
         # Load tokenizer
-        print("📝 Loading tokenizer...")
+        logger.debug("📝 Loading tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,
             trust_remote_code=self.trust_remote_code,
@@ -184,7 +191,7 @@ class TransformersClient:
         quantization_config = self._get_quantization_config()
         
         # Load model
-        print("🤖 Loading model...")
+        logger.debug("🤖 Loading model...")
         device_map_env = os.getenv("JARVIS_TRANSFORMERS_DEVICE_MAP", "").strip().lower()
         if device_map_env in {"", "auto"}:
             device_map = "auto" if self.device == "cuda" else None
@@ -216,14 +223,14 @@ class TransformersClient:
         # Set model to evaluation mode
         self.model.eval()
 
-        print(f"🔍 Debug: Model loaded on device: {next(self.model.parameters()).device}")
-        print(f"🔍 Debug: Model dtype: {next(self.model.parameters()).dtype}")
-        print(f"🔍 Debug: Tokenizer vocab size: {len(self.tokenizer)}")
-        
+        logger.debug(f"🔍 Debug: Model loaded on device: {next(self.model.parameters()).device}")
+        logger.debug(f"🔍 Debug: Model dtype: {next(self.model.parameters()).dtype}")
+        logger.debug(f"🔍 Debug: Tokenizer vocab size: {len(self.tokenizer)}")
+
         # Detect actual model context window
         self._detect_model_context_window()
-        print(f"🔍 Debug: Model context window: {self._actual_context_window or 'unknown'}")
-        print(f"🔍 Debug: Using context window: {self.context_window}")
+        logger.debug(f"🔍 Debug: Model context window: {self._actual_context_window or 'unknown'}")
+        logger.debug(f"🔍 Debug: Using context window: {self.context_window}")
 
     def _get_input_device(self) -> str:
         """Pick a safe input device when using accelerate device_map."""
@@ -249,22 +256,22 @@ class TransformersClient:
                     self._actual_context_window = getattr(config, attr)
                     # Use the detected context window if it's smaller than our setting
                     if self._actual_context_window < self.context_window:
-                        print(f"⚠️  Model's max context ({self._actual_context_window}) is smaller than configured ({self.context_window})")
-                        print(f"🔧 Adjusting context window to model's maximum: {self._actual_context_window}")
+                        logger.warning(f"⚠️  Model's max context ({self._actual_context_window}) is smaller than configured ({self.context_window})")
+                        logger.info(f"🔧 Adjusting context window to model's maximum: {self._actual_context_window}")
                         self.context_window = self._actual_context_window
                     break
         except Exception as e:
-            print(f"⚠️  Could not detect model context window: {e}")
+            logger.warning(f"⚠️  Could not detect model context window: {e}")
     
     def _warmup_model(self):
         """Warm up the model with a small inference"""
         try:
-            print(f"🔍 Debug: Warming up model...")
+            logger.debug(f"🔍 Debug: Warming up model...")
             warmup_messages = [{"role": "user", "content": "Hello"}]
             self._generate_response(warmup_messages, temperature=0.0, max_new_tokens=1)
-            print(f"🔍 Debug: Model warmup completed successfully")
+            logger.debug(f"🔍 Debug: Model warmup completed successfully")
         except Exception as e:
-            print(f"⚠️  Debug: Model warmup failed: {e}")
+            logger.warning(f"⚠️  Debug: Model warmup failed: {e}")
     
     def _format_messages(self, messages: List[Dict[str, str]]) -> str:
         """Format messages using the tokenizer's chat template or fallback"""
@@ -278,7 +285,7 @@ class TransformersClient:
                 )
                 return formatted
         except Exception as e:
-            print(f"⚠️  Chat template failed: {e}, using fallback formatting")
+            logger.warning(f"⚠️  Chat template failed: {e}, using fallback formatting")
         
         # Fallback formatting based on chat_format or generic
         if self.chat_format == "chatml":
@@ -346,7 +353,7 @@ class TransformersClient:
         # Check if input is too long and warn
         input_length = inputs.input_ids.shape[1]
         if input_length > max_input_length * 0.9:  # Warn if using >90% of available space
-            print(f"⚠️  Input length ({input_length}) is close to maximum ({max_input_length}). Consider reducing context or increasing context window.")
+            logger.warning(f"⚠️  Input length ({input_length}) is close to maximum ({max_input_length}). Consider reducing context or increasing context window.")
         
         # Set up generation config with conditional parameters
         generation_kwargs = {
@@ -396,8 +403,8 @@ class TransformersClient:
                 )
             except Exception as e:
                 if "not supported" in str(e).lower() or "invalid" in str(e).lower():
-                    print(f"⚠️  Generation parameter issue: {e}")
-                    print("🔧 Retrying with basic generation config...")
+                    logger.warning(f"⚠️  Generation parameter issue: {e}")
+                    logger.info("🔧 Retrying with basic generation config...")
                     # Fallback to basic generation
                     basic_config = GenerationConfig(
                         max_new_tokens=max_new_tokens or self.max_tokens,
@@ -424,9 +431,36 @@ class TransformersClient:
         for stop_token in self.stop_tokens:
             if response.endswith(stop_token):
                 response = response[:-len(stop_token)].strip()
-        
+
         return response
-    
+
+    def generate_text_chat(
+        self,
+        model_cfg: Any,
+        messages: List["NormalizedMessage"],
+        params: "GenerationParams",
+    ) -> "ChatResult":
+        """Generate text response using the Transformers backend.
+
+        Converts NormalizedMessage to dict format and calls chat_with_temperature.
+        """
+        from managers.chat_types import ChatResult, TextPart
+
+        # Convert NormalizedMessage to simple dict format
+        dict_messages = []
+        for msg in messages:
+            text_parts = []
+            for part in msg.content:
+                if isinstance(part, TextPart):
+                    text_parts.append(part.text)
+            dict_messages.append({
+                "role": msg.role,
+                "content": " ".join(text_parts)
+            })
+
+        content = self.chat_with_temperature(dict_messages, params.temperature)
+        return ChatResult(content=content, usage=self.last_usage)
+
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""
         return self.chat_with_temperature(messages, temperature)
@@ -441,7 +475,7 @@ class TransformersClient:
     
     def _chat_vllm(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat using vLLM backend"""
-        print(f"🚀 vLLM Transformers chat with {len(messages)} messages, temperature: {temperature}")
+        logger.debug(f"🚀 vLLM Transformers chat with {len(messages)} messages, temperature: {temperature}")
         try:
             response_text, usage = self.vllm_backend.generate(
                 messages=messages,
@@ -459,15 +493,15 @@ class TransformersClient:
             return response_text
             
         except Exception as e:
-            print(f"❌ vLLM Transformers chat error: {e}")
+            logger.error(f"❌ vLLM Transformers chat error: {e}")
             return ""
     
     def _chat_internal(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Internal chat implementation"""
         start_time = time.time()
-        
-        print(f"🔍 DEBUG: Starting chat with {len(messages)} messages")
-        print(f"🔍 DEBUG: Temperature: {temperature}")
+
+        logger.debug(f"🔍 DEBUG: Starting chat with {len(messages)} messages")
+        logger.debug(f"🔍 DEBUG: Temperature: {temperature}")
 
         try:
             # Generate response
@@ -494,15 +528,15 @@ class TransformersClient:
             tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
             
             # Print performance stats
-            print(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-            print(f"📊 Prompt: {prompt_tokens} tokens | Completion: {completion_tokens} tokens | Total: {total_tokens} tokens")
-            print(f"🌡️  Temperature: {temperature}")
-            print(f"🔧 Device: {self.device}")
-            
+            logger.debug(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+            logger.debug(f"📊 Prompt: {prompt_tokens} tokens | Completion: {completion_tokens} tokens | Total: {total_tokens} tokens")
+            logger.debug(f"🌡️  Temperature: {temperature}")
+            logger.debug(f"🔧 Device: {self.device}")
+
             return response
-            
+
         except Exception as e:
-            print(f"❌ Error during inference: {e}")
+            logger.error(f"❌ Error during inference: {e}")
             return ""
     
     def process_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -530,11 +564,11 @@ class TransformersClient:
                 "model_name": self.model_name
             }
             
-            print(f"🔥 Context processed for {len(messages)} messages")
+            logger.debug(f"🔥 Context processed for {len(messages)} messages")
             return processed_context
-            
+
         except Exception as e:
-            print(f"⚠️  Error processing context: {e}")
+            logger.warning(f"⚠️  Error processing context: {e}")
             return {
                 "messages": messages,
                 "context_processed": False,
@@ -547,25 +581,25 @@ class TransformersClient:
         """Unload the model and clean up resources"""
         # IMPORTANT: Unload vLLM backend first - this kills the EngineCore subprocess
         if hasattr(self, 'vllm_backend') and self.vllm_backend is not None:
-            print(f"🔌 Unloading vLLM backend for {self.model_name}...", flush=True)
+            logger.info(f"🔌 Unloading vLLM backend for {self.model_name}...")
             try:
                 self.vllm_backend.unload()
             except Exception as e:
-                print(f"⚠️  vLLM backend unload error: {e}", flush=True)
+                logger.warning(f"⚠️  vLLM backend unload error: {e}")
             self.vllm_backend = None
-        
+
         if hasattr(self, 'model'):
             del self.model
             self.model = None
         if hasattr(self, 'tokenizer'):
             del self.tokenizer
             self.tokenizer = None
-        
+
         # Clear CUDA cache if using CUDA
         if self.device == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        print(f"🔄 Unloaded model: {self.model_name}", flush=True)
+
+        logger.info(f"🔄 Unloaded model: {self.model_name}")
     
     def __del__(self):
         """Clean up on destruction"""

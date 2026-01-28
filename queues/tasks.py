@@ -1,4 +1,6 @@
 import os
+import signal
+import sys
 import time
 import asyncio
 import traceback
@@ -11,13 +13,26 @@ from fastapi import HTTPException
 from queues.redis_queue import current_timestamp_ms
 
 
+def _setup_work_horse_signals():
+    """Set up signal handlers for the RQ work horse process.
+
+    This MUST be called at the start of every job because:
+    1. RQ forks a work horse to run each job
+    2. Signal handlers may be reset during fork/exec
+    3. SIGPIPE from inherited sockets/pipes will kill the process otherwise
+    """
+    # Ignore SIGPIPE - prevents death from broken pipes/sockets
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+
 def _elapsed_ms(start_ms: int) -> int:
     return max(0, current_timestamp_ms() - start_ms)
 
 
 def _safe_print(msg: str):
+    """Print with [worker] prefix, ignoring broken pipe errors."""
     try:
-        print(msg, flush=True)
+        print(f"[worker] {msg}", flush=True)
     except BrokenPipeError:
         pass
 
@@ -26,6 +41,14 @@ def process_llm_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     RQ task: process a queued LLM job and invoke callback.
     """
+    # CRITICAL: Set up signal handlers first thing in the work horse
+    # This prevents SIGPIPE from killing the forked process
+    _setup_work_horse_signals()
+
+    # Debug: confirm we reached the job function (if this doesn't print, SIGPIPE is earlier)
+    sys.stderr.write(f"[worker] DEBUG: process_llm_job started, pid={os.getpid()}\n")
+    sys.stderr.flush()
+
     job_type = (payload.get("job_type") or "").lower()
     if job_type == "adapter_train":
         return _process_adapter_train_job(payload)

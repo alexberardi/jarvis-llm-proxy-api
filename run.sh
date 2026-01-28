@@ -73,9 +73,12 @@ if [[ "$RUN_MODEL_SERVICE" == "true" ]]; then
 fi
 
 # Optionally start queue worker
+# NOTE: Do NOT pipe worker output through sed - RQ forks work horses that inherit
+# the pipe, and broken pipes cause SIGPIPE (signal 13) crashes. Write directly instead.
 WORKER_PID=""
 if [[ "$RUN_QUEUE_WORKER" == "true" ]]; then
-    ( "$PY" scripts/queue_worker.py ) | sed -e 's/^/[worker] /' &
+    echo -e "${BLUE}[worker] Starting queue worker (output prefixed inline)${NC}"
+    LLM_PROXY_PROCESS_ROLE=worker "$PY" scripts/queue_worker.py &
     WORKER_PID=$!
     echo -e "${BLUE}🔢 WORKER_PID=${WORKER_PID}${NC}"
 fi
