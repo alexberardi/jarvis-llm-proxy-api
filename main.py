@@ -142,8 +142,20 @@ print(f"🔐 LLM_PROXY_INTERNAL_TOKEN set: {'yes' if os.getenv('LLM_PROXY_INTERN
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize remote logging on startup."""
+    """Initialize remote logging and pre-warm database connection on startup."""
     _setup_remote_logging()
+    # Pre-warm database connection to avoid first-request failures
+    try:
+        from sqlalchemy import text
+        from db.session import SessionLocal
+        from db.models import TrainingJob  # noqa: F401 - import to trigger table mapping
+        db = SessionLocal()
+        # Simple query to establish connection and warm the pool
+        db.execute(text("SELECT 1"))
+        db.close()
+        logger.info("Database connection pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"Database pre-warm failed (non-fatal): {e}")
 
 
 @app.on_event("shutdown")
@@ -152,6 +164,57 @@ async def shutdown_event():
     for handler in logger.handlers:
         if hasattr(handler, "close"):
             handler.close()
+
+
+def _create_queued_training_job(
+    job_id: str,
+    node_id: str,
+    base_model_id: str,
+    dataset_hash: Optional[str] = None,
+) -> bool:
+    """Create a training job record with QUEUED status at enqueue time.
+
+    Returns True if record was created/exists, False if DB unavailable.
+    Handles race condition where worker might create the record first.
+    """
+    try:
+        from sqlalchemy.exc import IntegrityError
+        from db.session import SessionLocal
+        from db.models import TrainingJob
+
+        db = SessionLocal()
+        try:
+            # First check if job already exists (worker may have created it)
+            existing = db.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+            if existing:
+                logger.info(f"Training job {job_id} already exists with status {existing.status}")
+                return True
+
+            job = TrainingJob(
+                job_id=job_id,
+                dataset_hash=dataset_hash or "",
+                node_id=node_id,
+                base_model_id=base_model_id,
+                status="QUEUED",
+            )
+            db.add(job)
+            db.commit()
+            logger.info(f"Created training job {job_id} with status QUEUED")
+            return True
+        except IntegrityError:
+            # Race condition: worker created the record between our check and insert
+            db.rollback()
+            logger.info(f"Training job {job_id} created by worker (race condition)")
+            return True
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to create queued training job: {e}")
+            return False
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Database not available for job tracking: {e}")
+        return False
 
 
 # ============================================================================
@@ -1427,10 +1490,27 @@ async def enqueue_job_endpoint(req: EnqueueRequest, request: Request):
     conn = get_redis_connection()
     # Dedup check
     if existing_dedup(conn, req.job_id, req.idempotency_key):
+        # Even for deduped requests, ensure DB record exists for adapter training
+        if job_type == "adapter_train":
+            train_req = req.request or {}
+            _create_queued_training_job(
+                job_id=req.job_id,
+                node_id=train_req.get("node_id", ""),
+                base_model_id=train_req.get("base_model_id", ""),
+                dataset_hash=train_req.get("dataset_hash"),
+            )
         return EnqueueResponse(accepted=True, job_id=req.job_id, deduped=True)
 
     if not mark_deduped(conn, req.job_id, req.idempotency_key, req.ttl_seconds):
-        # Another writer won the race
+        # Another writer won the race - ensure DB record exists
+        if job_type == "adapter_train":
+            train_req = req.request or {}
+            _create_queued_training_job(
+                job_id=req.job_id,
+                node_id=train_req.get("node_id", ""),
+                base_model_id=train_req.get("base_model_id", ""),
+                dataset_hash=train_req.get("dataset_hash"),
+            )
         return EnqueueResponse(accepted=True, job_id=req.job_id, deduped=True)
 
     payload = req.dict()
@@ -1443,6 +1523,16 @@ async def enqueue_job_endpoint(req: EnqueueRequest, request: Request):
         # Roll back dedupe key on failure to enqueue
         conn.delete(f"llmproxy:dedupe:{req.job_id}:{req.idempotency_key}")
         raise HTTPException(status_code=500, detail={"error": {"type": "internal_server_error", "message": f"Failed to enqueue job: {e}", "code": "enqueue_failed"}})
+
+    # For adapter training jobs, create DB record immediately with QUEUED status
+    if job_type == "adapter_train":
+        train_req = req.request or {}
+        _create_queued_training_job(
+            job_id=req.job_id,
+            node_id=train_req.get("node_id", ""),
+            base_model_id=train_req.get("base_model_id", ""),
+            dataset_hash=train_req.get("dataset_hash"),
+        )
 
     return EnqueueResponse(accepted=True, job_id=req.job_id, deduped=False)
 
@@ -1473,6 +1563,35 @@ async def list_models():
                 "owned_by": "jarvis",
             })
         return ModelListResponse(object="list", data=models)
+
+
+@app.get("/v1/engine")
+async def get_engine_info():
+    """Get inference engine information.
+
+    Returns the current inference engine type and its caching capabilities.
+    Use `allows_caching` to determine if warmup messages provide benefit.
+
+    Response:
+        inference_engine: "llama_cpp" | "vllm" | "transformers"
+        allows_caching: true if engine benefits from warmup messages (prefix caching)
+        backend_type: the model backend type
+        description: human-readable description of caching behavior
+    """
+    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
+    if not model_service_url:
+        openai_error("internal_server_error", "MODEL_SERVICE_URL is not set; cannot get engine info.", 500)
+    import httpx
+    url = model_service_url.rstrip("/") + "/internal/model/engine"
+    headers = {}
+    if internal_token:
+        headers["X-Internal-Token"] = internal_token
+    async with httpx.AsyncClient(timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))) as client:
+        resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            openai_error("internal_server_error", f"Model service error {resp.status_code}: {resp.text}", 500)
+        return resp.json()
 
 
 @app.get("/v1/adapters/date-keys")

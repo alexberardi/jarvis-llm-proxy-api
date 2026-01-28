@@ -10,11 +10,14 @@ Extraction strategy:
 - FastText confidence < 75%: Let LLM handle independently
 """
 
-from typing import Optional, List, Tuple
-from pathlib import Path
-from dataclasses import dataclass
 import json
+import logging
 import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, List, Tuple
+
+logger = logging.getLogger("uvicorn")
 
 # ============================================================================
 # DATE KEY VOCABULARY
@@ -203,10 +206,10 @@ class FastTextDateKeyExtractor:
             import fasttext
             self._model = fasttext.load_model(str(model_path))
             self._loaded = True
-            print(f"✅ FastText date key extractor loaded ({len(self._model.labels)} labels)", flush=True)
+            logger.info(f"✅ FastText date key extractor loaded ({len(self._model.labels)} labels)")
             return True
         except Exception as e:
-            print(f"⚠️ FastText model not available: {e}", flush=True)
+            logger.warning(f"⚠️ FastText model not available: {e}")
             return False
 
     def predict(self, text: str, k: int = 5, threshold: float = 0.3) -> FastTextPrediction:
@@ -249,7 +252,7 @@ class FastTextDateKeyExtractor:
                 all_predictions=all_preds
             )
         except Exception as e:
-            print(f"⚠️ FastText prediction error: {e}", flush=True)
+            logger.warning(f"⚠️ FastText prediction error: {e}")
             return FastTextPrediction(keys=[], max_confidence=0.0, all_predictions=[])
 
 
@@ -283,7 +286,7 @@ class LLMDateKeyExtractor:
 
         adapter_path = get_adapter_path()
         if not adapter_path:
-            print("⚠️  Date key adapter not trained yet, skipping LLM extraction", flush=True)
+            logger.warning("⚠️  Date key adapter not trained yet, skipping LLM extraction")
             return False
 
         # Use lightweight model env var, or fall back to Llama 1B
@@ -294,7 +297,7 @@ class LLMDateKeyExtractor:
             base_model = "meta-llama/Llama-3.2-1B-Instruct"
 
         try:
-            print(f"📦 Loading LLM date key extractor (base: {base_model}, adapter: {adapter_path})...", flush=True)
+            logger.info(f"📦 Loading LLM date key extractor (base: {base_model}, adapter: {adapter_path})...")
 
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -324,7 +327,7 @@ class LLMDateKeyExtractor:
                     torch_dtype=torch.float16,
                 )
             else:
-                print(f"🖥️  Loading LLM date key extractor on CPU", flush=True)
+                logger.info(f"🖥️  Loading LLM date key extractor on CPU")
                 base = AutoModelForCausalLM.from_pretrained(
                     base_model,
                     device_map="cpu",
@@ -342,13 +345,11 @@ class LLMDateKeyExtractor:
                 self._device = torch.device("cpu")
 
             self._loaded = True
-            print(f"✅ LLM date key extractor loaded successfully on {self._device}", flush=True)
+            logger.info(f"✅ LLM date key extractor loaded successfully on {self._device}")
             return True
 
         except Exception as e:
-            print(f"❌ Failed to load LLM date key extractor: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"❌ Failed to load LLM date key extractor: {e}")
             return False
 
     # System prompt used during training - must match exactly
@@ -421,12 +422,12 @@ Rules:
                             return [k for k in date_keys if isinstance(k, str)]
                     except:
                         pass
-                print(f"⚠️  Could not parse date keys from response: {response!r}", flush=True)
+                logger.warning(f"⚠️  Could not parse date keys from response: {response!r}")
 
             return []
 
         except Exception as e:
-            print(f"❌ LLM date key extraction error: {e}", flush=True)
+            logger.error(f"❌ LLM date key extraction error: {e}")
             return []
 
     def unload(self):
@@ -449,7 +450,7 @@ Rules:
         except:
             pass
 
-        print("🧹 LLM date key extractor unloaded", flush=True)
+        logger.info("🧹 LLM date key extractor unloaded")
 
 
 # ============================================================================
@@ -492,17 +493,17 @@ class HybridDateKeyExtractor:
 
         # High confidence - use FastText directly
         if ft_result.max_confidence >= FASTTEXT_HIGH_CONFIDENCE:
-            print(f"⚡ FastText high confidence ({ft_result.max_confidence:.2f}): {ft_result.keys}", flush=True)
+            logger.debug(f"⚡ FastText high confidence ({ft_result.max_confidence:.2f}): {ft_result.keys}")
             return ft_result.keys
 
         # No FastText model or very low confidence - LLM only
         if ft_result.max_confidence < FASTTEXT_HINT_THRESHOLD:
             if ft_result.max_confidence > 0:
-                print(f"🤖 FastText low confidence ({ft_result.max_confidence:.2f}), using LLM only", flush=True)
+                logger.debug(f"🤖 FastText low confidence ({ft_result.max_confidence:.2f}), using LLM only")
             return self._llm.extract(text, hint=None)
 
         # Medium confidence - give hint to LLM
-        print(f"💡 FastText medium confidence ({ft_result.max_confidence:.2f}), hinting LLM with: {ft_result.keys}", flush=True)
+        logger.debug(f"💡 FastText medium confidence ({ft_result.max_confidence:.2f}), hinting LLM with: {ft_result.keys}")
         return self._llm.extract(text, hint=ft_result.keys)
 
     def unload(self):

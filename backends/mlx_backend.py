@@ -1,4 +1,5 @@
 import io
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,9 +10,12 @@ from mlx_lm.sample_utils import make_sampler
 from mlx_lm.utils import load
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.base import LLMBackendBase
+
+logger = logging.getLogger("uvicorn")
 
 
-class MlxClient:
+class MlxClient(LLMBackendBase):
     """MLX backend with optional per-request LoRA adapter support.
 
     Adapter Loading:
@@ -37,16 +41,17 @@ class MlxClient:
     """
 
     def __init__(self, model_path: str, adapter_path: Optional[str] = None):
-        print("🔁 Loading MLX model...")
+        logger.info("🔁 Loading MLX model...")
         self.model_name = model_path
         self.model_path = model_path
         self._current_adapter_path: Optional[str] = None
         self._lora_layers_applied: bool = False
         self.last_usage = None
+        self.inference_engine = "mlx"  # Apple Silicon MLX backend
 
         # Load model with optional initial adapter
         if adapter_path:
-            print(f"🧩 Loading MLX model with adapter: {adapter_path}")
+            logger.info(f"🧩 Loading MLX model with adapter: {adapter_path}")
             self.model, self.tokenizer = load(model_path, adapter_path=adapter_path)
             self._current_adapter_path = adapter_path
             self._lora_layers_applied = True
@@ -81,13 +86,13 @@ class MlxClient:
             }
         """
         if self._current_adapter_path == adapter_path:
-            print(f"🧩 MLX adapter already loaded: {adapter_path}")
+            logger.debug(f"🧩 MLX adapter already loaded: {adapter_path}")
             return
 
         try:
             from mlx_lm.tuner.utils import load_adapters
 
-            print(f"🧩 MLX loading adapter: {adapter_path}")
+            logger.info(f"🧩 MLX loading adapter: {adapter_path}")
             start_time = time.time()
 
             # load_adapters modifies model in-place and returns it
@@ -96,17 +101,17 @@ class MlxClient:
             self._lora_layers_applied = True
 
             elapsed = time.time() - start_time
-            print(f"✅ MLX adapter loaded in {elapsed:.2f}s")
+            logger.info(f"✅ MLX adapter loaded in {elapsed:.2f}s")
 
         except ImportError as e:
-            print(f"⚠️  MLX LoRA tuner not available: {e}")
-            print("    Install with: pip install mlx-lm[lora]")
+            logger.warning(f"⚠️  MLX LoRA tuner not available: {e}")
+            logger.info("    Install with: pip install mlx-lm[lora]")
         except FileNotFoundError as e:
-            print(f"⚠️  MLX adapter files not found: {e}")
-            print(f"    Expected: {adapter_path}/adapters.safetensors")
-            print(f"    And:      {adapter_path}/adapter_config.json")
+            logger.warning(f"⚠️  MLX adapter files not found: {e}")
+            logger.info(f"    Expected: {adapter_path}/adapters.safetensors")
+            logger.info(f"    And:      {adapter_path}/adapter_config.json")
         except Exception as e:
-            print(f"⚠️  MLX adapter load failed: {e}")
+            logger.warning(f"⚠️  MLX adapter load failed: {e}")
 
     def remove_adapter(self) -> None:
         """Remove LoRA adapter and revert to base model.
@@ -115,13 +120,13 @@ class MlxClient:
         without any adapter applied.
         """
         if not self._lora_layers_applied:
-            print("🧩 MLX no adapter to remove (base model)")
+            logger.debug("🧩 MLX no adapter to remove (base model)")
             return
 
         try:
             from mlx_lm.tuner.utils import remove_lora_layers
 
-            print("🧩 MLX removing adapter, reverting to base model...")
+            logger.info("🧩 MLX removing adapter, reverting to base model...")
             start_time = time.time()
 
             self.model = remove_lora_layers(self.model)
@@ -129,12 +134,12 @@ class MlxClient:
             self._lora_layers_applied = False
 
             elapsed = time.time() - start_time
-            print(f"✅ MLX adapter removed in {elapsed:.2f}s")
+            logger.info(f"✅ MLX adapter removed in {elapsed:.2f}s")
 
         except ImportError as e:
-            print(f"⚠️  MLX LoRA tuner not available: {e}")
+            logger.warning(f"⚠️  MLX LoRA tuner not available: {e}")
         except Exception as e:
-            print(f"⚠️  MLX adapter removal failed: {e}")
+            logger.warning(f"⚠️  MLX adapter removal failed: {e}")
 
     def get_current_adapter(self) -> Optional[str]:
         """Return the currently loaded adapter path, or None if base model."""
@@ -178,9 +183,9 @@ class MlxClient:
                     full_prompt += f"[ASSISTANT] {content}\n"
             full_prompt = full_prompt.strip()
 
-        print("⚙️  Generating with MLX...")
-        print(f"🌡️  Temperature: {temperature}")
-        print(f"🔍 Debug: Using chat template: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
+        logger.debug("⚙️  Generating with MLX...")
+        logger.debug(f"🌡️  Temperature: {temperature}")
+        logger.debug(f"🔍 Debug: Using chat template: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
         
         # Create sampler with temperature
         sampler = make_sampler(temp=temperature)
@@ -213,8 +218,8 @@ class MlxClient:
         
         # Print performance metrics
         tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
-        print(f"🚀 Generated ~{completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-        print(f"📊 Prompt: ~{prompt_tokens} tokens | Completion: ~{completion_tokens} tokens | Total: ~{total_tokens} tokens")
+        logger.debug(f"🚀 Generated ~{completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+        logger.debug(f"📊 Prompt: ~{prompt_tokens} tokens | Completion: ~{completion_tokens} tokens | Total: ~{total_tokens} tokens")
         
         return response.strip()
 
@@ -229,8 +234,8 @@ class MlxClient:
         if params.adapter_settings:
             adapter_hash = params.adapter_settings.get("hash", "unknown")
             adapter_scale = params.adapter_settings.get("scale", 1.0)
-            print(f"🧩 [MLX] Adapter requested: hash={adapter_hash}, scale={adapter_scale}")
-            print(f"🧩 [MLX] TODO: Per-request adapter loading not yet implemented")
+            logger.info(f"🧩 [MLX] Adapter requested: hash={adapter_hash}, scale={adapter_scale}")
+            logger.debug(f"🧩 [MLX] TODO: Per-request adapter loading not yet implemented")
             # Future implementation:
             # adapter_path = resolve_adapter_from_hash(adapter_hash)
             # self.load_adapter(adapter_path)
@@ -273,7 +278,7 @@ class MlxClient:
         }
 
         tokens_per_second = completion_tokens / (end_time - start_time) if end_time > start_time else 0
-        print(f"🚀 [MLX vision] ~{completion_tokens} tokens in {end_time - start_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+        logger.debug(f"🚀 [MLX vision] ~{completion_tokens} tokens in {end_time - start_time:.2f}s ({tokens_per_second:.1f} tok/s)")
 
         return ChatResult(content=response.strip(), usage=self.last_usage)
     
@@ -330,11 +335,11 @@ class MlxClient:
                 "timestamp": time.time()
             }
             
-            print(f"🔥 Context processed for {len(messages)} messages")
+            logger.debug(f"🔥 Context processed for {len(messages)} messages")
             return processed_context
-            
+
         except Exception as e:
-            print(f"⚠️  Error processing context: {e}")
+            logger.warning(f"⚠️  Error processing context: {e}")
             # Fallback to storing raw messages
             return {
                 "messages": messages,
@@ -350,7 +355,7 @@ class MlxClient:
         if hasattr(self, 'tokenizer'):
             del self.tokenizer
             self.tokenizer = None
-        print(f"🔄 Unloaded model: {self.model_name}")
+        logger.info(f"🔄 Unloaded model: {self.model_name}")
 
     @staticmethod
     def _to_dict_messages(messages: List[NormalizedMessage]) -> List[Dict[str, str]]:

@@ -9,9 +9,10 @@ from typing import Any, Dict, List, Tuple
 from PIL import Image
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.base import LLMBackendBase
 
 
-class MlxVisionClient:
+class MlxVisionClient(LLMBackendBase):
     """
     Vision-only MLX client that relies on mlx-vlm (vision build).
 
@@ -50,6 +51,7 @@ class MlxVisionClient:
 
         self.config = load_config(model_path)
         self.last_usage = None
+        self.inference_engine = "mlx_vision"  # Apple Silicon MLX vision backend
 
     async def generate_vision_chat(
         self,
@@ -172,4 +174,21 @@ class MlxVisionClient:
         prompt_text = "\n".join(prompt_parts).strip()
 
         return prompt_text, images
+
+    def generate_text_chat(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """Vision-only backend does not support text-only chat."""
+        raise NotImplementedError(
+            "MlxVisionClient is vision-only. Use MlxClient for text generation."
+        )
+
+    def unload(self) -> None:
+        """Unload vision model from memory."""
+        self.model = None
+        self.processor = None
+        self.config = None
 

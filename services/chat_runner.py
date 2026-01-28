@@ -1,11 +1,14 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
+
+logger = logging.getLogger("uvicorn")
 
 from managers.chat_types import (
     NormalizedMessage,
@@ -27,6 +30,7 @@ Ensure all strings are properly escaped and all brackets are balanced."""
 
 def openai_error(error_type: str, message: str, status_code: int = 400):
     """Raise an HTTPException in OpenAI-style shape."""
+    logger.error(f"🚨 OpenAI error: type={error_type}, status={status_code}, message={message[:200]}")
     raise HTTPException(
         status_code=status_code,
         detail={
@@ -431,7 +435,7 @@ Return the corrected, complete JSON:"""
 
     for attempt in range(max_retries):
         try:
-            print(f"⚠️ JSON invalid, retrying ({attempt + 1}/{max_retries})...")
+            logger.warning(f"⚠️ JSON invalid, retrying ({attempt + 1}/{max_retries})...")
             if hasattr(backend, "generate_text_chat"):
                 if asyncio.iscoroutinefunction(backend.generate_text_chat):
                     result: ChatResult = await backend.generate_text_chat(
@@ -468,7 +472,7 @@ Return the corrected, complete JSON:"""
                     parsed = json.loads(fixed_content)
                     schema_error = validate_json_schema(parsed, response_schema)
                     if schema_error:
-                        print(f"⚠️ JSON schema validation failed on retry: {schema_error}")
+                        logger.warning(f"⚠️ JSON schema validation failed on retry: {schema_error}")
                         continue
                 return fixed_content
         except Exception:
@@ -507,7 +511,7 @@ async def run_chat_completion(
     response_format_dict = None
     if req.response_format:
         response_format_dict = req.response_format.model_dump(exclude_none=True)
-        print(f"🔎 response_format={response_format_dict}")
+        logger.debug(f"🔎 response_format={response_format_dict}")
         if response_format_dict.get("type") == "json_object":
             requires_json = True
 
@@ -532,18 +536,18 @@ async def run_chat_completion(
                 try:
                     with open(dump_path, "w", encoding="utf-8") as handle:
                         handle.write(grammar)
-                    print(f"🧩 GGUF grammar dumped to {dump_path}")
+                    logger.debug(f"🧩 GGUF grammar dumped to {dump_path}")
                 except Exception as e:
-                    print(f"⚠️ Failed to dump GGUF grammar: {e}")
-            print("🧩 GGUF JSON grammar enabled for this request")
+                    logger.warning(f"⚠️ Failed to dump GGUF grammar: {e}")
+            logger.info("🧩 GGUF JSON grammar enabled for this request")
         except Exception as e:
-            print(f"⚠️ Failed to build GGUF JSON grammar: {e}")
+            logger.warning(f"⚠️ Failed to build GGUF JSON grammar: {e}")
 
     # Extract adapter settings if provided and enabled
     adapter_settings_dict = None
     if req.adapter_settings and req.adapter_settings.enabled:
         adapter_settings_dict = req.adapter_settings.model_dump()
-        print(f"🧩 Adapter settings: hash={req.adapter_settings.hash}, scale={req.adapter_settings.scale}")
+        logger.info(f"🧩 Adapter settings: hash={req.adapter_settings.hash}, scale={req.adapter_settings.scale}")
 
     params = GenerationParams(
         temperature=req.temperature or 0.7,
@@ -616,7 +620,7 @@ async def run_chat_completion(
                     except Exception as e:
                         schema_error = f"invalid JSON: {e}"
                     if schema_error:
-                        print(f"⚠️ JSON schema validation failed: {schema_error}")
+                        logger.warning(f"⚠️ JSON schema validation failed: {schema_error}")
                     else:
                         final_content = repaired_content
                 else:
@@ -649,7 +653,6 @@ async def run_chat_completion(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Internal error during chat completion: {e}")
         openai_error("internal_server_error", f"Internal error: {str(e)}", 500)
 

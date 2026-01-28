@@ -173,14 +173,45 @@ def download_adapter(adapter_hash: str, force: bool = False) -> Optional[Path]:
         raise
 
 
+def _extract_local_zip(adapter_hash: str) -> Optional[Path]:
+    """
+    Extract a local adapter.zip if it exists but files aren't extracted.
+
+    This handles adapters created by local training, which output adapter.zip
+    but don't extract the files.
+
+    Args:
+        adapter_hash: Unique adapter identifier
+
+    Returns:
+        Path to adapter directory if zip was extracted, None if no zip found
+    """
+    adapter_dir = _get_local_adapter_dir(adapter_hash)
+    zip_path = adapter_dir / "adapter.zip"
+
+    if not zip_path.exists():
+        return None
+
+    logger.info("Extracting local adapter zip: %s", zip_path)
+    try:
+        with ZipFile(zip_path, "r") as zf:
+            zf.extractall(adapter_dir)
+        logger.info("Adapter %s extracted from local zip", adapter_hash)
+        return adapter_dir
+    except Exception as exc:
+        logger.exception("Failed to extract local adapter %s: %s", adapter_hash, exc)
+        return None
+
+
 def resolve_adapter_path(adapter_hash: str) -> Optional[Path]:
     """
     Resolve adapter hash to local path, downloading if necessary.
 
     This is the main entry point for adapter resolution. It:
-    1. Checks local cache
-    2. Downloads from S3 if not cached
-    3. Returns local path for backend to use
+    1. Checks local cache (extracted files)
+    2. Checks for local zip and extracts if needed
+    3. Downloads from S3 if not cached
+    4. Returns local path for backend to use
 
     Args:
         adapter_hash: Unique adapter identifier
@@ -191,11 +222,17 @@ def resolve_adapter_path(adapter_hash: str) -> Optional[Path]:
     Raises:
         RuntimeError: If adapter not found in S3 or download fails
     """
-    # Check local cache
+    # Check local cache (extracted files)
     if adapter_exists_locally(adapter_hash):
         adapter_dir = _get_local_adapter_dir(adapter_hash)
         logger.debug("Adapter %s found in cache: %s", adapter_hash, adapter_dir)
         return adapter_dir
+
+    # Check for local zip that needs extraction (from local training)
+    extracted = _extract_local_zip(adapter_hash)
+    if extracted and adapter_exists_locally(adapter_hash):
+        logger.debug("Adapter %s extracted from local zip: %s", adapter_hash, extracted)
+        return extracted
 
     # Check S3
     if not adapter_exists_in_s3(adapter_hash):

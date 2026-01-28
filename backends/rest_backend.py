@@ -1,13 +1,18 @@
 import httpx
+import json
+import logging
 import os
 import time
-import json
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.base import LLMBackendBase
 
-class RestClient:
+logger = logging.getLogger("uvicorn")
+
+
+class RestClient(LLMBackendBase):
     def __init__(self, base_url: str, model_name: str = "jarvis-llm", model_type: str = "main"):
         """
         Initialize REST client for remote API providers
@@ -30,8 +35,9 @@ class RestClient:
             self.model_name = env_model_name
         else:
             self.model_name = model_name
-            
+
         self.last_usage = None
+        self.inference_engine = "rest"  # Remote API backend
         
         # Get authentication configuration from environment
         self.auth_type = os.getenv("JARVIS_REST_AUTH_TYPE", "none").lower()
@@ -47,10 +53,10 @@ class RestClient:
         # Get timeout configuration
         self.timeout = int(os.getenv("JARVIS_REST_TIMEOUT", "60"))
         
-        print(f"🌐 Initialized REST backend for {self.provider}")
-        print(f"🔗 Base URL: {self.base_url}")
-        print(f"🔑 Auth type: {self.auth_type}")
-        print(f"📝 Request format: {self.request_format}")
+        logger.info(f"🌐 Initialized REST backend for {self.provider}")
+        logger.debug(f"🔗 Base URL: {self.base_url}")
+        logger.debug(f"🔑 Auth type: {self.auth_type}")
+        logger.debug(f"📝 Request format: {self.request_format}")
         
         # Initialize HTTP client
         self.client = httpx.AsyncClient(timeout=self.timeout)
@@ -221,9 +227,9 @@ class RestClient:
         endpoint = self._get_endpoint_for_provider()
         url = urljoin(self.base_url, endpoint)
         
-        print(f"🌐 Sending request to {url}")
-        print(f"🌡️  Temperature: {temperature}")
-        print(f"📝 Provider: {self.provider}")
+        logger.debug(f"🌐 Sending request to {url}")
+        logger.debug(f"🌡️  Temperature: {temperature}")
+        logger.debug(f"📝 Provider: {self.provider}")
         
         try:
             # Send request
@@ -248,24 +254,24 @@ class RestClient:
             if self.last_usage:
                 completion_tokens = self.last_usage.get("completion_tokens", 0)
                 tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
-                print(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-                print(f"📊 Usage: {self.last_usage}")
+                logger.debug(f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+                logger.debug(f"📊 Usage: {self.last_usage}")
             else:
-                print(f"🚀 Generated response in {total_time:.2f}s")
-            
+                logger.debug(f"🚀 Generated response in {total_time:.2f}s")
+
             return content.strip()
-            
+
         except httpx.HTTPStatusError as e:
-            print(f"❌ HTTP error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"❌ HTTP error: {e.response.status_code} - {e.response.text}")
             raise Exception(f"HTTP {e.response.status_code}: {e.response.text}")
         except httpx.RequestError as e:
-            print(f"❌ Request error: {e}")
+            logger.error(f"❌ Request error: {e}")
             raise Exception(f"Request failed: {e}")
         except json.JSONDecodeError as e:
-            print(f"❌ JSON decode error: {e}")
+            logger.error(f"❌ JSON decode error: {e}")
             raise Exception(f"Invalid JSON response: {e}")
         except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+            logger.error(f"❌ Unexpected error: {e}")
             raise Exception(f"Unexpected error: {e}")
     
     async def process_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -281,11 +287,11 @@ class RestClient:
                 "provider": self.provider
             }
             
-            print(f"🔥 Context processed for {len(messages)} messages (REST backend)")
+            logger.debug(f"🔥 Context processed for {len(messages)} messages (REST backend)")
             return processed_context
-            
+
         except Exception as e:
-            print(f"⚠️  Error processing context: {e}")
+            logger.warning(f"⚠️  Error processing context: {e}")
             return {
                 "messages": messages,
                 "context_processed": False,
@@ -293,7 +299,50 @@ class RestClient:
                 "backend": "rest",
                 "provider": self.provider
             }
-    
+
+    def generate_text_chat(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """Generate text response using the REST API.
+
+        Converts NormalizedMessage to dict format and calls chat_with_temperature.
+        Note: This is sync but internally calls async methods via asyncio.
+        """
+        import asyncio
+
+        # Convert NormalizedMessage to simple dict format
+        dict_messages = []
+        for msg in messages:
+            text_parts = []
+            for part in msg.content:
+                if isinstance(part, TextPart):
+                    text_parts.append(part.text)
+            dict_messages.append({
+                "role": msg.role,
+                "content": " ".join(text_parts)
+            })
+
+        # Run the async method
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Create a new task if we're already in an async context
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run,
+                    self.chat_with_temperature(dict_messages, params.temperature)
+                )
+                content = future.result()
+        else:
+            content = loop.run_until_complete(
+                self.chat_with_temperature(dict_messages, params.temperature)
+            )
+
+        return ChatResult(content=content, usage=self.last_usage)
+
     async def generate_vision_chat(
         self,
         model_cfg: Any,
@@ -338,7 +387,7 @@ class RestClient:
                 "content": content_parts
             })
         
-        print(f"🖼️  Sending vision request to {self.provider} with {len(messages)} messages")
+        logger.debug(f"🖼️  Sending vision request to {self.provider} with {len(messages)} messages")
         
         try:
             # Use the chat_completion method which supports structured content
@@ -361,22 +410,22 @@ class RestClient:
             if self.last_usage:
                 completion_tokens = self.last_usage.get("completion_tokens", 0)
                 tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
-                print(f"🚀 [Vision] Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-                print(f"📊 Usage: {self.last_usage}")
+                logger.debug(f"🚀 [Vision] Generated {completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+                logger.debug(f"📊 Usage: {self.last_usage}")
             else:
-                print(f"🚀 [Vision] Generated response in {total_time:.2f}s")
-            
+                logger.debug(f"🚀 [Vision] Generated response in {total_time:.2f}s")
+
             return ChatResult(content=content.strip(), usage=self.last_usage)
-            
+
         except Exception as e:
-            print(f"❌ Error in vision chat: {e}")
+            logger.error(f"❌ Error in vision chat: {e}")
             raise
     
     async def unload(self):
         """Clean up resources"""
         if hasattr(self, 'client'):
             await self.client.aclose()
-        print(f"🔄 Unloaded REST backend: {self.provider}")
+        logger.info(f"🔄 Unloaded REST backend: {self.provider}")
     
     def __del__(self):
         """Cleanup when object is destroyed"""

@@ -1,4 +1,6 @@
+import logging
 import multiprocessing
+
 # Fix for vLLM CUDA multiprocessing issue
 try:
     multiprocessing.set_start_method('spawn', force=True)
@@ -8,6 +10,7 @@ except RuntimeError:
 
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import StructuredOutputsParams
 import inspect
 import os
 import time
@@ -15,8 +18,12 @@ from typing import List, Dict, Any, Union, Optional
 from .power_metrics import PowerMetrics
 from services import adapter_cache
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
+from backends.base import LLMBackendBase
 
-class VLLMClient:
+logger = logging.getLogger("uvicorn")
+
+
+class VLLMClient(LLMBackendBase):
     def __init__(self, model_path: str, chat_format: str, stop_tokens: List[str] = None, context_window: int = None):
         if not model_path:
             raise ValueError("Model path is required")
@@ -28,6 +35,7 @@ class VLLMClient:
         self.model = None
         self.last_usage = None
         self._lora_enabled = False
+        self.inference_engine = "vllm"  # For /v1/engine endpoint
 
         # Initialize power monitoring (optional)
         self.power_metrics = PowerMetrics()
@@ -51,26 +59,26 @@ class VLLMClient:
         max_num_batched_tokens = int(os.getenv("JARVIS_VLLM_MAX_BATCHED_TOKENS", "8192"))
         max_num_seqs = int(os.getenv("JARVIS_VLLM_MAX_NUM_SEQS", "256"))
         
-        print(f"🚀 vLLM Debug: Model path: {model_path}")
-        print(f"🚀 vLLM Debug: Chat format: {chat_format}")
-        print(f"🚀 vLLM Debug: Context window: {context_window}")
-        print(f"🚀 vLLM Debug: Tensor parallel size: {tensor_parallel_size}")
-        print(f"🚀 vLLM Debug: GPU memory utilization: {gpu_memory_utilization}")
-        print(f"🚀 vLLM Debug: Max model length: {max_model_len}")
-        print(f"🚀 vLLM Debug: Max batched tokens: {max_num_batched_tokens}")
-        print(f"🚀 vLLM Debug: Max sequences: {max_num_seqs}")
-        print(f"🚀 vLLM Debug: Quantization: {vllm_quantization or 'none'}")
+        logger.debug(f"🚀 vLLM Debug: Model path: {model_path}")
+        logger.debug(f"🚀 vLLM Debug: Chat format: {chat_format}")
+        logger.debug(f"🚀 vLLM Debug: Context window: {context_window}")
+        logger.debug(f"🚀 vLLM Debug: Tensor parallel size: {tensor_parallel_size}")
+        logger.debug(f"🚀 vLLM Debug: GPU memory utilization: {gpu_memory_utilization}")
+        logger.debug(f"🚀 vLLM Debug: Max model length: {max_model_len}")
+        logger.debug(f"🚀 vLLM Debug: Max batched tokens: {max_num_batched_tokens}")
+        logger.debug(f"🚀 vLLM Debug: Max sequences: {max_num_seqs}")
+        logger.debug(f"🚀 vLLM Debug: Quantization: {vllm_quantization or 'none'}")
         
         # Check if model_path is a local GGUF file
         if model_path.endswith('.gguf') and ('/' in model_path or '\\' in model_path):
-            print(f"⚠️  vLLM does not support local GGUF files directly")
-            print(f"💡 For GGUF files, use JARVIS_INFERENCE_ENGINE=llama_cpp instead")
-            print(f"💡 For vLLM, use HuggingFace model names like: microsoft/Phi-3-mini-4k-instruct")
+            logger.warning(f"⚠️  vLLM does not support local GGUF files directly")
+            logger.info(f"💡 For GGUF files, use JARVIS_INFERENCE_ENGINE=llama_cpp instead")
+            logger.info(f"💡 For vLLM, use HuggingFace model names like: microsoft/Phi-3-mini-4k-instruct")
             raise ValueError(f"vLLM requires HuggingFace model names or converted models, not local GGUF files: {model_path}")
 
         # Initialize vLLM engine
         try:
-            print(f"🚀 Loading vLLM model: {model_path}")
+            logger.info(f"🚀 Loading vLLM model: {model_path}")
             llm_kwargs = {
                 "model": model_path,
                 "tensor_parallel_size": tensor_parallel_size,
@@ -95,7 +103,7 @@ class VLLMClient:
                 self._lora_enabled = True
                 llm_kwargs["max_lora_rank"] = max_lora_rank
                 llm_kwargs["max_loras"] = max_loras
-                print(f"🧩 vLLM LoRA enabled: max_lora_rank={max_lora_rank} max_loras={max_loras}")
+                logger.info(f"🧩 vLLM LoRA enabled: max_lora_rank={max_lora_rank} max_loras={max_loras}")
             if vllm_quantization is not None:
                 llm_kwargs["quantization"] = vllm_quantization
 
@@ -103,23 +111,23 @@ class VLLMClient:
                 **llm_kwargs,
             )
             
-            print(f"✅ vLLM model loaded successfully!")
+            logger.info(f"✅ vLLM model loaded successfully!")
             try:
                 engine = getattr(self.model, "llm_engine", None)
                 model_config = getattr(engine, "model_config", None) if engine else None
                 if model_config:
-                    print(f"🚀 vLLM Debug: model_config.quantization={getattr(model_config, 'quantization', None)}")
-                    print(f"🚀 vLLM Debug: model_config.dtype={getattr(model_config, 'dtype', None)}")
+                    logger.debug(f"🚀 vLLM Debug: model_config.quantization={getattr(model_config, 'quantization', None)}")
+                    logger.debug(f"🚀 vLLM Debug: model_config.dtype={getattr(model_config, 'dtype', None)}")
                     hf_config = getattr(model_config, "hf_config", None)
                     if hf_config and getattr(hf_config, "quantization_config", None):
-                        print(f"🚀 vLLM Debug: hf_config.quantization_config={hf_config.quantization_config}")
+                        logger.debug(f"🚀 vLLM Debug: hf_config.quantization_config={hf_config.quantization_config}")
             except Exception as e:
-                print(f"⚠️  vLLM Debug: Failed to read model config: {e}")
+                logger.warning(f"⚠️  vLLM Debug: Failed to read model config: {e}")
             
         except Exception as e:
-            print(f"❌ Failed to load vLLM model: {e}")
-            print(f"💡 Make sure the model name is a valid HuggingFace model")
-            print(f"💡 Examples: microsoft/Phi-3-mini-4k-instruct, meta-llama/Llama-2-7b-chat-hf")
+            logger.error(f"❌ Failed to load vLLM model: {e}")
+            logger.info(f"💡 Make sure the model name is a valid HuggingFace model")
+            logger.info(f"💡 Examples: microsoft/Phi-3-mini-4k-instruct, meta-llama/Llama-2-7b-chat-hf")
             raise
         
         # Store stop tokens for sampling
@@ -157,36 +165,29 @@ class VLLMClient:
         stop_tokens = stop or self.stop_tokens or []
         
         # Handle JSON structured output if requested
-        guided_json = None
+        structured_outputs = None
         if response_format and response_format.get("type") == "json_object":
-            # vLLM supports guided_json for JSON schema enforcement
-            # For basic JSON object, we can use a simple schema
-            # More complex schemas can be passed via json_schema in response_format
+            # vLLM uses StructuredOutputsParams for JSON schema enforcement
             if "json_schema" in response_format:
-                guided_json = response_format["json_schema"]
+                json_schema = response_format["json_schema"]
+                structured_outputs = StructuredOutputsParams(json=json_schema)
+                logger.info(f"🔒 Enforcing JSON schema with {len(json_schema.get('required', []))} required fields")
             else:
-                # Default: allow any JSON object
-                guided_json = {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": True
-                }
-        
+                # Default: just require valid JSON object (no specific schema)
+                structured_outputs = StructuredOutputsParams(json_object=True)
+                logger.info("🔒 Enforcing valid JSON object (no schema)")
+
         sampling_kwargs = {
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
             "stop": stop_tokens,
         }
-        if guided_json is not None:
-            supported = "guided_json" in inspect.signature(SamplingParams).parameters
-            if supported:
-                sampling_kwargs["guided_json"] = guided_json
-            else:
-                print("⚠️  vLLM SamplingParams does not support guided_json; ignoring response_format")
+        if structured_outputs is not None:
+            sampling_kwargs["structured_outputs"] = structured_outputs
         sampling_params = SamplingParams(**sampling_kwargs)
         
-        print(f"🚀 vLLM generating with max_tokens={max_tokens}, temp={temperature}, top_p={top_p}")
+        logger.debug(f"🚀 vLLM generating with max_tokens={max_tokens}, temp={temperature}, top_p={top_p}")
         
         try:
             # Generate response
@@ -195,9 +196,9 @@ class VLLMClient:
             if lora_request:
                 if "lora_request" in inspect.signature(self.model.generate).parameters:
                     generate_kwargs["lora_request"] = lora_request
-                    print(f"🧩 Adapter active (vLLM): {lora_request.lora_path}")
+                    logger.info(f"🧩 Adapter active (vLLM): {lora_request.lora_path}")
                 else:
-                    print("⚠️  vLLM generate() does not support lora_request; ignoring adapter")
+                    logger.warning("⚠️  vLLM generate() does not support lora_request; ignoring adapter")
 
             outputs = self.model.generate([prompt], sampling_params, **generate_kwargs)
             
@@ -221,7 +222,7 @@ class VLLMClient:
             return generated_text, usage
             
         except Exception as e:
-            print(f"❌ vLLM generation error: {e}")
+            logger.error(f"❌ vLLM generation error: {e}")
             raise
     
     def chat(self, messages: List[Dict[str, str]], max_tokens: int = None) -> str:
@@ -274,13 +275,13 @@ class VLLMClient:
                         lora_int_id=lora_id,
                         lora_path=str(adapter_path),
                     )
-                    print(f"🧩 [vLLM] Per-request adapter: hash={adapter_hash[:8]}, path={adapter_path}")
+                    logger.info(f"🧩 [vLLM] Per-request adapter: hash={adapter_hash[:8]}, path={adapter_path}")
                 else:
-                    print(f"⚠️  [vLLM] Adapter not found: hash={adapter_hash}")
+                    logger.warning(f"⚠️  [vLLM] Adapter not found: hash={adapter_hash}")
             elif adapter_hash and not adapter_enabled:
-                print(f"🧩 [vLLM] Adapter disabled by request: hash={adapter_hash}")
+                logger.debug(f"🧩 [vLLM] Adapter disabled by request: hash={adapter_hash}")
         elif params.adapter_settings and not self._lora_enabled:
-            print(f"⚠️  [vLLM] Adapter requested but LoRA not enabled (max_loras=0?)")
+            logger.warning(f"⚠️  [vLLM] Adapter requested but LoRA not enabled (max_loras=0?)")
 
         # Generate using existing method
         response_text, usage = self.generate(
@@ -362,13 +363,13 @@ class VLLMClient:
                         # Check if it's a vLLM EngineCore process
                         if 'python' in child.name().lower() or 'vllm' in ' '.join(child.cmdline()).lower():
                             child_pids.append(child.pid)
-                            print(f"🔍 Found vLLM child process: PID {child.pid}")
+                            logger.debug(f"🔍 Found vLLM child process: PID {child.pid}")
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
             except ImportError:
-                print("⚠️  psutil not available, will use basic cleanup")
+                logger.warning("⚠️  psutil not available, will use basic cleanup")
             except Exception as e:
-                print(f"⚠️  Error finding child processes: {e}")
+                logger.warning(f"⚠️  Error finding child processes: {e}")
             
             # Attempt to gracefully shutdown vLLM engine if available
             try:
@@ -380,23 +381,23 @@ class VLLMClient:
                         # Try shutdown method
                         if hasattr(engine_core, "shutdown"):
                             engine_core.shutdown()
-                            print("🧹 vLLM engine_core shutdown complete")
+                            logger.info("🧹 vLLM engine_core shutdown complete")
                         # Try close method
                         if hasattr(engine_core, "close"):
                             engine_core.close()
-                            print("🧹 vLLM engine_core close complete")
+                            logger.info("🧹 vLLM engine_core close complete")
                     # Then try engine shutdown
                     if hasattr(engine, "shutdown"):
                         engine.shutdown()
-                        print("🧹 vLLM engine shutdown complete")
+                        logger.info("🧹 vLLM engine shutdown complete")
             except Exception as e:
-                print(f"⚠️  vLLM engine shutdown failed: {e}")
+                logger.warning(f"⚠️  vLLM engine shutdown failed: {e}")
 
             # Delete model reference
             model_ref = self.model
             self.model = None
             del model_ref
-            print(f"🗑️  vLLM model reference deleted: {self.model_name}")
+            logger.info(f"🗑️  vLLM model reference deleted: {self.model_name}")
             
             # Force garbage collection to trigger __del__ on vLLM objects
             gc.collect()
@@ -408,18 +409,18 @@ class VLLMClient:
             for pid in child_pids:
                 try:
                     os.kill(pid, signal.SIGTERM)
-                    print(f"🔪 Sent SIGTERM to vLLM child PID {pid}")
+                    logger.debug(f"🔪 Sent SIGTERM to vLLM child PID {pid}")
                 except OSError:
                     pass  # Process already dead
-            
+
             # Give processes time to terminate gracefully
             time.sleep(2)
-            
+
             # SIGKILL any stubborn processes
             for pid in child_pids:
                 try:
                     os.kill(pid, signal.SIGKILL)
-                    print(f"💀 Sent SIGKILL to vLLM child PID {pid}")
+                    logger.debug(f"💀 Sent SIGKILL to vLLM child PID {pid}")
                 except OSError:
                     pass  # Process already dead
             
@@ -440,11 +441,11 @@ class VLLMClient:
                     # Check memory
                     free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
                     total_mem = torch.cuda.mem_get_info()[1] / (1024**3)
-                    print(f"🧹 CUDA cache cleared. Free: {free_mem:.2f}/{total_mem:.2f} GiB")
+                    logger.info(f"🧹 CUDA cache cleared. Free: {free_mem:.2f}/{total_mem:.2f} GiB")
             except ImportError:
                 pass
             except Exception as e:
-                print(f"⚠️  CUDA cleanup error: {e}")
+                logger.warning(f"⚠️  CUDA cleanup error: {e}")
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information"""
