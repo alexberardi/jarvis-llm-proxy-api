@@ -443,9 +443,9 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
                 db, job_id, "FAILED", error_message=str(e)
             )
             db.close()
-        _debug_resume_model_service()
         raise
     finally:
+        # Always resume model service (finally runs whether success or exception)
         _debug_resume_model_service()
 
     if not output_dir.exists() or not any(output_dir.iterdir()):

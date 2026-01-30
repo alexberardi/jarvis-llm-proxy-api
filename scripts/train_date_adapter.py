@@ -83,6 +83,31 @@ def parse_args():
         default=256,
         help="Maximum sequence length"
     )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        default=True,
+        help="Enable gradient checkpointing to save memory (default: True)"
+    )
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_false",
+        dest="gradient_checkpointing",
+        help="Disable gradient checkpointing"
+    )
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default="adamw_8bit",
+        choices=["adamw_torch", "adamw_8bit", "paged_adamw_8bit", "paged_adamw_32bit"],
+        help="Optimizer (adamw_8bit saves memory)"
+    )
+    parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=4,
+        help="Gradient accumulation steps"
+    )
     return parser.parse_args()
 
 
@@ -137,8 +162,11 @@ def main():
     print(f"Output dir: {args.output_dir}")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Grad accum: {args.grad_accum}")
+    print(f"Optimizer: {args.optim}")
     print(f"LoRA rank: {args.lora_r}")
     print(f"LoRA alpha: {args.lora_alpha}")
+    print(f"Gradient checkpointing: {args.gradient_checkpointing}")
     print("=" * 60)
     
     # Check training data exists
@@ -164,8 +192,12 @@ def main():
     # Check device
     if torch.cuda.is_available():
         device = "cuda"
+        # Clear any existing CUDA cache
+        torch.cuda.empty_cache()
         print(f"🎮 Using CUDA: {torch.cuda.get_device_name(0)}")
-        print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        total_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        free_mem = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / 1e9
+        print(f"   Memory: {total_mem:.1f} GB total, {free_mem:.1f} GB free")
     elif torch.backends.mps.is_available():
         device = "mps"
         print("🍎 Using MPS (Apple Silicon)")
@@ -207,18 +239,22 @@ def main():
         device_map = {"": 0}
     
     print(f"   Device map: {device_map}")
-    
-    # Use 4-bit quantization if on CUDA for memory efficiency
-    if device == "cuda":
+
+    # Use 4-bit quantization if on CUDA and not disabled (e.g., for AWQ models)
+    # Date adapter training has its own env var, separate from general adapter training
+    load_in_4bit = os.getenv("JARVIS_DATE_ADAPTER_TRAIN_LOAD_IN_4BIT", "true").lower() in ("true", "1", "yes")
+    if device == "cuda" and load_in_4bit:
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
-        print("   Using 4-bit quantization")
+        print("   Using 4-bit quantization (BitsAndBytes)")
     else:
         bnb_config = None
+        if device == "cuda" and not load_in_4bit:
+            print("   Skipping BitsAndBytes quantization (JARVIS_DATE_ADAPTER_TRAIN_LOAD_IN_4BIT=false)")
     
     # Load model
     print("\n🧠 Loading base model...", flush=True)
@@ -232,7 +268,12 @@ def main():
     
     if bnb_config:
         model = prepare_model_for_kbit_training(model)
-    
+
+    # Enable gradient checkpointing to save memory (critical for 8B+ models)
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        print("   ✓ Gradient checkpointing enabled")
+
     # Configure LoRA
     print("\n🔩 Configuring LoRA...", flush=True)
     lora_config = LoraConfig(
@@ -246,6 +287,14 @@ def main():
     
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+
+    # Report memory usage after model loading
+    if device == "cuda":
+        allocated = torch.cuda.memory_allocated(0) / 1e9
+        reserved = torch.cuda.memory_reserved(0) / 1e9
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"   GPU Memory: {allocated:.1f} GB allocated, {reserved:.1f} GB reserved, {total:.1f} GB total")
+        print(f"   Available for training: ~{total - reserved:.1f} GB")
     
     # Training arguments
     output_dir = Path(args.output_dir)
@@ -256,7 +305,8 @@ def main():
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=args.grad_accum,
+        optim=args.optim,
         learning_rate=args.learning_rate,
         weight_decay=0.01,
         warmup_ratio=0.1,
@@ -272,6 +322,7 @@ def main():
         greater_is_better=False,
         bf16=device == "cuda",
         fp16=False,
+        gradient_checkpointing=args.gradient_checkpointing,
         dataloader_num_workers=0,
         remove_unused_columns=False,
         report_to="none",
