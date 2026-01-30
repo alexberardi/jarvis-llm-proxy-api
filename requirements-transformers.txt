@@ -8,6 +8,7 @@ accelerate>=0.20.0
 
 # Quantization support (optional but recommended)
 bitsandbytes>=0.39.0
+llmcompressor>=0.8.0  # AWQ/GPTQ quantization for vLLM inference
 
 # LoRA adapters
 peft>=0.12.0

@@ -112,6 +112,28 @@ def _get_param(params: Dict[str, Any], key: str, default: Any) -> Any:
     return params.get(key) if params and key in params else default
 
 
+def _is_quantized_model(model_path: str) -> bool:
+    """Check if a local model is pre-quantized (AWQ, GPTQ, compressed-tensors, etc.)."""
+    config_path = Path(model_path) / "config.json"
+    if not config_path.exists():
+        return False
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        quant_config = config.get("quantization_config")
+        if quant_config:
+            # Check for common quantization methods
+            quant_method = quant_config.get("quant_method", "")
+            if quant_method in ("awq", "gptq", "compressed-tensors", "marlin"):
+                return True
+            # Also check if format indicates quantization
+            fmt = quant_config.get("format", "")
+            if "quantized" in fmt.lower() or "pack" in fmt.lower():
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def main() -> int:
     output_dir = os.getenv("JARVIS_TRAIN_OUTPUT_DIR")
     dataset_path = os.getenv("JARVIS_TRAIN_DATASET_PATH")
@@ -131,14 +153,29 @@ def main() -> int:
 
     hf_base_model_id = _get_param(params, "hf_base_model_id", os.getenv("JARVIS_ADAPTER_HF_BASE_MODEL_ID"))
     training_model_id = base_model_id
-    if base_model_id.endswith(".gguf"):
+
+    # Check if base model is GGUF or pre-quantized - these require the original HF model for training
+    needs_hf_model = base_model_id.endswith(".gguf") or _is_quantized_model(base_model_id)
+    if needs_hf_model:
         if not hf_base_model_id:
-            print(
-                "GGUF base model detected. Provide hf_base_model_id in params "
-                "or set JARVIS_ADAPTER_HF_BASE_MODEL_ID.",
-                flush=True,
-            )
+            if base_model_id.endswith(".gguf"):
+                print(
+                    "GGUF base model detected. Provide hf_base_model_id in params "
+                    "or set JARVIS_ADAPTER_HF_BASE_MODEL_ID.",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Pre-quantized model detected (AWQ/GPTQ/compressed-tensors). "
+                    "Cannot train directly on quantized weights.\n"
+                    "Provide hf_base_model_id in params or set JARVIS_ADAPTER_HF_BASE_MODEL_ID "
+                    "to point to the original (non-quantized) HuggingFace model.\n"
+                    f"Example: hf_base_model_id='meta-llama/Llama-3.1-8B-Instruct'",
+                    flush=True,
+                )
             return 2
+        print(f"ℹ️  Using HuggingFace model for training: {hf_base_model_id}", flush=True)
+        print(f"ℹ️  Adapter will be compatible with: {base_model_id}", flush=True)
         training_model_id = hf_base_model_id
 
     max_seq_len = int(_get_param(params, "max_seq_len", os.getenv("JARVIS_ADAPTER_MAX_SEQ_LEN", "2048")))
@@ -259,7 +296,33 @@ def main() -> int:
         print("ℹ️  GGUF LoRA conversion is disabled due to llama.cpp runtime issues.", flush=True)
         print("ℹ️  Adapter saved in PEFT format. Use vLLM or Transformers backend for inference.", flush=True)
         # Still return success - the PEFT adapter is valid and usable with other backends
-    
+
+    # Cleanup: destroy any distributed process groups and clear CUDA cache
+    # This prevents "destroy_process_group() was not called" warnings and
+    # ensures clean GPU state for subsequent vLLM reinitialization
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
+            print("🧹 Destroyed torch distributed process group", flush=True)
+    except Exception as e:
+        print(f"⚠️  Process group cleanup warning: {e}", flush=True)
+
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print("🧹 CUDA cache cleared", flush=True)
+    except Exception as e:
+        print(f"⚠️  CUDA cleanup warning: {e}", flush=True)
+
+    # Delete model and trainer to release GPU memory before subprocess exits
+    del trainer
+    del model
+
+    import gc
+    gc.collect()
+
     print(f"✅ Adapter training complete. Output: {out}", flush=True)
     return 0
 

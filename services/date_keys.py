@@ -284,6 +284,11 @@ class LLMDateKeyExtractor:
         if self._loaded:
             return True
 
+        # Check if LLM extraction is disabled (e.g., when date extraction is merged into main model)
+        if os.getenv("JARVIS_DISABLE_DATE_KEY_LLM", "").lower() in ("1", "true", "yes"):
+            logger.info("ℹ️  LLM date key extraction disabled via JARVIS_DISABLE_DATE_KEY_LLM")
+            return False
+
         adapter_path = get_adapter_path()
         if not adapter_path:
             logger.warning("⚠️  Date key adapter not trained yet, skipping LLM extraction")

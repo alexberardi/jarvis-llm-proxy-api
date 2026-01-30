@@ -265,6 +265,15 @@ secrets.json
 credentials.json # Setup configuration (contains local paths and hardware info)
 .setup_config
 
+# Local vLLM source (for development)
+vllm-src/
+
+# Training work directory (job artifacts)
+work/
+
+# Personal progress notes
+current-progress.md
+
 # Production environment files
 prod.env
 *.env

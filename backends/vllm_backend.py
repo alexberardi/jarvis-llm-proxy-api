@@ -426,10 +426,22 @@ class VLLMClient(LLMBackendBase):
             
             # Final GC and cache clear
             gc.collect()
-            
+
             # Clear CUDA cache multiple times with delay
             try:
                 import torch
+                import torch.distributed as dist
+
+                # Destroy any distributed process groups (NCCL cleanup)
+                # This is critical - vLLM creates process groups that must be destroyed
+                # before reinitializing, otherwise "Engine core initialization failed"
+                if dist.is_initialized():
+                    try:
+                        dist.destroy_process_group()
+                        logger.info("🧹 Destroyed torch distributed process group")
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to destroy process group: {e}")
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
@@ -437,7 +449,7 @@ class VLLMClient(LLMBackendBase):
                     gc.collect()
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                    
+
                     # Check memory
                     free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
                     total_mem = torch.cuda.mem_get_info()[1] / (1024**3)
