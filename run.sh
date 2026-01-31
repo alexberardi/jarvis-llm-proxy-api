@@ -59,15 +59,20 @@ RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
 MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
 MODEL_SERVICE_TOKEN_EXPORT="${MODEL_SERVICE_TOKEN:-${LLM_PROXY_INTERNAL_TOKEN:-}}"
 
-# Start API server in background with prefixed logs (reload always disabled here)
-( start_server "false" ) | sed -e 's/^/[api] /' &
+# Start API server in background
+# NOTE: Do NOT pipe output through sed - vLLM's logging causes BrokenPipeError (SIGPIPE)
+# when the pipe breaks during model initialization
+echo -e "${BLUE}[api] Starting API server${NC}"
+start_server "false" &
 API_PID=$!
 echo -e "${BLUE}🔢 API_PID=${API_PID}${NC}"
 
 # Start model service in background
+# NOTE: Same SIGPIPE issue applies here - no sed piping
 MODEL_PID=""
 if [[ "$RUN_MODEL_SERVICE" == "true" ]]; then
-  ( MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" ) | sed -e 's/^/[model] /' &
+  echo -e "${BLUE}[model] Starting model service on port $MODEL_SERVICE_PORT${NC}"
+  MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" &
   MODEL_PID=$!
   echo -e "${BLUE}🔢 MODEL_PID=${MODEL_PID}${NC}"
 fi
