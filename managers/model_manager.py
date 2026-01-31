@@ -1,5 +1,55 @@
+import logging
 import os
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger("uvicorn")
+
+
+def _get_settings_service():
+    """Get the SettingsService singleton, or None if unavailable."""
+    try:
+        from services.settings_service import get_settings_service
+        return get_settings_service()
+    except Exception:
+        return None
+
+
+def _get_setting(key: str, env_fallback: str, default: Any, value_type: str = "string") -> Any:
+    """Get a setting value with fallback to environment variable.
+
+    Order of precedence:
+    1. SettingsService (database + cache)
+    2. Environment variable
+    3. Default value
+    """
+    settings = _get_settings_service()
+
+    # Try settings service first
+    if settings:
+        try:
+            value = settings.get(key)
+            if value is not None:
+                return value
+        except Exception as e:
+            logger.debug(f"Settings service unavailable for {key}: {e}")
+
+    # Fallback to environment variable
+    raw = os.getenv(env_fallback)
+    if raw is None or raw == "":
+        return default
+
+    # Type coercion
+    try:
+        if value_type == "int":
+            return int(raw)
+        elif value_type == "float":
+            return float(raw)
+        elif value_type == "bool":
+            return raw.lower() in ("true", "1", "yes", "on")
+        else:
+            return raw
+    except ValueError:
+        return default
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -45,30 +95,60 @@ class ModelManager:
         self._initialize_models()
     
     def _initialize_models(self):
-        # Get environment variables
-        model_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
-        lightweight_model_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND")
+        # Get configuration from SettingsService (falls back to env vars)
+        model_backend = _get_setting(
+            "model.main.backend", "JARVIS_MODEL_BACKEND", "GGUF"
+        ).upper()
+        lightweight_model_backend = _get_setting(
+            "model.lightweight.backend", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND", ""
+        )
         if lightweight_model_backend:
             lightweight_model_backend = lightweight_model_backend.upper()
-        cloud_model_backend = os.getenv("JARVIS_CLOUD_MODEL_BACKEND", "REST").upper()
-        vision_model_backend = os.getenv("JARVIS_VISION_MODEL_BACKEND")
+        cloud_model_backend = _get_setting(
+            "model.cloud.backend", "JARVIS_CLOUD_MODEL_BACKEND", "REST"
+        ).upper()
+        vision_model_backend = _get_setting(
+            "model.vision.backend", "JARVIS_VISION_MODEL_BACKEND", ""
+        )
         if vision_model_backend:
             vision_model_backend = vision_model_backend.upper()
-        
-        main_model_path = os.getenv("JARVIS_MODEL_NAME")
-        lightweight_model_path = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME")
-        cloud_model_path = os.getenv("JARVIS_CLOUD_MODEL_NAME")
-        vision_model_path = os.getenv("JARVIS_VISION_MODEL_NAME")
+
+        main_model_path = _get_setting(
+            "model.main.name", "JARVIS_MODEL_NAME", None
+        )
+        lightweight_model_path = _get_setting(
+            "model.lightweight.name", "JARVIS_LIGHTWEIGHT_MODEL_NAME", ""
+        )
+        cloud_model_path = _get_setting(
+            "model.cloud.name", "JARVIS_CLOUD_MODEL_NAME", ""
+        )
+        vision_model_path = _get_setting(
+            "model.vision.name", "JARVIS_VISION_MODEL_NAME", ""
+        )
         vision_rest_url = os.getenv("JARVIS_VISION_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))
-        main_chat_format = os.getenv("JARVIS_MODEL_CHAT_FORMAT")
-        main_stop_tokens = os.getenv("JARVIS_MODEL_STOP_TOKENS")
-        lightweight_chat_format = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CHAT_FORMAT")
+        main_chat_format = _get_setting(
+            "model.main.chat_format", "JARVIS_MODEL_CHAT_FORMAT", ""
+        )
+        main_stop_tokens = _get_setting(
+            "model.main.stop_tokens", "JARVIS_MODEL_STOP_TOKENS", ""
+        )
+        lightweight_chat_format = _get_setting(
+            "model.lightweight.chat_format", "JARVIS_LIGHTWEIGHT_MODEL_CHAT_FORMAT", ""
+        )
         lightweight_stop_tokens = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_STOP_TOKENS")
         cloud_chat_format = os.getenv("JARVIS_CLOUD_MODEL_CHAT_FORMAT")
-        main_context_window = _get_int_env("JARVIS_MODEL_CONTEXT_WINDOW", 512)
-        lightweight_context_window = _get_int_env("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 512)
-        cloud_context_window = _get_int_env("JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 512)
-        vision_context_window = _get_int_env("JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072)
+        main_context_window = _get_setting(
+            "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 8192, "int"
+        )
+        lightweight_context_window = _get_setting(
+            "model.lightweight.context_window", "JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 8192, "int"
+        )
+        cloud_context_window = _get_setting(
+            "model.cloud.context_window", "JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 4096, "int"
+        )
+        vision_context_window = _get_setting(
+            "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072, "int"
+        )
         
         # Check if we should share vLLM models (same name or empty lightweight name/backend)
         should_share_vllm = (

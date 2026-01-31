@@ -12,12 +12,16 @@ from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest
 from services.chat_runner import run_chat_completion
 from services.date_keys import extract_date_keys, HybridDateKeyExtractor
+from api.settings_routes import router as settings_router
 
 load_dotenv()
 
 logger = logging.getLogger("uvicorn")
 
 app = FastAPI()
+
+# Include settings routes
+app.include_router(settings_router)
 
 
 # ============================================================================
@@ -185,6 +189,16 @@ def reload_models(x_internal_token: str | None = Header(default=None)):
     require_internal_token(x_internal_token)
     global model_manager
     logger.info("🔄 Reloading models (debug resume)")
+
+    # Invalidate settings cache before reloading
+    try:
+        from services.settings_service import get_settings_service
+        settings = get_settings_service()
+        settings.invalidate_cache()
+        logger.info("🔄 Settings cache invalidated")
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to invalidate settings cache: {e}")
+
     try:
         model_manager.unload_all()
     except Exception:
