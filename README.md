@@ -248,7 +248,7 @@ JARVIS_REST_AUTH_TOKEN=your_key
 JARVIS_REST_AUTH_HEADER=X-API-Key
 ```
 
-For detailed configuration options, see [REST_BACKEND_CONFIG.md](REST_BACKEND_CONFIG.md).
+For detailed configuration options, see [REST_BACKEND_CONFIG.md](docs/REST_BACKEND_CONFIG.md).
 
 ## API Endpoints
 
@@ -289,7 +289,11 @@ python test_rest_backend.py
 
 - `.env`: Main configuration file
 - `rest-backend-example.env`: Example REST backend configuration
-- `REST_BACKEND_CONFIG.md`: Detailed REST backend documentation
+- `docs/`: Detailed backend documentation
+  - `GGUF_CONFIGURATION_GUIDE.md`: GGUF environment variable reference
+  - `GGUF_OPTIMIZATION_GUIDE.md`: Performance tuning guide
+  - `REST_BACKEND_CONFIG.md`: REST backend configuration
+  - `VLLM_INTEGRATION.md`: vLLM integration guide
 
 ## Development
 
