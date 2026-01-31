@@ -121,6 +121,7 @@ celerybeat.pid
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Environments
 .env
