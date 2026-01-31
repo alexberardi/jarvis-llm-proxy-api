@@ -1612,9 +1612,8 @@ async def get_date_keys():
     return response
 
 
-@app.get("/v1/health")
-async def health():
-    """Health proxy to model service"""
+async def _get_health_status():
+    """Internal health check logic."""
     model_service_url = os.getenv("MODEL_SERVICE_URL")
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
     if not model_service_url:
@@ -1630,6 +1629,18 @@ async def health():
             return {"status": "degraded", "reason": f"Model service error {resp.status_code}", "body": resp.text[:200]}
         data = resp.json()
         return {"status": "healthy", "model_service": data}
+
+
+@app.get("/health")
+async def root_health():
+    """Root-level health endpoint (standardized across all services)."""
+    return await _get_health_status()
+
+
+@app.get("/v1/health")
+async def health():
+    """Health proxy to model service (legacy endpoint)."""
+    return await _get_health_status()
 
 
 @app.get("/v1/training/status/{job_id}")
