@@ -10,7 +10,7 @@ def _get_settings_service():
     try:
         from services.settings_service import get_settings_service
         return get_settings_service()
-    except Exception:
+    except (ImportError, RuntimeError):
         return None
 
 

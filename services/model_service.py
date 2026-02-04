@@ -201,8 +201,8 @@ def reload_models(x_internal_token: str | None = Header(default=None)):
 
     try:
         model_manager.unload_all()
-    except Exception:
-        pass
+    except (RuntimeError, AttributeError) as e:
+        logger.debug(f"unload_all during reload failed: {e}")
     model_manager = ModelManager()
     return {"status": "ok"}
 

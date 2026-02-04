@@ -436,5 +436,5 @@ class RestClient(LLMBackendBase):
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     loop.create_task(self.client.aclose())
-            except:
+            except (RuntimeError, AttributeError):
                 pass
