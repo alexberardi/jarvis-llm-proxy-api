@@ -139,7 +139,7 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
                 status = "succeeded"
         else:
             from services.chat_runner import run_chat_completion
-            from main import model_manager
+            from services.model_service import model_manager
             resp = asyncio.run(run_chat_completion(model_manager, req_obj, allow_images=False))
             processing_ms = _elapsed_ms(started_ms)
             result = {
