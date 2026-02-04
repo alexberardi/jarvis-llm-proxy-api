@@ -605,5 +605,5 @@ class TransformersClient(LLMBackendBase):
         """Clean up on destruction"""
         try:
             self.unload()
-        except:
+        except (RuntimeError, AttributeError):
             pass
