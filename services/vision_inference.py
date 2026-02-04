@@ -140,7 +140,7 @@ def _get_vision_setting(key: str, env_fallback: str, default: Any) -> Any:
         value = service.get(key)
         if value is not None:
             return value
-    except Exception:
+    except (ImportError, RuntimeError, AttributeError):
         pass
     return os.getenv(env_fallback, default)
 

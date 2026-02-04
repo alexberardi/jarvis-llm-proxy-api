@@ -425,7 +425,7 @@ Rules:
                         date_keys = json.loads(partial)
                         if isinstance(date_keys, list):
                             return [k for k in date_keys if isinstance(k, str)]
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         pass
                 logger.warning(f"⚠️  Could not parse date keys from response: {response!r}")
 
@@ -452,7 +452,7 @@ Rules:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
+        except ImportError:
             pass
 
         logger.info("🧹 LLM date key extractor unloaded")

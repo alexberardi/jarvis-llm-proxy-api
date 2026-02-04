@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
@@ -52,6 +53,6 @@ async def require_app_auth(
     try:
         body = resp.json()
         request.state.calling_app_id = body.get("app_id")
-    except Exception:
+    except (json.JSONDecodeError, KeyError, AttributeError):
         request.state.calling_app_id = None
 
