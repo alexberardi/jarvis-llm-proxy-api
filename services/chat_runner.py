@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -49,7 +50,6 @@ def parse_data_url(data_url: str) -> tuple[bytes, str]:
         raise ValueError("Invalid data URL format. Expected: data:<mime_type>;base64,<data>")
     mime_type = match.group(1)
     b64_data = match.group(2)
-    import base64
     image_bytes = base64.b64decode(b64_data)
     return image_bytes, mime_type
 
@@ -183,7 +183,7 @@ def repair_duplicate_keys(content: str) -> Optional[str]:
 
         parsed = json.loads(content, object_pairs_hook=object_pairs_hook)
         return json.dumps(parsed, ensure_ascii=False)
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
 
@@ -195,7 +195,7 @@ def repair_unescaped_quotes(content: str) -> Optional[str]:
         repaired = repaired.replace('"\\"', '"').replace('\\""', '"')
         repaired_json = json.loads(f'[{repaired}]')[0]
         return json.dumps(repaired_json)
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError, re.error):
         return None
 
 
@@ -209,7 +209,7 @@ def extract_json_from_text(content: str) -> Optional[str]:
                 return candidate
             except json.JSONDecodeError:
                 continue
-    except Exception:
+    except (re.error, TypeError):
         return None
     return None
 
@@ -232,7 +232,7 @@ def repair_truncated_json(content: str) -> Optional[str]:
         repaired += '}' * max(0, open_braces) + ']' * max(0, open_brackets)
         json.loads(repaired)
         return repaired
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError, re.error):
         return None
 
 
@@ -475,7 +475,8 @@ Return the corrected, complete JSON:"""
                         logger.warning(f"⚠️ JSON schema validation failed on retry: {schema_error}")
                         continue
                 return fixed_content
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError, RuntimeError) as e:
+            logger.debug(f"fix_json_with_retry attempt failed: {e}")
             continue
     return None
 
