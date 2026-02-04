@@ -288,6 +288,13 @@ class ModelManager:
                 from backends.transformers_vision_backend import TransformersVisionClient
                 self.vision_model = TransformersVisionClient(resolved_vision_name)
                 self.vision_model_name = resolved_vision_name
+            elif vision_model_backend == "VLLM":
+                # VLLM vision models are loaded on-demand via queue worker (model swap pattern)
+                # to avoid GPU memory conflicts with the main model
+                print(f"ℹ️  Vision model configured for on-demand loading: {resolved_vision_name}")
+                print(f"   → Backend: VLLM (loaded via vision_inference job)")
+                self.vision_model = None
+                self.vision_model_name = resolved_vision_name
             elif vision_model_backend == "REST":
                 from backends.rest_backend import RestClient
                 if not vision_rest_url:
@@ -295,7 +302,7 @@ class ModelManager:
                 self.vision_model = RestClient(vision_rest_url, resolved_vision_name, "vision")
                 self.vision_model_name = resolved_vision_name
             else:
-                raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', or 'REST'.")
+                raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', 'VLLM', or 'REST'.")
             print(f"✅ Vision model loaded: {self.vision_model_name}")
         
         # Populate model registry

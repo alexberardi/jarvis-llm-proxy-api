@@ -52,6 +52,8 @@ ENV_TO_SETTING_KEY: dict[str, str] = {
     "jarvis_vision_model_name": "model.vision.name",
     "jarvis_vision_model_backend": "model.vision.backend",
     "jarvis_vision_model_context_window": "model.vision.context_window",
+    "jarvis_vision_model_chat_format": "model.vision.chat_format",
+    "jarvis_vision_vllm_quantization": "model.vision.vllm_quantization",
     # model.cloud
     "jarvis_cloud_model_name": "model.cloud.name",
     "jarvis_cloud_model_backend": "model.cloud.backend",

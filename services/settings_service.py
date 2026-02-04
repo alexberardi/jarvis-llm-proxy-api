@@ -159,6 +159,24 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Vision model context window",
         requires_reload=True,
     ),
+    SettingDefinition(
+        key="model.vision.chat_format",
+        category="model.vision",
+        value_type="string",
+        env_fallback="JARVIS_VISION_MODEL_CHAT_FORMAT",
+        default="qwen",
+        description="Vision model chat format (e.g., qwen, chatml)",
+        requires_reload=True,
+    ),
+    SettingDefinition(
+        key="model.vision.vllm_quantization",
+        category="model.vision",
+        value_type="string",
+        env_fallback="JARVIS_VISION_VLLM_QUANTIZATION",
+        default="",
+        description="vLLM quantization for vision model (e.g., awq, gptq)",
+        requires_reload=True,
+    ),
     # ==================== model.cloud ====================
     SettingDefinition(
         key="model.cloud.name",
