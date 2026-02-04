@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import time
+import traceback
 import uuid
 import asyncio
 import base64
@@ -20,6 +21,7 @@ import re
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+import httpx
 from managers.chat_types import (
     NormalizedMessage,
     TextPart,
@@ -769,9 +771,9 @@ def repair_unescaped_quotes(content: str) -> Optional[str]:
             return repaired
         except json.JSONDecodeError:
             pass
-    except Exception:
-        pass
-    
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.debug(f"repair_unescaped_quotes failed: {e}")
+
     return None
 
 
@@ -1075,9 +1077,9 @@ def repair_truncated_json(content: str) -> Optional[str]:
             return repaired
         except json.JSONDecodeError:
             pass
-    except Exception:
-        pass
-    
+    except (TypeError, ValueError, re.error) as e:
+        logger.debug(f"repair_truncated_json bracket closing failed: {e}")
+
     return None
 
 
@@ -1230,8 +1232,8 @@ async def fix_json_with_retry(
             print(f"🔍 Schema HERE: {params.response_format['json_schema']}")
             try:
                 schema_text = json.dumps(params.response_format["json_schema"], indent=2)
-            except Exception:
-                print(f"🔍 NO SCHEMA FOUND")
+            except (TypeError, ValueError) as e:
+                print(f"🔍 NO SCHEMA FOUND: {e}")
                 schema_text = str(params.response_format.get("json_schema"))
     if not schema_text:
         schema_text = "(schema not provided)"
@@ -1409,7 +1411,6 @@ async def chat_completions(req: ChatCompletionRequest):
         internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
         if not model_service_url:
             openai_error("internal_server_error", "MODEL_SERVICE_URL is not set; API is passthrough-only.", 500)
-        import httpx
         url = model_service_url.rstrip("/") + "/internal/model/chat"
         headers = {}
         if internal_token:
@@ -1432,7 +1433,6 @@ async def chat_completions(req: ChatCompletionRequest):
         raise
     except Exception as e:
         print(f"❌ Error during chat completion: {e}")
-        import traceback
         traceback.print_exc()
         openai_error("internal_server_error", f"Internal error: {str(e)}", 500)
 
@@ -1440,10 +1440,10 @@ async def chat_completions(req: ChatCompletionRequest):
 def _parse_created_at(ts: str) -> float:
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-    except Exception:
+    except (ValueError, AttributeError):
         try:
             return float(ts)
-        except Exception:
+        except (ValueError, TypeError):
             return time.time()
 
 
@@ -1544,7 +1544,6 @@ async def list_models():
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
     if not model_service_url:
         openai_error("internal_server_error", "MODEL_SERVICE_URL is not set; cannot list models.", 500)
-    import httpx
     url = model_service_url.rstrip("/") + "/internal/model/models"
     headers = {}
     if internal_token:
@@ -1582,7 +1581,6 @@ async def get_engine_info():
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
     if not model_service_url:
         openai_error("internal_server_error", "MODEL_SERVICE_URL is not set; cannot get engine info.", 500)
-    import httpx
     url = model_service_url.rstrip("/") + "/internal/model/engine"
     headers = {}
     if internal_token:
@@ -1618,7 +1616,6 @@ async def _get_health_status():
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
     if not model_service_url:
         return {"status": "degraded", "reason": "MODEL_SERVICE_URL not set"}
-    import httpx
     url = model_service_url.rstrip("/") + "/health"
     headers = {}
     if internal_token:

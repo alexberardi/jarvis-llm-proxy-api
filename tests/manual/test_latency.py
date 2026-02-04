@@ -114,7 +114,7 @@ def test_latency_spikes(model_path: str, num_requests: int = 20, concurrent: boo
         print(f"   Misses: {cache_stats['cache_misses']}")
         print(f"   Hit Rate: {cache_stats['hit_rate']:.1f}%")
         print(f"   Cache Size: {cache_stats['cache_size']}/{cache_stats['max_cache_size']}")
-    except:
+    except (AttributeError, KeyError, TypeError):
         pass
     
     # Cleanup

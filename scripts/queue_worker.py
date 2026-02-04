@@ -63,7 +63,7 @@ class HttpLogHandler(logging.Handler):
                 "logger_name": record.name,
             }
             self._queue.put(entry)
-        except Exception:
+        except (RuntimeError, ValueError, AttributeError):
             pass  # Never fail on logging
 
     def _worker(self) -> None:
@@ -80,17 +80,17 @@ class HttpLogHandler(logging.Handler):
                 # Wait for an entry or timeout
                 try:
                     entry = self._queue.get(timeout=self.flush_interval)
-                except Exception:
+                except (TimeoutError, EOFError):
                     continue
 
                 # Send the log entry
                 try:
                     with httpx.Client(timeout=5.0) as client:
                         client.post(self.service_url, json=entry, headers=headers)
-                except Exception:
+                except (httpx.HTTPError, OSError):
                     pass  # Silently ignore failures
 
-            except Exception:
+            except (RuntimeError, ValueError):
                 time.sleep(1)  # Back off on unexpected errors
 
     def close(self) -> None:

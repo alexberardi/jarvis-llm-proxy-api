@@ -19,7 +19,7 @@ class PowerMetrics:
                 'sudo', '-n', 'powermetrics', '--help'
             ], capture_output=True, text=True, timeout=1)
             return result.returncode == 0
-        except:
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
             return False
     
     def start_monitoring(self):
@@ -55,9 +55,9 @@ class PowerMetrics:
                     
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
                 pass
-            except Exception:
+            except OSError:
                 pass
-            
+
             time.sleep(1.0)  # Update every second
     
     def _parse_powermetrics(self, output: str):
@@ -81,5 +81,5 @@ class PowerMetrics:
                     util_str = line.split('GPU HW active residency:')[1].strip()
                     if '%' in util_str:
                         self.gpu_utilization = float(util_str.split('%')[0])
-        except:
-            pass 
+        except (ValueError, IndexError, AttributeError):
+            pass

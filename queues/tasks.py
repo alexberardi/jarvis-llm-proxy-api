@@ -79,10 +79,10 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     if ttl_seconds and created_at:
         try:
             created_s = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
-        except Exception:
+        except (ValueError, AttributeError):
             try:
                 created_s = float(created_at)
-            except Exception:
+            except (ValueError, TypeError):
                 created_s = now_s
         if created_s + ttl_seconds < now_s:
             return _send_callback(
@@ -186,10 +186,10 @@ def _process_adapter_train_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     if ttl_seconds and created_at:
         try:
             created_s = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
-        except Exception:
+        except (ValueError, AttributeError):
             try:
                 created_s = float(created_at)
-            except Exception:
+            except (ValueError, TypeError):
                 created_s = now_s
         if created_s + ttl_seconds < now_s:
             return _send_callback(
@@ -253,10 +253,10 @@ def _process_vision_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     if ttl_seconds and created_at:
         try:
             created_s = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
-        except Exception:
+        except (ValueError, AttributeError):
             try:
                 created_s = float(created_at)
-            except Exception:
+            except (ValueError, TypeError):
                 created_s = now_s
         if created_s + ttl_seconds < now_s:
             return _send_callback(
