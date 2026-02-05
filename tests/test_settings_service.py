@@ -14,109 +14,113 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Import the functions and classes we're testing
+# Import from shared library for types and helper functions
+from jarvis_settings_client import SettingDefinition
+from jarvis_settings_client.service import coerce_value, serialize_value, SettingsService
+from jarvis_settings_client.types import SettingValue
+
+# Import from local module for definitions and service accessor
 from services.settings_service import (
-    SettingsService,
-    SettingDefinition,
+    LLMProxySettingsService,
     SETTINGS_DEFINITIONS,
-    _coerce_value,
-    _serialize_value,
     get_settings_service,
 )
 
 
 class TestCoerceValue:
-    """Tests for the _coerce_value function."""
+    """Tests for the coerce_value function."""
 
     def test_string_type(self):
-        assert _coerce_value("hello", "string", "") == "hello"
-        assert _coerce_value("", "string", "default") == "default"
-        assert _coerce_value(None, "string", "default") == "default"
+        assert coerce_value("hello", "string", "") == "hello"
+        assert coerce_value("", "string", "default") == "default"
+        assert coerce_value(None, "string", "default") == "default"
 
     def test_int_type(self):
-        assert _coerce_value("42", "int", 0) == 42
-        assert _coerce_value("-10", "int", 0) == -10
-        assert _coerce_value("", "int", 99) == 99
-        assert _coerce_value(None, "int", 99) == 99
-        assert _coerce_value("not_a_number", "int", 99) == 99
+        assert coerce_value("42", "int", 0) == 42
+        assert coerce_value("-10", "int", 0) == -10
+        assert coerce_value("", "int", 99) == 99
+        assert coerce_value(None, "int", 99) == 99
+        assert coerce_value("not_a_number", "int", 99) == 99
 
     def test_float_type(self):
-        assert _coerce_value("3.14", "float", 0.0) == 3.14
-        assert _coerce_value("-2.5", "float", 0.0) == -2.5
-        assert _coerce_value("", "float", 1.0) == 1.0
-        assert _coerce_value(None, "float", 1.0) == 1.0
-        assert _coerce_value("not_a_number", "float", 1.0) == 1.0
+        assert coerce_value("3.14", "float", 0.0) == 3.14
+        assert coerce_value("-2.5", "float", 0.0) == -2.5
+        assert coerce_value("", "float", 1.0) == 1.0
+        assert coerce_value(None, "float", 1.0) == 1.0
+        assert coerce_value("not_a_number", "float", 1.0) == 1.0
 
     def test_bool_type(self):
         # True values
-        assert _coerce_value("true", "bool", False) is True
-        assert _coerce_value("True", "bool", False) is True
-        assert _coerce_value("TRUE", "bool", False) is True
-        assert _coerce_value("1", "bool", False) is True
-        assert _coerce_value("yes", "bool", False) is True
-        assert _coerce_value("on", "bool", False) is True
+        assert coerce_value("true", "bool", False) is True
+        assert coerce_value("True", "bool", False) is True
+        assert coerce_value("TRUE", "bool", False) is True
+        assert coerce_value("1", "bool", False) is True
+        assert coerce_value("yes", "bool", False) is True
+        assert coerce_value("on", "bool", False) is True
 
         # False values
-        assert _coerce_value("false", "bool", True) is False
-        assert _coerce_value("0", "bool", True) is False
-        assert _coerce_value("no", "bool", True) is False
-        assert _coerce_value("off", "bool", True) is False
-        assert _coerce_value("random", "bool", True) is False  # Not a truthy value
+        assert coerce_value("false", "bool", True) is False
+        assert coerce_value("0", "bool", True) is False
+        assert coerce_value("no", "bool", True) is False
+        assert coerce_value("off", "bool", True) is False
+        assert coerce_value("random", "bool", True) is False  # Not a truthy value
 
         # Empty/None
-        assert _coerce_value("", "bool", True) is True  # Returns default
-        assert _coerce_value(None, "bool", True) is True
+        assert coerce_value("", "bool", True) is True  # Returns default
+        assert coerce_value(None, "bool", True) is True
 
     def test_json_type(self):
-        assert _coerce_value('{"key": "value"}', "json", {}) == {"key": "value"}
-        assert _coerce_value("[1, 2, 3]", "json", []) == [1, 2, 3]
-        assert _coerce_value("null", "json", {}) is None
-        assert _coerce_value("invalid json", "json", {"default": True}) == {"default": True}
-        assert _coerce_value("", "json", {"default": True}) == {"default": True}
+        assert coerce_value('{"key": "value"}', "json", {}) == {"key": "value"}
+        assert coerce_value("[1, 2, 3]", "json", []) == [1, 2, 3]
+        assert coerce_value("null", "json", {}) is None
+        assert coerce_value("invalid json", "json", {"default": True}) == {"default": True}
+        assert coerce_value("", "json", {"default": True}) == {"default": True}
 
 
 class TestSerializeValue:
-    """Tests for the _serialize_value function."""
+    """Tests for the serialize_value function."""
 
     def test_string(self):
-        assert _serialize_value("hello", "string") == "hello"
-        assert _serialize_value("", "string") == ""
+        assert serialize_value("hello", "string") == "hello"
+        assert serialize_value("", "string") == ""
 
     def test_int(self):
-        assert _serialize_value(42, "int") == "42"
-        assert _serialize_value(-10, "int") == "-10"
+        assert serialize_value(42, "int") == "42"
+        assert serialize_value(-10, "int") == "-10"
 
     def test_float(self):
-        assert _serialize_value(3.14, "float") == "3.14"
+        assert serialize_value(3.14, "float") == "3.14"
 
     def test_bool(self):
-        assert _serialize_value(True, "bool") == "true"
-        assert _serialize_value(False, "bool") == "false"
+        assert serialize_value(True, "bool") == "true"
+        assert serialize_value(False, "bool") == "false"
 
     def test_json(self):
-        assert _serialize_value({"key": "value"}, "json") == '{"key": "value"}'
-        assert _serialize_value([1, 2, 3], "json") == "[1, 2, 3]"
+        assert serialize_value({"key": "value"}, "json") == '{"key": "value"}'
+        assert serialize_value([1, 2, 3], "json") == "[1, 2, 3]"
 
     def test_none(self):
-        assert _serialize_value(None, "string") is None
-        assert _serialize_value(None, "int") is None
+        assert serialize_value(None, "string") is None
+        assert serialize_value(None, "int") is None
 
 
 class TestSettingsServiceCache:
     """Tests for SettingsService caching behavior."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return LLMProxySettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
 
-    def test_cache_hit(self):
+    def test_cache_hit(self, service):
         """Test that cached values are returned without DB query."""
-        service = SettingsService()
-
         # Manually populate cache
-        from services.settings_service import SettingValue
-
-        service._cache["model.main.name"] = SettingValue(
+        cache_key = service._make_cache_key("model.main.name")
+        service._cache[cache_key] = SettingValue(
             value="cached_value",
             value_type="string",
             requires_reload=True,
@@ -130,14 +134,11 @@ class TestSettingsServiceCache:
         result = service.get("model.main.name")
         assert result == "cached_value"
 
-    def test_cache_expiry(self):
+    def test_cache_expiry(self, service):
         """Test that expired cache entries are not used."""
-        service = SettingsService()
-
         # Populate cache with expired entry
-        from services.settings_service import SettingValue
-
-        service._cache["model.main.name"] = SettingValue(
+        cache_key = service._make_cache_key("model.main.name")
+        service._cache[cache_key] = SettingValue(
             value="expired_value",
             value_type="string",
             requires_reload=True,
@@ -153,13 +154,12 @@ class TestSettingsServiceCache:
             # Will get from env since DB is not available in test
             assert result == "env_value"
 
-    def test_invalidate_single_key(self):
+    def test_invalidate_single_key(self, service):
         """Test invalidating a single cache key."""
-        service = SettingsService()
+        key1_cache = service._make_cache_key("test.key1")
+        key2_cache = service._make_cache_key("test.key2")
 
-        from services.settings_service import SettingValue
-
-        service._cache["key1"] = SettingValue(
+        service._cache[key1_cache] = SettingValue(
             value="value1",
             value_type="string",
             requires_reload=False,
@@ -168,7 +168,7 @@ class TestSettingsServiceCache:
             from_db=True,
             cached_at=time.time(),
         )
-        service._cache["key2"] = SettingValue(
+        service._cache[key2_cache] = SettingValue(
             value="value2",
             value_type="string",
             requires_reload=False,
@@ -178,18 +178,17 @@ class TestSettingsServiceCache:
             cached_at=time.time(),
         )
 
-        service.invalidate_cache("key1")
+        service.invalidate_cache("test.key1")
 
-        assert "key1" not in service._cache
-        assert "key2" in service._cache
+        assert key1_cache not in service._cache
+        assert key2_cache in service._cache
 
-    def test_invalidate_all(self):
+    def test_invalidate_all(self, service):
         """Test invalidating entire cache."""
-        service = SettingsService()
+        key1_cache = service._make_cache_key("test.key1")
+        key2_cache = service._make_cache_key("test.key2")
 
-        from services.settings_service import SettingValue
-
-        service._cache["key1"] = SettingValue(
+        service._cache[key1_cache] = SettingValue(
             value="value1",
             value_type="string",
             requires_reload=False,
@@ -198,7 +197,7 @@ class TestSettingsServiceCache:
             from_db=True,
             cached_at=time.time(),
         )
-        service._cache["key2"] = SettingValue(
+        service._cache[key2_cache] = SettingValue(
             value="value2",
             value_type="string",
             requires_reload=False,
@@ -216,39 +215,36 @@ class TestSettingsServiceCache:
 class TestSettingsServiceEnvFallback:
     """Tests for environment variable fallback."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return LLMProxySettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
 
-    def test_env_fallback_when_db_unavailable(self):
+    def test_env_fallback_when_db_unavailable(self, service):
         """Test that env vars are used when DB is unavailable."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {"JARVIS_MODEL_NAME": "env_model_path"}):
             result = service.get("model.main.name")
             assert result == "env_model_path"
 
-    def test_default_when_no_env(self):
+    def test_default_when_no_env(self, service):
         """Test that defaults are used when no env var is set."""
-        service = SettingsService()
-
         # Clear any env var
         with patch.dict(os.environ, {}, clear=True):
             result = service.get("model.main.context_window")
             # Should return definition default (8192)
             assert result == 8192
 
-    def test_unknown_key_returns_none(self):
+    def test_unknown_key_returns_none(self, service):
         """Test that unknown keys return None."""
-        service = SettingsService()
-
         result = service.get("unknown.key")
         assert result is None
 
-    def test_unknown_key_returns_provided_default(self):
+    def test_unknown_key_returns_provided_default(self, service):
         """Test that unknown keys return provided default."""
-        service = SettingsService()
-
         result = service.get("unknown.key", "my_default")
         assert result == "my_default"
 
@@ -256,40 +252,37 @@ class TestSettingsServiceEnvFallback:
 class TestSettingsServiceTypedGetters:
     """Tests for typed getter methods."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return LLMProxySettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
 
-    def test_get_int(self):
+    def test_get_int(self, service):
         """Test get_int method."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {"JARVIS_MODEL_CONTEXT_WINDOW": "4096"}):
             result = service.get_int("model.main.context_window", 0)
             assert result == 4096
             assert isinstance(result, int)
 
-    def test_get_float(self):
+    def test_get_float(self, service):
         """Test get_float method."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {"JARVIS_VLLM_GPU_MEMORY_UTILIZATION": "0.85"}):
             result = service.get_float("inference.vllm.gpu_memory_utilization", 0.0)
             assert result == 0.85
             assert isinstance(result, float)
 
-    def test_get_bool(self):
+    def test_get_bool(self, service):
         """Test get_bool method."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {"JARVIS_FLASH_ATTN": "true"}):
             result = service.get_bool("inference.gguf.flash_attn", False)
             assert result is True
 
-    def test_get_str(self):
+    def test_get_str(self, service):
         """Test get_str method."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {"JARVIS_MODEL_NAME": "test_model"}):
             result = service.get_str("model.main.name", "")
             assert result == "test_model"
@@ -299,14 +292,17 @@ class TestSettingsServiceTypedGetters:
 class TestSettingsServiceListMethods:
     """Tests for listing methods."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return LLMProxySettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
 
-    def test_list_categories(self):
+    def test_list_categories(self, service):
         """Test list_categories returns unique categories."""
-        service = SettingsService()
-
         categories = service.list_categories()
 
         assert isinstance(categories, list)
@@ -317,10 +313,8 @@ class TestSettingsServiceListMethods:
         # Should be sorted
         assert categories == sorted(categories)
 
-    def test_list_all(self):
+    def test_list_all(self, service):
         """Test list_all returns all settings."""
-        service = SettingsService()
-
         settings = service.list_all()
 
         assert isinstance(settings, list)
@@ -334,10 +328,8 @@ class TestSettingsServiceListMethods:
         assert "category" in first
         assert "from_db" in first
 
-    def test_list_all_with_category_filter(self):
+    def test_list_all_with_category_filter(self, service):
         """Test list_all with category filter."""
-        service = SettingsService()
-
         settings = service.list_all(category="model.main")
 
         assert all(s["category"] == "model.main" for s in settings)
@@ -347,14 +339,17 @@ class TestSettingsServiceListMethods:
 class TestSettingsServiceModelConfig:
     """Tests for get_model_config and get_inference_config."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return LLMProxySettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
 
-    def test_get_model_config(self):
+    def test_get_model_config(self, service):
         """Test get_model_config returns expected keys."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {
             "JARVIS_MODEL_NAME": "test_model",
             "JARVIS_MODEL_BACKEND": "VLLM",
@@ -369,10 +364,8 @@ class TestSettingsServiceModelConfig:
             assert config["backend"] == "VLLM"
             assert config["context_window"] == 4096
 
-    def test_get_inference_config(self):
+    def test_get_inference_config(self, service):
         """Test get_inference_config returns expected keys."""
-        service = SettingsService()
-
         with patch.dict(os.environ, {
             "JARVIS_VLLM_GPU_MEMORY_UTILIZATION": "0.85",
             "JARVIS_VLLM_TENSOR_PARALLEL_SIZE": "2",
@@ -412,22 +405,31 @@ class TestSettingsDefinitions:
 
 
 class TestSingleton:
-    """Tests for singleton behavior."""
+    """Tests for singleton behavior via get_settings_service."""
 
-    def setup_method(self):
-        """Reset singleton before each test."""
-        SettingsService._instance = None
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        import services.settings_service as ss_module
+        ss_module._settings_service = None
+        yield
+        ss_module._settings_service = None
 
     def test_singleton_instance(self):
         """Test that get_settings_service returns same instance."""
-        service1 = get_settings_service()
-        service2 = get_settings_service()
+        # Mock the db imports to avoid actual DB connection
+        # The imports are inside get_settings_service, so we need to mock the modules
+        mock_setting = MagicMock()
+        mock_session_local = MagicMock()
 
-        assert service1 is service2
+        with patch.dict("sys.modules", {
+            "db.models": MagicMock(Setting=mock_setting),
+            "db.session": MagicMock(SessionLocal=mock_session_local),
+        }):
+            # Need to patch at the point of import
+            with patch("db.models.Setting", mock_setting):
+                with patch("db.session.SessionLocal", mock_session_local):
+                    service1 = get_settings_service()
+                    service2 = get_settings_service()
 
-    def test_direct_construction_returns_same_instance(self):
-        """Test that direct construction also returns same instance."""
-        service1 = SettingsService()
-        service2 = SettingsService()
-
-        assert service1 is service2
+                    assert service1 is service2
