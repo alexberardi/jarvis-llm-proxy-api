@@ -6,9 +6,8 @@ model and inference configurations.
 """
 
 import logging
-from typing import Any
 
-from jarvis_settings_client import SettingDefinition, SettingsService as BaseSettingsService
+from jarvis_settings_client import SettingDefinition, SettingsService
 
 logger = logging.getLogger("uvicorn")
 
@@ -532,82 +531,18 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
 ]
 
 
-class LLMProxySettingsService(BaseSettingsService):
-    """Extended settings service with LLM-proxy-specific convenience methods.
-
-    Inherits all functionality from the shared SettingsService and adds
-    methods specific to LLM model and inference configuration.
-    """
-
-    def get_model_config(self, model_type: str = "main") -> dict[str, Any]:
-        """Get complete configuration for a model type.
-
-        Args:
-            model_type: One of "main", "lightweight", "vision", "cloud"
-
-        Returns:
-            Dict with all relevant settings for that model.
-        """
-        prefix = f"model.{model_type}"
-        config = {}
-
-        for key in self._definitions:
-            if key.startswith(prefix):
-                short_key = key.replace(f"{prefix}.", "")
-                config[short_key] = self.get(key)
-
-        return config
-
-    def get_inference_config(self, backend: str) -> dict[str, Any]:
-        """Get inference configuration for a specific backend.
-
-        Args:
-            backend: One of "vllm", "gguf", "transformers", "general"
-
-        Returns:
-            Dict with all relevant inference settings.
-        """
-        prefix = f"inference.{backend}"
-        config = {}
-
-        for key in self._definitions:
-            if key.startswith(prefix):
-                short_key = key.replace(f"{prefix}.", "")
-                config[short_key] = self.get(key)
-
-        return config
-
-    def get_category(self, category: str) -> dict[str, Any]:
-        """Get all settings for a category as a dict."""
-        result = {}
-        for key, definition in self._definitions.items():
-            if definition.category == category:
-                result[definition.key] = self.get(definition.key)
-        return result
-
-    def set_bulk(self, settings: dict[str, Any]) -> dict[str, bool]:
-        """Set multiple settings at once.
-
-        Returns a dict mapping keys to success status.
-        """
-        results = {}
-        for key, value in settings.items():
-            results[key] = self.set(key, value)
-        return results
-
-
 # Global singleton
-_settings_service: LLMProxySettingsService | None = None
+_settings_service: SettingsService | None = None
 
 
-def get_settings_service() -> LLMProxySettingsService:
+def get_settings_service() -> SettingsService:
     """Get the global SettingsService instance."""
     global _settings_service
     if _settings_service is None:
         from db.models import Setting
         from db.session import SessionLocal
 
-        _settings_service = LLMProxySettingsService(
+        _settings_service = SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=SessionLocal,
             setting_model=Setting,
