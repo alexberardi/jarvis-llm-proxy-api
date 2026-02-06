@@ -2,4 +2,9 @@
 set -euo pipefail
 
 # Apply latest Alembic migrations using Python helper
-python scripts/apply_migrations.py
+# Activate venv if present, otherwise use python3
+if [[ -d "venv" ]]; then
+    source venv/bin/activate
+fi
+
+python3 scripts/apply_migrations.py
