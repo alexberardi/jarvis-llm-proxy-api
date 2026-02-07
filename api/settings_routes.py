@@ -1,60 +1,27 @@
-"""Settings API routes with dual authentication.
+"""Settings API routes with app-to-app authentication.
 
-Supports both:
-- X-Internal-Token: Service-to-service authentication
-- X-Jarvis-Admin-Token: Human operator authentication
+Supports authentication via:
+- X-Jarvis-App-Id + X-Jarvis-App-Key: App-to-app authentication
 
-All endpoints require one of these authentication methods.
+All endpoints require authentication. Settings support multi-tenant scoping:
+- System default: no scope parameters
+- Household-level: household_id set
+- Node-level: household_id + node_id set
+- User-level: household_id + node_id + user_id set
 """
 
 import logging
-import os
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from services.settings_service import get_settings_service, SETTINGS_DEFINITIONS
+from auth.app_auth import require_app_auth
+from services.settings_service import get_settings_service
 
 logger = logging.getLogger("uvicorn")
 
-router = APIRouter(prefix="/internal/settings", tags=["settings"])
-
-
-# ===========================================================================
-# Authentication
-# ===========================================================================
-
-
-def require_admin_or_internal_token(
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
-) -> str:
-    """Require either internal token or admin token.
-
-    Returns the token type that was used for logging purposes.
-    """
-    # Check internal token
-    internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
-    if internal_token and x_internal_token == internal_token:
-        return "internal"
-
-    # Check admin token
-    admin_token = os.getenv("JARVIS_ADMIN_TOKEN")
-    if admin_token and x_jarvis_admin_token == admin_token:
-        return "admin"
-
-    # Neither token is valid
-    raise HTTPException(
-        status_code=401,
-        detail={
-            "error": {
-                "type": "unauthorized",
-                "message": "Valid X-Internal-Token or X-Jarvis-Admin-Token required",
-                "code": "unauthorized",
-            }
-        },
-    )
+router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 # ===========================================================================
@@ -127,23 +94,34 @@ class BulkUpdateResponse(BaseModel):
     requires_reload: bool
 
 
+class CacheInvalidateResponse(BaseModel):
+    """Response for cache invalidation."""
+
+    status: str
+    invalidated: str
+
+
 # ===========================================================================
 # Endpoints
 # ===========================================================================
 
 
 @router.get("/", response_model=SettingsListResponse)
-def list_settings(
-    category: str | None = None,
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+async def list_settings(
+    request: Request,
+    category: str | None = Query(None, description="Filter by category"),
+    household_id: str | None = Query(None, description="Household scope"),
+    node_id: str | None = Query(None, description="Node scope"),
+    user_id: int | None = Query(None, description="User scope"),
+    _auth: None = Depends(require_app_auth),
 ) -> SettingsListResponse:
     """List all settings.
 
     Optionally filter by category using the `category` query parameter.
+    Scope parameters control which values are returned (cascade lookup).
     """
-    auth_type = require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-    logger.debug(f"Settings list requested via {auth_type} auth")
+    calling_app = getattr(request.state, "calling_app_id", None)
+    logger.debug(f"Settings list requested by app: {calling_app}")
 
     service = get_settings_service()
     settings = service.list_all(category=category)
@@ -155,13 +133,11 @@ def list_settings(
 
 
 @router.get("/categories", response_model=CategoriesResponse)
-def list_categories(
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+async def list_categories(
+    request: Request,
+    _auth: None = Depends(require_app_auth),
 ) -> CategoriesResponse:
     """List all unique setting categories."""
-    require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-
     service = get_settings_service()
     categories = service.list_categories()
 
@@ -169,17 +145,19 @@ def list_categories(
 
 
 @router.get("/{key:path}", response_model=SettingResponse)
-def get_setting(
+async def get_setting(
     key: str,
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+    request: Request,
+    household_id: str | None = Query(None, description="Household scope"),
+    node_id: str | None = Query(None, description="Node scope"),
+    user_id: int | None = Query(None, description="User scope"),
+    _auth: None = Depends(require_app_auth),
 ) -> SettingResponse:
     """Get a single setting by key.
 
     The key uses dot notation, e.g., `model.main.name`.
+    Scope parameters enable cascade lookup (user > node > household > system).
     """
-    require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-
     service = get_settings_service()
 
     # Check if key exists in definitions
@@ -222,19 +200,27 @@ def get_setting(
 
 
 @router.put("/{key:path}", response_model=UpdateResponse)
-def update_setting(
+async def update_setting(
     key: str,
     body: SettingUpdate,
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+    request: Request,
+    household_id: str | None = Query(None, description="Household scope"),
+    node_id: str | None = Query(None, description="Node scope"),
+    user_id: int | None = Query(None, description="User scope"),
+    _auth: None = Depends(require_app_auth),
 ) -> UpdateResponse:
     """Update a single setting.
 
     If the setting has `requires_reload=True`, the model will need to be
     reloaded for the change to take effect. The response indicates this.
-    """
-    auth_type = require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
 
+    Scope parameters allow setting values for specific scopes:
+    - No scope: system default
+    - household_id: household-level override
+    - household_id + node_id: node-level override
+    - household_id + node_id + user_id: user-level override
+    """
+    calling_app = getattr(request.state, "calling_app_id", None)
     service = get_settings_service()
 
     # Check if key exists
@@ -265,7 +251,7 @@ def update_setting(
             },
         )
 
-    logger.info(f"Setting {key} updated via {auth_type} auth")
+    logger.info(f"Setting {key} updated by app: {calling_app}")
 
     message = None
     if definition.requires_reload:
@@ -280,17 +266,16 @@ def update_setting(
 
 
 @router.put("/", response_model=BulkUpdateResponse)
-def bulk_update_settings(
+async def bulk_update_settings(
     body: BulkSettingUpdate,
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+    request: Request,
+    _auth: None = Depends(require_app_auth),
 ) -> BulkUpdateResponse:
     """Update multiple settings at once.
 
     The response indicates whether any settings require a model reload.
     """
-    auth_type = require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-
+    calling_app = getattr(request.state, "calling_app_id", None)
     service = get_settings_service()
 
     # Validate all keys first
@@ -319,7 +304,7 @@ def bulk_update_settings(
     total_updated = sum(1 for v in results.values() if v)
     total_failed = sum(1 for v in results.values() if not v)
 
-    logger.info(f"Bulk update: {total_updated} updated, {total_failed} failed via {auth_type} auth")
+    logger.info(f"Bulk update: {total_updated} updated, {total_failed} failed by app: {calling_app}")
 
     return BulkUpdateResponse(
         results=results,
@@ -330,17 +315,17 @@ def bulk_update_settings(
 
 
 @router.post("/sync-from-env", response_model=SyncResponse)
-def sync_from_env(
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
+async def sync_from_env(
+    request: Request,
+    _auth: None = Depends(require_app_auth),
 ) -> SyncResponse:
     """One-time migration: sync settings from environment variables to database.
 
     This reads all defined settings from environment variables and writes
     them to the database. Useful for initial setup or migration.
     """
-    auth_type = require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-    logger.info(f"Sync from env requested via {auth_type} auth")
+    calling_app = getattr(request.state, "calling_app_id", None)
+    logger.info(f"Sync from env requested by app: {calling_app}")
 
     service = get_settings_service()
     results = service.sync_from_env()
@@ -355,20 +340,18 @@ def sync_from_env(
     )
 
 
-@router.post("/invalidate-cache")
-def invalidate_cache(
-    key: str | None = None,
-    x_internal_token: str | None = Header(None),
-    x_jarvis_admin_token: str | None = Header(None),
-) -> dict[str, str]:
+@router.post("/invalidate-cache", response_model=CacheInvalidateResponse)
+async def invalidate_cache(
+    request: Request,
+    key: str | None = Query(None, description="Key to invalidate (all if omitted)"),
+    _auth: None = Depends(require_app_auth),
+) -> CacheInvalidateResponse:
     """Invalidate the settings cache.
 
     If `key` is provided, only that key is invalidated.
     Otherwise, the entire cache is cleared.
     """
-    require_admin_or_internal_token(x_internal_token, x_jarvis_admin_token)
-
     service = get_settings_service()
     service.invalidate_cache(key)
 
-    return {"status": "ok", "invalidated": key or "all"}
+    return CacheInvalidateResponse(status="ok", invalidated=key or "all")
