@@ -21,7 +21,6 @@ from jarvis_settings_client.types import SettingValue
 
 # Import from local module for definitions and service accessor
 from services.settings_service import (
-    LLMProxySettingsService,
     SETTINGS_DEFINITIONS,
     get_settings_service,
 )
@@ -110,7 +109,7 @@ class TestSettingsServiceCache:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return LLMProxySettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -218,7 +217,7 @@ class TestSettingsServiceEnvFallback:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return LLMProxySettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -255,7 +254,7 @@ class TestSettingsServiceTypedGetters:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return LLMProxySettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -295,7 +294,7 @@ class TestSettingsServiceListMethods:
     @pytest.fixture
     def service(self):
         """Create a service instance for testing."""
-        return LLMProxySettingsService(
+        return SettingsService(
             definitions=SETTINGS_DEFINITIONS,
             get_db_session=lambda: None,
             setting_model=None,
@@ -334,48 +333,6 @@ class TestSettingsServiceListMethods:
 
         assert all(s["category"] == "model.main" for s in settings)
         assert len(settings) > 0
-
-
-class TestSettingsServiceModelConfig:
-    """Tests for get_model_config and get_inference_config."""
-
-    @pytest.fixture
-    def service(self):
-        """Create a service instance for testing."""
-        return LLMProxySettingsService(
-            definitions=SETTINGS_DEFINITIONS,
-            get_db_session=lambda: None,
-            setting_model=None,
-        )
-
-    def test_get_model_config(self, service):
-        """Test get_model_config returns expected keys."""
-        with patch.dict(os.environ, {
-            "JARVIS_MODEL_NAME": "test_model",
-            "JARVIS_MODEL_BACKEND": "VLLM",
-            "JARVIS_MODEL_CONTEXT_WINDOW": "4096",
-        }):
-            config = service.get_model_config("main")
-
-            assert "name" in config
-            assert "backend" in config
-            assert "context_window" in config
-            assert config["name"] == "test_model"
-            assert config["backend"] == "VLLM"
-            assert config["context_window"] == 4096
-
-    def test_get_inference_config(self, service):
-        """Test get_inference_config returns expected keys."""
-        with patch.dict(os.environ, {
-            "JARVIS_VLLM_GPU_MEMORY_UTILIZATION": "0.85",
-            "JARVIS_VLLM_TENSOR_PARALLEL_SIZE": "2",
-        }):
-            config = service.get_inference_config("vllm")
-
-            assert "gpu_memory_utilization" in config
-            assert "tensor_parallel_size" in config
-            assert config["gpu_memory_utilization"] == 0.85
-            assert config["tensor_parallel_size"] == 2
 
 
 class TestSettingsDefinitions:
