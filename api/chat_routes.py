@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException
 import httpx
 
 from auth.app_auth import require_app_auth
-from managers.model_manager import ModelManager
 from models.api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -37,13 +36,15 @@ async def chat_completions(req: ChatCompletionRequest):
     - Model selection via model field (supports aliases: full, lightweight, vision, cloud)
     """
     # Validate: reject images for non-vision models early
+    # Check by model alias rather than loading ModelManager (which is expensive
+    # and doesn't work across process boundaries)
     if request_has_images(req.messages):
-        model_manager = ModelManager()
-        model_config = model_manager.get_model_config(req.model)
-        if not model_config.supports_images:
+        vision_model_aliases = {"vision", "vision-model"}
+        model_lower = (req.model or "").lower()
+        if model_lower not in vision_model_aliases:
             openai_error(
                 "invalid_request_error",
-                f"Model '{req.model}' does not support images. Use a vision-capable model instead.",
+                f"Model '{req.model}' does not support images. Use 'vision' model instead.",
             )
 
     try:
