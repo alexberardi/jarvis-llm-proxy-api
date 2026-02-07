@@ -78,20 +78,39 @@ class ModelConfig:
         self.context_length = context_length
 
 class ModelManager:
+    """Singleton model manager for all LLM backends.
+
+    Use ModelManager() to get the singleton instance. The first call
+    initializes the models; subsequent calls return the same instance.
+    """
+
+    _instance: Optional["ModelManager"] = None
+    _initialized: bool = False
+
+    def __new__(cls) -> "ModelManager":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        # Only initialize once
+        if ModelManager._initialized:
+            return
+        ModelManager._initialized = True
+
         self.main_model = None
         self.lightweight_model = None
         self.cloud_model = None
         self.vision_model = None
         self.cloud_model_name = None
         self.vision_model_name = None
-        
+
         # Model registry: maps model_id -> ModelConfig
         self.registry: Dict[str, ModelConfig] = {}
-        
+
         # Aliases for stable client references
         self.aliases: Dict[str, str] = {}
-        
+
         self._initialize_models()
     
     def _initialize_models(self):
@@ -149,7 +168,10 @@ class ModelManager:
         vision_context_window = _get_setting(
             "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072, "int"
         )
-        
+        vision_chat_format = _get_setting(
+            "model.vision.chat_format", "JARVIS_VISION_MODEL_CHAT_FORMAT", "llava"
+        )
+
         # Check if we should share vLLM models (same name or empty lightweight name/backend)
         should_share_vllm = (
             model_backend == "VLLM" and 
@@ -301,8 +323,30 @@ class ModelManager:
                     raise ValueError("JARVIS_VISION_REST_MODEL_URL (or JARVIS_REST_MODEL_URL) must be set when using REST backend for vision")
                 self.vision_model = RestClient(vision_rest_url, resolved_vision_name, "vision")
                 self.vision_model_name = resolved_vision_name
+            elif vision_model_backend in ("GGUF", "GGUF_VISION"):
+                # GGUF vision models using llama-cpp-python's LLaVA support
+                from backends.gguf_vision_backend import GGUFVisionClient
+                vision_clip_path = _get_setting(
+                    "model.vision.clip_model_path", "JARVIS_VISION_CLIP_MODEL_PATH", ""
+                )
+                if not vision_clip_path:
+                    raise ValueError(
+                        "JARVIS_VISION_CLIP_MODEL_PATH must be set for GGUF vision backend. "
+                        "This should point to the mmproj/CLIP GGUF file (e.g., mmproj-model-f16.gguf)"
+                    )
+                vision_n_gpu_layers = _get_setting(
+                    "model.vision.n_gpu_layers", "JARVIS_VISION_N_GPU_LAYERS", 0, "int"
+                )
+                self.vision_model = GGUFVisionClient(
+                    model_path=resolved_vision_name,
+                    clip_model_path=vision_clip_path,
+                    chat_format=vision_chat_format,
+                    context_window=vision_context_window,
+                    n_gpu_layers=vision_n_gpu_layers,
+                )
+                self.vision_model_name = resolved_vision_name
             else:
-                raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', 'VLLM', or 'REST'.")
+                raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', 'VLLM', 'REST', 'GGUF', or 'GGUF_VISION'.")
             print(f"✅ Vision model loaded: {self.vision_model_name}")
         
         # Populate model registry
