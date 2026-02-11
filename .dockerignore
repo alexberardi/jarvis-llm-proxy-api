@@ -1,0 +1,75 @@
+# Model files (mounted as volume, not baked into image)
+.models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Environment files (mounted at runtime)
+.env
+*.env
+env.template
+env.docker.template
+.env.minimal
+
+# Build artifacts
+vllm-src/
+build/
+dist/
+*.egg
+
+# Runtime data directories
+tools/
+work/
+adapters/
+storage/
+logs/
+temp/
+tmp/
+
+# Development files
+.claude/
+CLAUDE.md
+*.md
+*.log
+spike_*.json
+.setup_config
+current-progress.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (no need to copy into the image)
+Dockerfile
+docker-compose*.yaml
+run-docker-dev.sh
+
+# Tests (not needed in production image)
+tests/
+.pytest_cache/
+.coverage
+
+# Documentation
+docs/
+prds/
