@@ -132,7 +132,7 @@ def evaluate_model(model, examples: list[tuple[str, list[str]]]) -> dict:
 
 
 def main():
-    training_data_path = "data/date_keys_training.jsonl"
+    training_data_path = "data/jarvis_training.jsonl"
     fasttext_train_path = "data/date_keys_fasttext.txt"
     model_output_path = "models/date_keys_fasttext.bin"
 

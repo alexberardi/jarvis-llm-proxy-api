@@ -7,20 +7,20 @@ LoRA adapters to be applied on top at runtime without conflict.
 Usage:
     python scripts/merge_adapter.py \
         --base-model .models/llama-3.2-3b-instruct \
-        --adapter adapters/date_keys \
-        --output .models/llama-3.2-3b-instruct-date-merged
+        --adapter adapters/jarvis \
+        --output .models/llama-3.2-3b-instruct-jarvis
 
     # With HuggingFace model ID (downloads if not local):
     python scripts/merge_adapter.py \
         --base-model meta-llama/Llama-3.2-3B-Instruct \
-        --adapter adapters/date_keys \
-        --output .models/llama-3.2-3b-instruct-date-merged
+        --adapter adapters/jarvis \
+        --output .models/llama-3.2-3b-instruct-jarvis
 
     # Dry run (validates paths, shows what would happen):
     python scripts/merge_adapter.py \
         --base-model .models/llama-3.2-3b-instruct \
-        --adapter adapters/date_keys \
-        --output .models/llama-3.2-3b-instruct-date-merged \
+        --adapter adapters/jarvis \
+        --output .models/llama-3.2-3b-instruct-jarvis \
         --dry-run
 """
 
@@ -145,12 +145,16 @@ def main() -> None:
     print(f"  Saved. Total size: {sum(f.stat().st_size for f in output_path.rglob('*') if f.is_file()) / (1024**3):.2f} GiB")
 
     print()
-    print("Done! To use the merged model:")
-    print(f"  1. Set JARVIS_MODEL_NAME={output_path}")
-    print(f"  2. Ensure JARVIS_VLLM_QUANTIZATION is empty (unquantized model)")
-    print(f"  3. Restart with ./run.sh")
+    print("Done! Next, convert for your target backend:")
     print()
-    print("User LoRA adapters can still be applied at runtime on top of this merged model.")
+    print(f"  For vLLM:  python scripts/quantize_awq.py --model {output_path} --output {output_path}-awq")
+    print(f"  For GGUF:  python scripts/convert_to_gguf.py --model {output_path} --output {output_path}.gguf")
+    print(f"  For MLX:   python scripts/convert_to_mlx.py --model {output_path} --output {output_path}-mlx-4bit")
+    print()
+    print("Or use the merged model directly (unquantized HF format):")
+    print(f"  Set JARVIS_MODEL_NAME={output_path}")
+    print()
+    print("Per-node LoRA adapters can still be applied at runtime on top of the converted model.")
 
 
 if __name__ == "__main__":
