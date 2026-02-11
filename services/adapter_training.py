@@ -100,11 +100,17 @@ def _artifact_url(artifact_path: Path) -> str:
 def _detect_adapter_format(artifact_path: Path) -> str:
     """Detect adapter format from artifact zip.
 
-    NOTE: GGUF LoRA is currently disabled. All adapters are PEFT format.
-    This function is kept for forward compatibility in case GGUF support
-    is re-enabled in the future.
+    Inspects the zip contents for GGUF adapter files.
+    Returns 'peft_lora+gguf' if a GGUF adapter is found alongside PEFT,
+    or 'peft_lora' for PEFT-only adapters.
     """
-    # GGUF LoRA is disabled - always return peft_lora
+    try:
+        with zipfile.ZipFile(artifact_path, "r") as zf:
+            for name in zf.namelist():
+                if name.startswith("gguf/") and name.endswith(".gguf"):
+                    return "peft_lora+gguf"
+    except (zipfile.BadZipFile, OSError) as e:
+        logger.warning(f"Failed to inspect adapter zip {artifact_path}: {e}")
     return "peft_lora"
 
 
@@ -203,7 +209,9 @@ def _run_training_command(env: Dict[str, str], timeout_s: int) -> None:
     args = shlex.split(cmd)
     if args:
         executable = shutil.which(args[0])
-        if executable is None and args[0] == "python":
+        if executable is not None:
+            args[0] = executable
+        elif args[0] in ("python", "python3"):
             args[0] = sys.executable
     log_path = env.get("JARVIS_TRAIN_LOG_PATH")
     try:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -285,17 +286,43 @@ def main() -> int:
     model.save_pretrained(out)
     tokenizer.save_pretrained(out)
 
-    # ----------------------------------------------------------------
-    # GGUF LoRA conversion is disabled. The GGUF backend currently does
-    # not support LoRA adapters due to a llama.cpp scheduler bug.
-    # Adapters are produced in PEFT format only and should be used with
-    # the vLLM or Transformers backend.
-    # ----------------------------------------------------------------
-    if base_model_id.endswith(".gguf"):
-        print("⚠️  GGUF base model detected.", flush=True)
-        print("ℹ️  GGUF LoRA conversion is disabled due to llama.cpp runtime issues.", flush=True)
-        print("ℹ️  Adapter saved in PEFT format. Use vLLM or Transformers backend for inference.", flush=True)
-        # Still return success - the PEFT adapter is valid and usable with other backends
+    # GGUF LoRA conversion: convert PEFT adapter to GGUF format for llama.cpp
+    if base_model_id.endswith(".gguf") and hf_base_model_id:
+        gguf_convert_cmd = os.getenv("JARVIS_ADAPTER_GGUF_CONVERT_CMD", "").strip()
+        if not gguf_convert_cmd:
+            # Default: use converter from vendored llama.cpp sparse checkout
+            vendor_script = Path(__file__).parent / "vendor" / "llama.cpp" / "convert_lora_to_gguf.py"
+            if vendor_script.is_file():
+                gguf_convert_cmd = f"{sys.executable} {vendor_script}"
+
+        if gguf_convert_cmd:
+            gguf_out_dir = out / "gguf"
+            gguf_out_dir.mkdir(parents=True, exist_ok=True)
+            gguf_out_file = gguf_out_dir / "adapter.gguf"
+            convert_args = (
+                f"{gguf_convert_cmd} {out} "
+                f"--base {hf_base_model_id} "
+                f"--outfile {gguf_out_file}"
+            )
+            print(f"🔄 Converting PEFT adapter to GGUF: {convert_args}", flush=True)
+            try:
+                subprocess.run(
+                    convert_args,
+                    shell=True,
+                    check=True,
+                    timeout=600,
+                    capture_output=True,
+                    text=True,
+                )
+                print(f"✅ GGUF adapter saved: {gguf_out_file}", flush=True)
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️  GGUF conversion failed (non-fatal): {e.stderr[-500:] if e.stderr else e}", flush=True)
+            except subprocess.TimeoutExpired:
+                print("⚠️  GGUF conversion timed out (non-fatal)", flush=True)
+        else:
+            print("ℹ️  GGUF conversion skipped: no converter found", flush=True)
+    elif base_model_id.endswith(".gguf"):
+        print("ℹ️  GGUF conversion skipped: hf_base_model_id not provided", flush=True)
 
     # Cleanup: destroy any distributed process groups and clear CUDA cache
     # This prevents "destroy_process_group() was not called" warnings and
