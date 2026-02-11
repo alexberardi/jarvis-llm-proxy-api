@@ -278,6 +278,9 @@ work/
 # Personal progress notes
 current-progress.md
 
+# Docker
+docker-compose.override.yaml
+
 # Production environment files
 prod.env
 *.env
@@ -285,3 +288,6 @@ adapters/
 storage/
 spike_*.json
 tools/
+
+# Vendored llama.cpp sparse checkout (local clone, not committed)
+scripts/vendor/llama.cpp/

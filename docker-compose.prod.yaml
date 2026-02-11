@@ -1,0 +1,95 @@
+# ============================================================================
+# Jarvis LLM Proxy API — Production Compose (vLLM + CUDA)
+# ============================================================================
+# Usage:
+#   docker compose -f docker-compose.prod.yaml up -d
+#   docker compose -f docker-compose.prod.yaml up -d --build
+#
+# Prerequisites:
+#   - NVIDIA GPU + Container Toolkit (nvidia-ctk)
+#   - External PostgreSQL and Redis
+#   - .env file configured for production
+#   - Models downloaded to .models/ directory
+# ============================================================================
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    # Models mounted from host (not baked into image)
+    - ./.models:/app/.models:ro
+    # Adapter storage (read-write for training output)
+    - ./adapters:/tmp/jarvis-adapters
+  restart: unless-stopped
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # --------------------------------------------------------------------------
+  # API Server (port 8000)
+  # --------------------------------------------------------------------------
+  llm-proxy-api:
+    <<: *common
+    container_name: llm-proxy-api
+    ports:
+      - "${SERVER_PORT:-8000}:8000"
+    command: >
+      python -m uvicorn main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers ${UVICORN_WORKERS:-1}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      llm-proxy-model:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Model Service (port 8008)
+  # --------------------------------------------------------------------------
+  llm-proxy-model:
+    <<: *common
+    container_name: llm-proxy-model
+    ports:
+      - "${MODEL_SERVICE_PORT:-8008}:8008"
+    command: >
+      python -m uvicorn services.model_service:app
+      --host 0.0.0.0
+      --port 8008
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # --------------------------------------------------------------------------
+  # Queue Worker
+  # --------------------------------------------------------------------------
+  llm-proxy-worker:
+    <<: *common
+    container_name: llm-proxy-worker
+    environment:
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+      - LLM_PROXY_PROCESS_ROLE=worker
+    command: python scripts/queue_worker.py
+    depends_on:
+      llm-proxy-model:
+        condition: service_healthy
