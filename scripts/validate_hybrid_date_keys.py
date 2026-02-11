@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.validate_date_adapter import TEST_CASES
+from scripts.validate_jarvis_adapter import TEST_CASES
 from services.date_keys import (
     FastTextDateKeyExtractor,
     FASTTEXT_HIGH_CONFIDENCE,
