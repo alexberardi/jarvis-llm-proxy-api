@@ -45,6 +45,7 @@ class MlxClient(LLMBackendBase):
         self.model_name = model_path
         self.model_path = model_path
         self._current_adapter_path: Optional[str] = None
+        self._current_adapter_hash: Optional[str] = None
         self._lora_layers_applied: bool = False
         self.last_usage = None
         self.inference_engine = "mlx"  # Apple Silicon MLX backend
@@ -131,6 +132,7 @@ class MlxClient(LLMBackendBase):
 
             self.model = remove_lora_layers(self.model)
             self._current_adapter_path = None
+            self._current_adapter_hash = None
             self._lora_layers_applied = False
 
             elapsed = time.time() - start_time
@@ -144,6 +146,67 @@ class MlxClient(LLMBackendBase):
     def get_current_adapter(self) -> Optional[str]:
         """Return the currently loaded adapter path, or None if base model."""
         return self._current_adapter_path
+
+    def _resolve_mlx_adapter(self, adapter_hash: str) -> Optional[str]:
+        """Resolve an adapter hash to a local PEFT adapter directory path.
+
+        MLX uses PEFT-format adapters (adapters.safetensors + adapter_config.json)
+        which live at the root of the cached adapter directory.
+
+        Args:
+            adapter_hash: Unique adapter identifier from adapter_settings.
+
+        Returns:
+            Path to adapter directory, or None if not found.
+        """
+        from services import adapter_cache  # lazy import to avoid import chain
+
+        adapter_dir = adapter_cache.get_adapter_path(adapter_hash)
+        if adapter_dir is None:
+            logger.warning(f"🧩 [MLX] Adapter {adapter_hash} not found in cache")
+            return None
+
+        # Check for PEFT adapter files at root
+        safetensors = adapter_dir / "adapters.safetensors"
+        config = adapter_dir / "adapter_config.json"
+        if safetensors.is_file() and config.is_file():
+            return str(adapter_dir)
+
+        # Also check for HF-style naming (adapter_model.safetensors)
+        hf_safetensors = adapter_dir / "adapter_model.safetensors"
+        if hf_safetensors.is_file() and config.is_file():
+            return str(adapter_dir)
+
+        logger.warning(
+            f"🧩 [MLX] Adapter dir {adapter_dir} missing expected files "
+            f"(adapters.safetensors + adapter_config.json)"
+        )
+        return None
+
+    def _handle_adapter_switch(self, adapter_settings: dict) -> None:
+        """Handle per-request adapter switching based on adapter_settings.
+
+        Sticky behavior: when adapter_settings is absent or disabled,
+        keep the current adapter loaded (avoids unnecessary reloads).
+
+        Args:
+            adapter_settings: Dict with 'hash', 'scale', and 'enabled' keys.
+        """
+        adapter_hash = adapter_settings.get("hash")
+        adapter_enabled = adapter_settings.get("enabled", True)
+
+        if not adapter_hash or not adapter_enabled:
+            return  # sticky — keep current adapter
+
+        if adapter_hash == self._current_adapter_hash:
+            return  # same adapter, skip reload
+
+        adapter_path = self._resolve_mlx_adapter(adapter_hash)
+        if adapter_path is None:
+            return
+
+        self.load_adapter(adapter_path)
+        self._current_adapter_hash = adapter_hash
 
     def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""
@@ -229,16 +292,9 @@ class MlxClient(LLMBackendBase):
         messages: List[NormalizedMessage],
         params: GenerationParams,
     ) -> ChatResult:
-        # Log adapter settings (Phase 1b: no-op, just logging)
-        # Phase 1e will actually call self.load_adapter() here
+        # Per-request adapter switching via adapter cache
         if params.adapter_settings:
-            adapter_hash = params.adapter_settings.get("hash", "unknown")
-            adapter_scale = params.adapter_settings.get("scale", 1.0)
-            logger.info(f"🧩 [MLX] Adapter requested: hash={adapter_hash}, scale={adapter_scale}")
-            logger.debug(f"🧩 [MLX] TODO: Per-request adapter loading not yet implemented")
-            # Future implementation:
-            # adapter_path = resolve_adapter_from_hash(adapter_hash)
-            # self.load_adapter(adapter_path)
+            self._handle_adapter_switch(params.adapter_settings)
 
         formatted = self._to_dict_messages(messages)
         content = self.chat_with_temperature(formatted, params.temperature)
