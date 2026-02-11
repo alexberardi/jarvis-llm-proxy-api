@@ -1,6 +1,7 @@
-"""Settings API routes with app-to-app authentication.
+"""Settings API routes with combined authentication.
 
 Supports authentication via:
+- Authorization: Bearer <token>: Superuser JWT (validated via jarvis-auth)
 - X-Jarvis-App-Id + X-Jarvis-App-Key: App-to-app authentication
 
 All endpoints require authentication. Settings support multi-tenant scoping:
@@ -11,13 +12,17 @@ All endpoints require authentication. Settings support multi-tenant scoping:
 """
 
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from auth.app_auth import require_app_auth
+from jarvis_settings_client import create_combined_auth
 from services.settings_service import get_settings_service
+
+_auth_url = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
+require_app_auth = create_combined_auth(_auth_url)
 
 logger = logging.getLogger("uvicorn")
 
