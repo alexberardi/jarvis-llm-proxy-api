@@ -330,21 +330,23 @@ Rules:
         {"role": "user", "content": user_message}
     ]
     
-    inputs = tokenizer.apply_chat_template(
-        messages, 
-        return_tensors="pt",
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
         add_generation_prompt=True
-    ).to(model.device)
-    
+    )
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    input_len = inputs["input_ids"].shape[1]
+
     with torch.no_grad():
         outputs = model.generate(
-            inputs,
+            **inputs,
             max_new_tokens=100,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id
         )
-    
-    response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
+
+    response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
     
     # Parse JSON array from response
     try:
