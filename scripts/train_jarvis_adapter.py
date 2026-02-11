@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument(
         "--max-length",
         type=int,
-        default=256,
+        default=512,
         help="Maximum sequence length"
     )
     parser.add_argument(

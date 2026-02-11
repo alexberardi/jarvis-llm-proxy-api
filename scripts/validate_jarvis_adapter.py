@@ -279,9 +279,9 @@ TEST_CASES = [
 def load_adapter_and_model(adapter_path: str):
     """Load the trained adapter and base model."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from peft import PeftModel
-    
+
     # Read base model from adapter config
     config_path = Path(adapter_path) / "adapter_config.json"
     if config_path.exists():
@@ -290,14 +290,30 @@ def load_adapter_and_model(adapter_path: str):
             base_model_id = config.get("base_model_name_or_path", "meta-llama/Llama-3.2-3B-Instruct")
     else:
         base_model_id = "meta-llama/Llama-3.2-3B-Instruct"
-    
+
     print(f"Loading base model: {base_model_id}")
     tokenizer = AutoTokenizer.from_pretrained(base_model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.bfloat16,
-        device_map="auto"
-    )
+
+    # Use 4-bit quantization on CUDA to keep the model fully on GPU
+    if torch.cuda.is_available():
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            quantization_config=bnb_config,
+            device_map={"": 0},
+            torch_dtype=torch.bfloat16,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
     
     print(f"Loading adapter: {adapter_path}")
     model = PeftModel.from_pretrained(model, adapter_path)
