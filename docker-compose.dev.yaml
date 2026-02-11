@@ -1,0 +1,106 @@
+# ============================================================================
+# Jarvis LLM Proxy API — Development Compose (vLLM + CUDA)
+# ============================================================================
+# Usage:
+#   ./run-docker-dev.sh            # start all services
+#   ./run-docker-dev.sh --build    # rebuild and start
+#   ./run-docker-dev.sh --rebuild  # full rebuild (no cache)
+#
+# Prerequisites:
+#   - NVIDIA GPU + Container Toolkit (nvidia-ctk)
+#   - External PostgreSQL and Redis
+#   - .env file (copy env.docker.template → .env and configure)
+# ============================================================================
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    # Source code mounts for hot reload
+    - ./api:/app/api
+    - ./auth:/app/auth
+    - ./backends:/app/backends
+    - ./cache:/app/cache
+    - ./config:/app/config
+    - ./db:/app/db
+    - ./managers:/app/managers
+    - ./models:/app/models
+    - ./queues:/app/queues
+    - ./scripts:/app/scripts
+    - ./services:/app/services
+    - ./main.py:/app/main.py
+    - ./alembic.ini:/app/alembic.ini
+    - ./alembic:/app/alembic
+    # Model files from host
+    - ./.models:/app/.models
+    # Adapter storage
+    - ./adapters:/tmp/jarvis-adapters
+    # Shared libraries (editable installs)
+    - ../jarvis-settings-client:/app/jarvis-settings-client
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # --------------------------------------------------------------------------
+  # API Server (port 8000) — FastAPI app with hot reload
+  # --------------------------------------------------------------------------
+  llm-proxy-api:
+    <<: *common
+    container_name: llm-proxy-api
+    ports:
+      - "${SERVER_PORT:-8000}:8000"
+    command: >
+      sh -c "pip install -q -e /app/jarvis-settings-client &&
+             python -m uvicorn main:app
+             --host 0.0.0.0
+             --port 8000
+             --reload
+             --reload-dir /app/api
+             --reload-dir /app/config
+             --reload-dir /app/models
+             --reload-dir /app/services
+             --reload-dir /app/managers
+             --reload-dir /app/backends"
+    depends_on:
+      llm-proxy-model:
+        condition: service_started
+
+  # --------------------------------------------------------------------------
+  # Model Service (port 8008) — Standalone model inference
+  # --------------------------------------------------------------------------
+  llm-proxy-model:
+    <<: *common
+    container_name: llm-proxy-model
+    ports:
+      - "${MODEL_SERVICE_PORT:-8008}:8008"
+    command: >
+      python -m uvicorn services.model_service:app
+      --host 0.0.0.0
+      --port 8008
+
+  # --------------------------------------------------------------------------
+  # Queue Worker — RQ worker for async jobs (training, vision, etc.)
+  # --------------------------------------------------------------------------
+  llm-proxy-worker:
+    <<: *common
+    container_name: llm-proxy-worker
+    environment:
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+      - LLM_PROXY_PROCESS_ROLE=worker
+    command: python scripts/queue_worker.py
+    depends_on:
+      llm-proxy-model:
+        condition: service_started

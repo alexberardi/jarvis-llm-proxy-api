@@ -134,21 +134,22 @@ EOF
 echo -e "${GREEN}✅ Configuration saved to .setup_config${NC}"
 echo ""
 
-LLAMA_CPP_DIR="$ROOT/tools/llama.cpp"
-if [[ ! -f "$LLAMA_CPP_DIR/convert-lora-to-gguf.py" ]]; then
-    echo -e "${YELLOW}llama.cpp not found (needed for GGUF LoRA conversion).${NC}"
-    read -p "Clone llama.cpp into tools/llama.cpp? [Y/n]: " clone_llama
-    clone_llama=${clone_llama:-Y}
-    if [[ "$clone_llama" =~ ^[Yy]$ ]]; then
+# Set up version-locked GGUF LoRA converter (matches llama-cpp-python version)
+VENDOR_CONVERTER="$ROOT/scripts/vendor/llama.cpp/convert_lora_to_gguf.py"
+if [[ ! -f "$VENDOR_CONVERTER" ]]; then
+    echo -e "${YELLOW}GGUF LoRA converter not found (needed for adapter training with GGUF models).${NC}"
+    read -p "Download version-locked converter? [Y/n]: " setup_converter
+    setup_converter=${setup_converter:-Y}
+    if [[ "$setup_converter" =~ ^[Yy]$ ]]; then
         if command -v git >/dev/null 2>&1; then
-            echo -e "${BLUE}Cloning llama.cpp...${NC}"
-            git clone https://github.com/ggerganov/llama.cpp "$LLAMA_CPP_DIR"
-            echo -e "${GREEN}✅ llama.cpp cloned to $LLAMA_CPP_DIR${NC}"
+            echo -e "${BLUE}Setting up GGUF converter (version-locked to llama-cpp-python)...${NC}"
+            bash "$ROOT/scripts/vendor/setup_llama_cpp.sh"
+            echo -e "${GREEN}✅ GGUF converter installed${NC}"
         else
-            echo -e "${RED}git not found. Please install git or clone manually.${NC}"
+            echo -e "${RED}git not found. Please install git or run scripts/vendor/setup_llama_cpp.sh manually.${NC}"
         fi
     else
-        echo -e "${YELLOW}Skipping llama.cpp clone.${NC}"
+        echo -e "${YELLOW}Skipping GGUF converter setup. Adapter training will produce PEFT-only format.${NC}"
     fi
 fi
 
