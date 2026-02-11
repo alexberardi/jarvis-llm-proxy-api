@@ -24,7 +24,7 @@ logger = logging.getLogger("uvicorn")
 # ============================================================================
 
 # Version for cache invalidation - increment when keys change
-DATE_KEYS_VERSION = "1.1"
+DATE_KEYS_VERSION = "2.0"
 
 # Relative days
 RELATIVE_DAYS = [
@@ -106,6 +106,20 @@ TIME_PATTERNS = {
     "quarter_to": "at_X_45am, at_X_45pm",
 }
 
+# Dynamic key patterns (numeric, not enumerable)
+DYNAMIC_PATTERNS = [
+    {
+        "pattern": "in_{N}_minutes",
+        "regex": r"^in_(\d+)_minutes$",
+        "description": "Relative offset in minutes from current time",
+    },
+    {
+        "pattern": "in_{N}_days",
+        "regex": r"^in_(\d+)_days$",
+        "description": "Relative offset in days from current time",
+    },
+]
+
 # Confidence thresholds for hybrid extraction
 FASTTEXT_HIGH_CONFIDENCE = 0.85  # Use FastText directly
 FASTTEXT_HINT_THRESHOLD = 0.75   # Add FastText hint to LLM
@@ -119,12 +133,14 @@ def get_date_keys_response() -> dict:
     """
     return {
         "version": DATE_KEYS_VERSION,
-        "keys": sorted(ALL_DATE_KEYS),
+        "static_keys": sorted(ALL_DATE_KEYS),
+        "dynamic_patterns": DYNAMIC_PATTERNS,
         "patterns": TIME_PATTERNS,
         "notes": {
             "composability": "Multiple keys may be returned, e.g., ['next_tuesday', 'morning']",
             "no_date": "Empty array returned if no date reference detected",
             "combined_keys": "Common phrases like 'tonight', 'tomorrow_morning' are standalone keys",
+            "relative_time": "Dynamic keys like 'in_30_minutes', 'in_3_days' are generated from relative time expressions",
         }
     }
 
@@ -135,7 +151,7 @@ def get_adapter_path() -> Optional[Path]:
 
     Returns None if no adapter is trained yet.
     """
-    adapter_path = Path("adapters/date_keys")
+    adapter_path = Path("adapters/jarvis")
     if adapter_path.exists() and (adapter_path / "adapter_config.json").exists():
         return adapter_path
     return None
@@ -363,7 +379,11 @@ class LLMDateKeyExtractor:
 Rules:
 - Return only the JSON array, nothing else
 - Use standardized keys like: today, tomorrow, yesterday, tomorrow_morning, tonight, last_night, next_monday, this_weekend, at_3pm, etc.
+- For relative time: flatten hours/minutes to in_N_minutes (e.g., "in 2 hours" → "in_120_minutes", "in half an hour" → "in_30_minutes")
+- For relative days: use in_N_days (e.g., "in 3 days" → "in_3_days", "in a week" → "in_7_days")
 - Return [] if no date/time references are found
+- Return [] for ambiguous time expressions like "in a few minutes", "later", "in a bit"
+- Return [] for durations and past references like "for 30 minutes", "2 hours ago"
 - Multiple keys can be returned for composite expressions like "next Tuesday at 3pm" -> ["next_tuesday", "at_3pm"]"""
 
     def extract(self, text: str, hint: Optional[List[str]] = None) -> List[str]:

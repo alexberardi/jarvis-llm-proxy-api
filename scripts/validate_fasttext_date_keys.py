@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import test cases from the adapter validation script
-from scripts.validate_date_adapter import TEST_CASES
+from scripts.validate_jarvis_adapter import TEST_CASES
 
 
 def safe_predict(model, text: str, k: int = 5) -> tuple[list[str], list[float]]:
