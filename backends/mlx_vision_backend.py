@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import tempfile
 import time
@@ -10,6 +11,8 @@ from PIL import Image
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
 from backends.base import LLMBackendBase
+
+logger = logging.getLogger("uvicorn")
 
 
 class MlxVisionClient(LLMBackendBase):
@@ -21,7 +24,7 @@ class MlxVisionClient(LLMBackendBase):
     """
 
     def __init__(self, model_path: str):
-        print("🔁 Loading MLX-VLM vision model...")
+        logger.info("🔁 Loading MLX-VLM vision model...")
         from mlx_vlm.generate import generate  # type: ignore
         from mlx_vlm.utils import load, load_config  # type: ignore
 
@@ -139,7 +142,7 @@ class MlxVisionClient(LLMBackendBase):
         }
 
         tokens_per_second = completion_tokens / (end_time - start_time) if end_time > start_time else 0
-        print(f"🚀 [MLX-VISION] ~{completion_tokens} tokens in {end_time - start_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+        logger.info(f"🚀 [MLX-VISION] ~{completion_tokens} tokens in {end_time - start_time:.2f}s ({tokens_per_second:.1f} tok/s)")
 
         return ChatResult(content=content.strip(), usage=self.last_usage)
 

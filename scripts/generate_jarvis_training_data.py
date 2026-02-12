@@ -16,7 +16,6 @@ Output:
 import json
 import random
 from pathlib import Path
-from typing import Optional
 
 # Output file
 OUTPUT_FILE = Path(__file__).parent.parent / "data" / "jarvis_training.jsonl"

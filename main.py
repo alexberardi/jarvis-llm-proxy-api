@@ -13,7 +13,6 @@ except RuntimeError:
     # Already set, ignore
     pass
 
-import logging
 
 from dotenv import load_dotenv
 

@@ -12,17 +12,16 @@ All endpoints require authentication. Settings support multi-tenant scoping:
 """
 
 import logging
-import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from config.service_config import get_auth_url
 from jarvis_settings_client import create_combined_auth
 from services.settings_service import get_settings_service
 
-_auth_url = os.getenv("JARVIS_AUTH_BASE_URL", "http://localhost:8007")
-require_app_auth = create_combined_auth(_auth_url)
+require_app_auth = create_combined_auth(get_auth_url())
 
 logger = logging.getLogger("uvicorn")
 

@@ -23,8 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from backends.base import LLMBackendBase
 
 if TYPE_CHECKING:
-    from llama_cpp import Llama
-    from llama_cpp.llama_chat_format import Llava15ChatHandler
+    pass
 from managers.chat_types import (
     ChatResult,
     GenerationParams,

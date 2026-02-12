@@ -22,7 +22,6 @@ Environment Variables:
     LLM_PROXY_ADAPTER_PREFIX: S3 key prefix (default: adapters)
 """
 
-import hashlib
 import logging
 import os
 import shutil

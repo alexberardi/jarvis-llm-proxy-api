@@ -308,11 +308,17 @@ def load_adapter_and_model(adapter_path: str):
             device_map={"": 0},
             torch_dtype=torch.bfloat16,
         )
+    elif torch.backends.mps.is_available():
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            torch_dtype=torch.float16,
+            device_map={"": "mps"},
+        )
     else:
         model = AutoModelForCausalLM.from_pretrained(
             base_model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            torch_dtype=torch.float32,
+            device_map={"": "cpu"},
         )
     
     print(f"Loading adapter: {adapter_path}")

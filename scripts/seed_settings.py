@@ -43,8 +43,8 @@ def main() -> int:
     from services.settings_service import (
         get_settings_service,
         SETTINGS_DEFINITIONS,
-        _coerce_value,
     )
+    from jarvis_settings_client import coerce_value
 
     settings = get_settings_service()
 
@@ -72,7 +72,7 @@ def main() -> int:
             continue
 
         # Coerce value
-        coerced_value = _coerce_value(env_value, definition.value_type, definition.default)
+        coerced_value = coerce_value(env_value, definition.value_type, definition.default)
 
         # Check if already in database
         current_value = settings.get(key)

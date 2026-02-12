@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from dataclasses import dataclass
+from typing import List, Optional, Union
 
 
 @dataclass

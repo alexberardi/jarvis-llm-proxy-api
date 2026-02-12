@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from managers.chat_types import ChatResult, ImagePart, NormalizedMessage, TextPart
 from backends.base import LLMBackendBase
 
 
