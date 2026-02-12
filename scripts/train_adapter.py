@@ -131,7 +131,7 @@ def _is_quantized_model(model_path: str) -> bool:
             if "quantized" in fmt.lower() or "pack" in fmt.lower():
                 return True
         return False
-    except Exception:
+    except (json.JSONDecodeError, KeyError, FileNotFoundError, TypeError):
         return False
 
 
