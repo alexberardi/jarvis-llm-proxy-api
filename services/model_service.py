@@ -1,7 +1,6 @@
 import atexit
 import logging
 import os
-import asyncio
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
@@ -11,7 +10,7 @@ from dotenv import load_dotenv
 from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest
 from services.chat_runner import run_chat_completion
-from services.date_keys import extract_date_keys, HybridDateKeyExtractor
+from services.date_keys import extract_date_keys
 from api.settings_routes import router as settings_router
 
 load_dotenv()
@@ -146,24 +145,6 @@ def _atexit_cleanup():
 
 atexit.register(_atexit_cleanup)
 
-# Pre-load date key extractor in background if adapter exists
-def _preload_date_key_extractor():
-    """Pre-load the date key extractor to avoid first-request latency."""
-    from services.date_keys import is_adapter_trained
-    if is_adapter_trained():
-        logger.info("🗓️  Pre-loading date key extractor...")
-        try:
-            extractor = HybridDateKeyExtractor()
-            # Pre-warm by doing a dummy extraction
-            extractor.extract("tomorrow")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to pre-load date key extractor: {e}")
-
-# Run in a separate thread to not block startup
-import threading
-_preload_thread = threading.Thread(target=_preload_date_key_extractor, daemon=True)
-_preload_thread.start()
-
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -235,7 +216,10 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
         user_text = _get_user_text(req)
         if user_text:
             logger.debug(f"🗓️  Extracting date keys from: {user_text!r}")
-            date_keys = extract_date_keys(user_text)
+            model_chat_fn = None
+            if model_manager.main_model and hasattr(model_manager.main_model, "chat_with_temperature"):
+                model_chat_fn = model_manager.main_model.chat_with_temperature
+            date_keys = extract_date_keys(user_text, model_chat_fn=model_chat_fn)
             logger.debug(f"🗓️  Extracted date keys: {date_keys}")
 
     result = await run_chat_completion(model_manager, req, allow_images=True)

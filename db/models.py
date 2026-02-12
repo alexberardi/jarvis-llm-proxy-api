@@ -1,7 +1,6 @@
 """Database models for training job tracking and settings."""
 
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column

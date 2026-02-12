@@ -13,12 +13,11 @@ This swap pattern is necessary when both models cannot fit in GPU memory simulta
 from __future__ import annotations
 
 import gc
-import io
 import logging
 import os
 import time
 from base64 import b64decode
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import httpx
 
@@ -189,7 +188,6 @@ def _unload_vision_model(vision_client) -> None:
 def _parse_messages(messages: List[Dict[str, Any]]) -> List:
     """Parse messages into NormalizedMessage format with images."""
     from managers.chat_types import NormalizedMessage, TextPart, ImagePart
-    from PIL import Image
 
     normalized = []
 

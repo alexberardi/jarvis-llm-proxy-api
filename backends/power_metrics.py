@@ -1,6 +1,9 @@
+import logging
 import time
 import subprocess
 import threading
+
+logger = logging.getLogger("uvicorn")
 
 class PowerMetrics:
     def __init__(self):
@@ -28,9 +31,9 @@ class PowerMetrics:
             self.monitoring = True
             self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.thread.start()
-            print("🔋 Power monitoring started")
+            logger.info("🔋 Power monitoring started")
         else:
-            print("⚠️  Power monitoring disabled (sudo powermetrics not available)")
+            logger.warning("⚠️  Power monitoring disabled (sudo powermetrics not available)")
     
     def stop_monitoring(self):
         """Stop background power monitoring"""

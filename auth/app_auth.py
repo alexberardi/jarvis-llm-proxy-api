@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Optional
 
 import httpx
 from fastapi import Header, HTTPException, Request
+
+from config.service_config import get_auth_url
+
 
 async def require_app_auth(
     request: Request,
@@ -23,9 +25,7 @@ async def require_app_auth(
     if not x_jarvis_app_id or not x_jarvis_app_key:
         raise HTTPException(status_code=401, detail="Missing app credentials")
 
-    jarvis_auth_base = os.getenv("JARVIS_AUTH_BASE_URL")
-    if not jarvis_auth_base:
-        raise HTTPException(status_code=500, detail="JARVIS_AUTH_BASE_URL not configured")
+    jarvis_auth_base = get_auth_url()
 
     app_ping = jarvis_auth_base.rstrip("/") + "/internal/app-ping"
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:

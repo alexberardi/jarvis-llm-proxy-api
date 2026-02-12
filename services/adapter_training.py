@@ -406,7 +406,7 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
     dataset_path.write_text(_stable_json_dumps(dataset_ref), encoding="utf-8")
     params_path.write_text(_stable_json_dumps(params), encoding="utf-8")
 
-    timeout_s = int(os.getenv("JARVIS_ADAPTER_TRAIN_TIMEOUT_SECONDS", str(ttl_seconds)))
+    timeout_s = int(os.getenv("JARVIS_ADAPTER_TRAIN_TIMEOUT_SECONDS") or ttl_seconds)
     timeout_s = max(60, min(timeout_s, ttl_seconds))
 
     # Validate model ID - must be a HF model ID or local path

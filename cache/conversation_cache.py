@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Any
-import time
-import uuid
 
 class ConversationCache(ABC):
     """Abstract base class for conversation session caching"""
