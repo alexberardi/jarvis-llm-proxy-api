@@ -364,8 +364,8 @@ def _send_callback(
         if auth_type == "bearer" and auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
         # Apply Jarvis app-to-app headers if configured
-        app_id = os.getenv("JARVIS_AUTH_APP_ID")
-        app_key = os.getenv("JARVIS_AUTH_APP_KEY")
+        app_id = os.getenv("JARVIS_APP_ID")
+        app_key = os.getenv("JARVIS_APP_KEY")
         if app_id and app_key:
             headers["X-Jarvis-App-Id"] = app_id
             headers["X-Jarvis-App-Key"] = app_key
