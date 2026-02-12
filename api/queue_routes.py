@@ -34,10 +34,10 @@ def _parse_created_at(ts: str) -> float:
     """Parse a timestamp string to Unix timestamp."""
     try:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-    except Exception:
+    except (ValueError, AttributeError):
         try:
             return float(ts)
-        except Exception:
+        except (ValueError, TypeError):
             return time.time()
 
 

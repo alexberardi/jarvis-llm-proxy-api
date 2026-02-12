@@ -291,7 +291,7 @@ def repair_unescaped_quotes(content: str) -> Optional[str]:
             return repaired
         except json.JSONDecodeError:
             pass
-    except Exception:
+    except Exception as e:
         pass  # Repair strategy failed, return None
 
     return None
@@ -552,7 +552,7 @@ def repair_truncated_json(content: str) -> Optional[str]:
             except json.JSONDecodeError:
                 pass
 
-    except Exception:
+    except Exception as e:
         pass  # Strategy 3 failed, try next
 
     # Strategy 4: Simple bracket counting approach as last resort
@@ -580,7 +580,7 @@ def repair_truncated_json(content: str) -> Optional[str]:
             return repaired
         except json.JSONDecodeError:
             pass
-    except Exception:
+    except Exception as e:
         pass  # Strategy 4 failed, no repair possible
 
     return None

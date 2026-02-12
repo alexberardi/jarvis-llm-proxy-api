@@ -16,6 +16,10 @@ except RuntimeError:
 import logging
 
 from dotenv import load_dotenv
+
+# Load .env before any config/route imports that read env vars at module level
+load_dotenv()
+
 from fastapi import FastAPI
 
 # Config setup
@@ -25,6 +29,10 @@ from config.logging_config import (
     print_startup_info,
 )
 from config.debug_config import setup_debugpy
+from config.service_config import (
+    init as init_service_config,
+    shutdown as shutdown_service_config,
+)
 
 # Route modules
 from api.chat_routes import router as chat_router
@@ -33,9 +41,8 @@ from api.model_routes import router as model_router
 from api.health_routes import router as health_router
 from api.training_routes import router as training_router
 from api.adapter_routes import router as adapter_router
+from api.pipeline_routes import router as pipeline_router
 from api.settings_routes import router as settings_router
-
-load_dotenv()
 
 # Initialize logging
 logger = setup_console_logging()
@@ -56,13 +63,27 @@ app.include_router(model_router)
 app.include_router(health_router)
 app.include_router(training_router)
 app.include_router(adapter_router)
+app.include_router(pipeline_router)
 app.include_router(settings_router)
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize remote logging and pre-warm database connection on startup."""
+    """Initialize service config, remote logging, and pre-warm DB on startup."""
+    # Service discovery first (auth URL, logs URL, etc.)
+    try:
+        from db.session import engine as db_engine
+        init_service_config(db_engine=db_engine)
+    except Exception as e:
+        logger.warning(f"Service config init failed (non-fatal): {e}")
+        # Still try without DB caching
+        try:
+            init_service_config()
+        except Exception as e:
+            pass
+
     setup_remote_logging()
+
     # Pre-warm database connection to avoid first-request failures
     try:
         from sqlalchemy import text
@@ -81,7 +102,8 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up logging handlers on shutdown."""
+    """Clean up service config and logging handlers on shutdown."""
+    shutdown_service_config()
     for handler in logger.handlers:
         if hasattr(handler, "close"):
             handler.close()
