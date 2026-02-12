@@ -3,7 +3,7 @@
 Models for job queue requests and responses used by the async processing system.
 """
 
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 

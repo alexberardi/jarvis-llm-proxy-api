@@ -18,7 +18,7 @@ from managers.chat_types import (
     GenerationParams,
     ChatResult,
 )
-from models.api_models import Message, ResponseFormat, ChatCompletionRequest
+from models.api_models import Message, ChatCompletionRequest
 from services.json_grammar import schema_to_gbnf
 
 

@@ -62,9 +62,8 @@ async def chat_completions(req: ChatCompletionRequest):
         headers = {}
         if internal_token:
             headers["X-Internal-Token"] = internal_token
-        # Use longer timeout for requests with date context (model loading can take time)
         base_timeout = float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
-        timeout = base_timeout + 60 if req.include_date_context else base_timeout
+        timeout = base_timeout
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=req.dict(), headers=headers)

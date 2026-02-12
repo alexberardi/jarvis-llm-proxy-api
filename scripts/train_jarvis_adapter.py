@@ -108,6 +108,12 @@ def parse_args():
         default=4,
         help="Gradient accumulation steps"
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume from a checkpoint directory (e.g., adapters/jarvis/checkpoints/checkpoint-900)"
+    )
     return parser.parse_args()
 
 
@@ -367,8 +373,8 @@ def main():
         formatting_func=formatting_func,
     )
     
-    # Train
-    trainer.train()
+    # Train (resume from checkpoint if specified)
+    trainer.train(resume_from_checkpoint=args.resume)
     
     # Save the final adapter
     print("\n💾 Saving adapter...", flush=True)
