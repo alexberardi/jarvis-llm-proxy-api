@@ -8,10 +8,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from managers.model_manager import ModelManager
-from models.api_models import ChatCompletionRequest
+from models.api_models import ChatCompletionRequest, Message
 from services.chat_runner import run_chat_completion
-from services.date_keys import extract_date_keys
+from services.date_keys import extract_date_keys_fast, build_date_hint_message
 from api.settings_routes import router as settings_router
+from services.settings_helpers import get_setting
 
 load_dotenv()
 
@@ -210,17 +211,29 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     require_internal_token(x_internal_token)
     logger.info(f"▶️  /internal/model/chat model={req.model} messages={len(req.messages)}")
 
-    # Extract date keys if requested
+    # Extract date keys using FastText only (~1ms).
+    # If confidence is high, we return keys directly.
+    # If confidence is medium/low, we inject a hint into the messages
+    # so the main GGUF model can validate/correct during its normal
+    # inference pass — no separate CPU-bound Transformers model needed.
     date_keys: Optional[List[str]] = None
     if req.include_date_context:
         user_text = _get_user_text(req)
         if user_text:
-            logger.debug(f"🗓️  Extracting date keys from: {user_text!r}")
-            model_chat_fn = None
-            if model_manager.main_model and hasattr(model_manager.main_model, "chat_with_temperature"):
-                model_chat_fn = model_manager.main_model.chat_with_temperature
-            date_keys = extract_date_keys(user_text, model_chat_fn=model_chat_fn)
-            logger.debug(f"🗓️  Extracted date keys: {date_keys}")
+            logger.debug(f"🗓️  Extracting date keys (fast) from: {user_text!r}")
+            ft_result = extract_date_keys_fast(user_text)
+            date_keys = ft_result.keys
+            logger.debug(
+                f"🗓️  FastText result: keys={ft_result.keys}, "
+                f"confidence={ft_result.confidence:.2f}, "
+                f"needs_hint={ft_result.needs_llm_hint}"
+            )
+
+            # Inject hint into the main model's messages for validation
+            hint_msg = build_date_hint_message(ft_result)
+            if hint_msg:
+                logger.debug(f"🗓️  Injecting date hint into messages for main model")
+                req.messages.append(Message(**hint_msg))
 
     result = await run_chat_completion(model_manager, req, allow_images=True)
     preview = (result.content or "")[:1000]
@@ -270,8 +283,12 @@ async def get_engine_info(x_internal_token: str | None = Header(default=None)):
     require_internal_token(x_internal_token)
 
     # Get the main model's inference engine
-    inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "llama_cpp").lower()
-    backend_type = os.getenv("JARVIS_MODEL_BACKEND", "GGUF").upper()
+    inference_engine = get_setting(
+        "inference.general.engine", "JARVIS_INFERENCE_ENGINE", "llama_cpp"
+    ).lower()
+    backend_type = get_setting(
+        "model.main.backend", "JARVIS_MODEL_BACKEND", "GGUF"
+    ).upper()
 
     # Check if main_model backend instance has inference_engine attribute (more accurate)
     if model_manager.main_model and hasattr(model_manager.main_model, "inference_engine"):

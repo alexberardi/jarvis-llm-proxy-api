@@ -1,5 +1,4 @@
 import logging
-import os
 import threading
 import time
 from typing import List, Dict, Any, Optional
@@ -13,6 +12,12 @@ from transformers import (
 )
 
 from backends.base import LLMBackendBase
+from services.settings_helpers import (
+    get_bool_setting,
+    get_float_setting,
+    get_int_setting,
+    get_setting,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -33,7 +38,9 @@ class TransformersClient(LLMBackendBase):
         
         # Get context window from parameter or environment variable
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "4096"))
+            context_window = get_int_setting(
+                "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 4096
+            )
         self.context_window = context_window
         self._actual_context_window = None  # Will be set after model loading
         
@@ -41,23 +48,43 @@ class TransformersClient(LLMBackendBase):
         self.device = self._get_device()
         
         # Get quantization configuration
-        self.use_quantization = os.getenv("JARVIS_USE_QUANTIZATION", "false").lower() == "true"
-        self.quantization_type = os.getenv("JARVIS_QUANTIZATION_TYPE", "4bit").lower()
+        self.use_quantization = get_bool_setting(
+            "inference.transformers.use_quantization", "JARVIS_USE_QUANTIZATION", False
+        )
+        self.quantization_type = get_setting(
+            "inference.transformers.quantization_type", "JARVIS_QUANTIZATION_TYPE", "4bit"
+        ).lower()
         
         # Get generation parameters
-        self.max_tokens = int(os.getenv("JARVIS_MAX_TOKENS", "2048"))
-        self.top_p = float(os.getenv("JARVIS_TOP_P", "0.95"))
-        self.top_k = int(os.getenv("JARVIS_TOP_K", "50"))
-        self.repetition_penalty = float(os.getenv("JARVIS_REPETITION_PENALTY", "1.1"))
-        self.do_sample = os.getenv("JARVIS_DO_SAMPLE", "true").lower() == "true"
+        self.max_tokens = get_int_setting(
+            "inference.general.max_tokens", "JARVIS_MAX_TOKENS", 2048
+        )
+        self.top_p = get_float_setting(
+            "inference.general.top_p", "JARVIS_TOP_P", 0.95
+        )
+        self.top_k = get_int_setting(
+            "inference.general.top_k", "JARVIS_TOP_K", 50
+        )
+        self.repetition_penalty = get_float_setting(
+            "inference.general.repeat_penalty", "JARVIS_REPEAT_PENALTY", 1.1
+        )
+        self.do_sample = get_bool_setting(
+            "inference.transformers.do_sample", "JARVIS_DO_SAMPLE", True
+        )
         
         # Memory optimization settings
-        self.use_cache = os.getenv("JARVIS_USE_CACHE", "true").lower() == "true"
+        self.use_cache = get_bool_setting(
+            "inference.transformers.use_cache", "JARVIS_USE_CACHE", True
+        )
         self.torch_dtype = self._get_torch_dtype()
-        self.trust_remote_code = os.getenv("JARVIS_TRUST_REMOTE_CODE", "false").lower() == "true"
+        self.trust_remote_code = get_bool_setting(
+            "inference.transformers.trust_remote_code", "JARVIS_TRUST_REMOTE_CODE", False
+        )
         
         # Check if vLLM inference should be used
-        self.inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "transformers").lower()
+        self.inference_engine = get_setting(
+            "inference.general.engine", "JARVIS_INFERENCE_ENGINE", "transformers"
+        ).lower()
         self.vllm_backend = None
         # Note: Dynamic per-request adapters only supported on vLLM backend
         # Transformers backend runs base model only
@@ -86,7 +113,9 @@ class TransformersClient(LLMBackendBase):
     
     def _get_device(self) -> str:
         """Determine the best device for inference"""
-        device_preference = os.getenv("JARVIS_DEVICE", "auto").lower()
+        device_preference = get_setting(
+            "inference.transformers.device", "JARVIS_DEVICE", "auto"
+        ).lower()
         
         if device_preference == "auto":
             if torch.cuda.is_available():
@@ -100,7 +129,9 @@ class TransformersClient(LLMBackendBase):
     
     def _get_torch_dtype(self) -> torch.dtype:
         """Get the appropriate torch dtype"""
-        dtype_str = os.getenv("JARVIS_TORCH_DTYPE", "auto").lower()
+        dtype_str = get_setting(
+            "inference.transformers.torch_dtype", "JARVIS_TORCH_DTYPE", "auto"
+        ).lower()
         
         if dtype_str == "auto":
             if self.device == "cuda":
@@ -192,7 +223,9 @@ class TransformersClient(LLMBackendBase):
         
         # Load model
         logger.debug("🤖 Loading model...")
-        device_map_env = os.getenv("JARVIS_TRANSFORMERS_DEVICE_MAP", "").strip().lower()
+        device_map_env = get_setting(
+            "inference.transformers.device_map", "JARVIS_TRANSFORMERS_DEVICE_MAP", ""
+        ).strip().lower()
         if device_map_env in {"", "auto"}:
             device_map = "auto" if self.device == "cuda" else None
         elif device_map_env in {"none", "off", "false", "no"}:

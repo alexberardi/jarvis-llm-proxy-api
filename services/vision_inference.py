@@ -21,6 +21,8 @@ from typing import Any, Dict, List
 
 import httpx
 
+from services.settings_helpers import get_int_setting, get_setting
+
 logger = logging.getLogger("uvicorn")
 
 
@@ -59,7 +61,7 @@ def _wait_for_gpu_memory(min_free_gb: float = 8.0, timeout_s: float = 30) -> boo
 
 def _pause_model_service() -> bool:
     """Unload main model from model service to free GPU memory."""
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     if not model_service_url:
         logger.warning("⚠️  MODEL_SERVICE_URL not set, cannot pause model service")
         return False
@@ -89,7 +91,7 @@ def _pause_model_service() -> bool:
 
 def _resume_model_service() -> bool:
     """Reload main model in model service."""
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     if not model_service_url:
         logger.warning("⚠️  MODEL_SERVICE_URL not set, cannot resume model service")
         return False
@@ -131,29 +133,17 @@ def _resume_model_service() -> bool:
         return False
 
 
-def _get_vision_setting(key: str, env_fallback: str, default: Any) -> Any:
-    """Get vision setting from settings service or env var."""
-    try:
-        from services.settings_service import get_settings_service
-        service = get_settings_service()
-        value = service.get(key)
-        if value is not None:
-            return value
-    except (ImportError, RuntimeError, AttributeError):
-        pass
-    return os.getenv(env_fallback, default)
-
-
 def _load_vision_model():
     """Load the vision model for inference."""
     from backends.vllm_vision_backend import VLLMVisionClient
 
-    vision_model_name = _get_vision_setting("model.vision.name", "JARVIS_VISION_MODEL_NAME", "")
-    vision_chat_format = _get_vision_setting("model.vision.chat_format", "JARVIS_VISION_MODEL_CHAT_FORMAT", "qwen")
-    vision_context_window = _get_vision_setting("model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 8192)
-
-    if isinstance(vision_context_window, str):
-        vision_context_window = int(vision_context_window)
+    vision_model_name = get_setting("model.vision.name", "JARVIS_VISION_MODEL_NAME", "")
+    vision_chat_format = get_setting(
+        "model.vision.chat_format", "JARVIS_VISION_MODEL_CHAT_FORMAT", "qwen"
+    )
+    vision_context_window = get_int_setting(
+        "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 8192
+    )
 
     if not vision_model_name:
         raise VisionInferenceError("JARVIS_VISION_MODEL_NAME not configured")

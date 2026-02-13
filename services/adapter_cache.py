@@ -27,7 +27,6 @@ Environment Variables:
 """
 
 import logging
-import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from services import adapter_storage
+from services.settings_helpers import get_bool_setting, get_int_setting
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +71,14 @@ class AdapterCache:
             evict_disk: Whether to evict from disk cache too (default from env)
         """
         self._max_size = max_size or int(
-            os.getenv("LLM_PROXY_ADAPTER_CACHE_MAX_SIZE", "10")
+            get_int_setting(
+                "adapter_cache.max_size", "LLM_PROXY_ADAPTER_CACHE_MAX_SIZE", 10
+            )
         )
         self._evict_disk = evict_disk if evict_disk is not None else (
-            os.getenv("LLM_PROXY_ADAPTER_CACHE_EVICT_DISK", "false").lower() == "true"
+            get_bool_setting(
+                "adapter_cache.evict_disk", "LLM_PROXY_ADAPTER_CACHE_EVICT_DISK", False
+            )
         )
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
         self._lock = threading.RLock()

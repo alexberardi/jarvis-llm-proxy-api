@@ -21,7 +21,7 @@ from config.service_config import get_auth_url
 from jarvis_settings_client import create_combined_auth
 from services.settings_service import get_settings_service
 
-require_app_auth = create_combined_auth(get_auth_url())
+require_app_auth = create_combined_auth(get_auth_url)
 
 logger = logging.getLogger("uvicorn")
 

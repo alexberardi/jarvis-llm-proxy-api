@@ -7,13 +7,14 @@ import os
 
 from fastapi import APIRouter
 import httpx
+from services.settings_helpers import get_float_setting, get_setting
 
 router = APIRouter(tags=["health"])
 
 
 async def _get_health_status():
     """Internal health check logic."""
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv(
         "LLM_PROXY_INTERNAL_TOKEN"
     )
@@ -23,9 +24,10 @@ async def _get_health_status():
     headers = {}
     if internal_token:
         headers["X-Internal-Token"] = internal_token
-    async with httpx.AsyncClient(
-        timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
-    ) as client:
+    timeout = get_float_setting(
+        "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             return {

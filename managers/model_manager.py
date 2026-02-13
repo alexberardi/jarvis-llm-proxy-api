@@ -1,65 +1,14 @@
 import logging
-import os
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("uvicorn")
 
-
-def _get_settings_service():
-    """Get the SettingsService singleton, or None if unavailable."""
-    try:
-        from services.settings_service import get_settings_service
-        return get_settings_service()
-    except (ImportError, RuntimeError):
-        return None
-
-
-def _get_setting(key: str, env_fallback: str, default: Any, value_type: str = "string") -> Any:
-    """Get a setting value with fallback to environment variable.
-
-    Order of precedence:
-    1. SettingsService (database + cache)
-    2. Environment variable
-    3. Default value
-    """
-    settings = _get_settings_service()
-
-    # Try settings service first
-    if settings:
-        try:
-            value = settings.get(key)
-            if value is not None:
-                return value
-        except Exception as e:
-            logger.debug(f"Settings service unavailable for {key}: {e}")
-
-    # Fallback to environment variable
-    raw = os.getenv(env_fallback)
-    if raw is None or raw == "":
-        return default
-
-    # Type coercion
-    try:
-        if value_type == "int":
-            return int(raw)
-        elif value_type == "float":
-            return float(raw)
-        elif value_type == "bool":
-            return raw.lower() in ("true", "1", "yes", "on")
-        else:
-            return raw
-    except ValueError:
-        return default
-
-
-def _get_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+from services.settings_helpers import (
+    get_bool_setting,
+    get_float_setting,
+    get_int_setting,
+    get_setting,
+)
 
 class ModelConfig:
     """Configuration for a single model"""
@@ -115,60 +64,70 @@ class ModelManager:
     
     def _initialize_models(self):
         # Get configuration from SettingsService (falls back to env vars)
-        model_backend = _get_setting(
+        model_backend = get_setting(
             "model.main.backend", "JARVIS_MODEL_BACKEND", "GGUF"
         ).upper()
-        lightweight_model_backend = _get_setting(
+        lightweight_model_backend = get_setting(
             "model.lightweight.backend", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND", ""
         )
         if lightweight_model_backend:
             lightweight_model_backend = lightweight_model_backend.upper()
-        cloud_model_backend = _get_setting(
+        cloud_model_backend = get_setting(
             "model.cloud.backend", "JARVIS_CLOUD_MODEL_BACKEND", "REST"
         ).upper()
-        vision_model_backend = _get_setting(
+        vision_model_backend = get_setting(
             "model.vision.backend", "JARVIS_VISION_MODEL_BACKEND", ""
         )
         if vision_model_backend:
             vision_model_backend = vision_model_backend.upper()
 
-        main_model_path = _get_setting(
+        main_model_path = get_setting(
             "model.main.name", "JARVIS_MODEL_NAME", None
         )
-        lightweight_model_path = _get_setting(
+        lightweight_model_path = get_setting(
             "model.lightweight.name", "JARVIS_LIGHTWEIGHT_MODEL_NAME", ""
         )
-        cloud_model_path = _get_setting(
+        cloud_model_path = get_setting(
             "model.cloud.name", "JARVIS_CLOUD_MODEL_NAME", ""
         )
-        vision_model_path = _get_setting(
+        vision_model_path = get_setting(
             "model.vision.name", "JARVIS_VISION_MODEL_NAME", ""
         )
-        vision_rest_url = os.getenv("JARVIS_VISION_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))
-        main_chat_format = _get_setting(
+        vision_rest_url = get_setting(
+            "model.vision.rest_url", "JARVIS_VISION_REST_MODEL_URL", ""
+        )
+        if not vision_rest_url:
+            vision_rest_url = get_setting(
+                "model.main.rest_url", "JARVIS_REST_MODEL_URL", ""
+            )
+        main_chat_format = get_setting(
             "model.main.chat_format", "JARVIS_MODEL_CHAT_FORMAT", ""
         )
-        main_stop_tokens = _get_setting(
+        main_stop_tokens = get_setting(
             "model.main.stop_tokens", "JARVIS_MODEL_STOP_TOKENS", ""
         )
-        lightweight_chat_format = _get_setting(
+        lightweight_chat_format = get_setting(
             "model.lightweight.chat_format", "JARVIS_LIGHTWEIGHT_MODEL_CHAT_FORMAT", ""
         )
-        lightweight_stop_tokens = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_STOP_TOKENS")
-        cloud_chat_format = os.getenv("JARVIS_CLOUD_MODEL_CHAT_FORMAT")
-        main_context_window = _get_setting(
-            "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 8192, "int"
+        lightweight_stop_tokens = get_setting(
+            "model.lightweight.stop_tokens", "JARVIS_LIGHTWEIGHT_MODEL_STOP_TOKENS", ""
         )
-        lightweight_context_window = _get_setting(
-            "model.lightweight.context_window", "JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 8192, "int"
+        cloud_chat_format = get_setting(
+            "model.cloud.chat_format", "JARVIS_CLOUD_MODEL_CHAT_FORMAT", ""
         )
-        cloud_context_window = _get_setting(
-            "model.cloud.context_window", "JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 4096, "int"
+        main_context_window = get_int_setting(
+            "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 8192
         )
-        vision_context_window = _get_setting(
-            "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072, "int"
+        lightweight_context_window = get_int_setting(
+            "model.lightweight.context_window", "JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 8192
         )
-        vision_chat_format = _get_setting(
+        cloud_context_window = get_int_setting(
+            "model.cloud.context_window", "JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 4096
+        )
+        vision_context_window = get_int_setting(
+            "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072
+        )
+        vision_chat_format = get_setting(
             "model.vision.chat_format", "JARVIS_VISION_MODEL_CHAT_FORMAT", "llava"
         )
 
@@ -187,24 +146,24 @@ class ModelManager:
         )
         
         if should_share_vllm:
-            print(f"🔄 vLLM Memory Optimization: Using shared model instance")
+            logger.info("🔄 vLLM Memory Optimization: Using shared model instance")
             if not lightweight_model_backend:
-                print(f"   → Lightweight backend empty, defaulting to shared vLLM: {main_model_path}")
+                logger.info(f"   → Lightweight backend empty, defaulting to shared vLLM: {main_model_path}")
             elif not lightweight_model_path:
-                print(f"   → Lightweight model name empty, using main: {main_model_path}")
+                logger.info(f"   → Lightweight model name empty, using main: {main_model_path}")
             else:
-                print(f"   → Identical model names detected: {main_model_path}")
-            print(f"   → Memory savings: ~50% (single model instance)")
+                logger.info(f"   → Identical model names detected: {main_model_path}")
+            logger.info("   → Memory savings: ~50% (single model instance)")
 
         if should_share_gguf:
-            print(f"🔄 GGUF Memory Optimization: Using shared llama.cpp instance")
+            logger.info("🔄 GGUF Memory Optimization: Using shared llama.cpp instance")
             if not lightweight_model_backend:
-                print(f"   → Lightweight backend empty, defaulting to shared GGUF: {main_model_path}")
+                logger.info(f"   → Lightweight backend empty, defaulting to shared GGUF: {main_model_path}")
             elif not lightweight_model_path:
-                print(f"   → Lightweight model name empty, using main: {main_model_path}")
+                logger.info(f"   → Lightweight model name empty, using main: {main_model_path}")
             else:
-                print(f"   → Identical model paths detected: {main_model_path}")
-            print(f"   → Memory savings: ~50% (single model instance)")
+                logger.info(f"   → Identical model paths detected: {main_model_path}")
+            logger.info("   → Memory savings: ~50% (single model instance)")
         
         # Initialize main model
         if model_backend == "MOCK":
@@ -224,7 +183,9 @@ class ModelManager:
             self.main_model = VLLMClient(main_model_path, main_chat_format, main_stop_tokens, main_context_window)
         elif model_backend == "REST":
             from backends.rest_backend import RestClient
-            rest_url = os.getenv("JARVIS_REST_MODEL_URL")
+            rest_url = get_setting(
+                "model.main.rest_url", "JARVIS_REST_MODEL_URL", ""
+            )
             if not rest_url:
                 raise ValueError("JARVIS_REST_MODEL_URL must be set when using REST backend")
             self.main_model = RestClient(rest_url, main_model_path or "jarvis-llm", "main")
@@ -238,13 +199,13 @@ class ModelManager:
         if should_share_vllm:
             # Share the main vLLM model instance to save memory
             self.lightweight_model = self.main_model
-            print(f"✅ Lightweight model sharing main vLLM instance")
+            logger.info("✅ Lightweight model sharing main vLLM instance")
         elif should_share_gguf:
             # Share the main GGUF model instance to save memory
             self.lightweight_model = self.main_model
-            print(f"✅ Lightweight model sharing main GGUF instance")
+            logger.info("✅ Lightweight model sharing main GGUF instance")
         elif not lightweight_model_backend and not lightweight_model_path:
-            print("ℹ️  Lightweight model not configured; skipping.")
+            logger.info("ℹ️  Lightweight model not configured; skipping.")
         elif lightweight_model_backend == "MOCK":
             from backends.mock_backend import MockBackend
             self.lightweight_model = MockBackend(lightweight_model_path or "mock-lightweight")
@@ -262,7 +223,9 @@ class ModelManager:
             self.lightweight_model = VLLMClient(lightweight_model_path, lightweight_chat_format, lightweight_stop_tokens, lightweight_context_window)
         elif lightweight_model_backend == "REST":
             from backends.rest_backend import RestClient
-            rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")
+            rest_url = get_setting(
+                "model.lightweight.rest_url", "JARVIS_REST_LIGHTWEIGHT_MODEL_URL", ""
+            )
             if not rest_url:
                 raise ValueError("JARVIS_REST_LIGHTWEIGHT_MODEL_URL must be set when using REST backend")
             self.lightweight_model = RestClient(rest_url, lightweight_model_path or "jarvis-llm", "lightweight")
@@ -275,7 +238,13 @@ class ModelManager:
             raise ValueError(f"Unsupported LIGHTWEIGHT_MODEL_BACKEND '{lightweight_model_backend}'. Use 'MOCK', 'MLX', 'GGUF', 'TRANSFORMERS', 'VLLM', 'REST', or 'OLLAMA'.")
 
         # Initialize cloud model (REST-backed)
-        cloud_rest_url = os.getenv("JARVIS_CLOUD_REST_MODEL_URL", os.getenv("JARVIS_REST_MODEL_URL"))
+        cloud_rest_url = get_setting(
+            "model.cloud.rest_url", "JARVIS_CLOUD_REST_MODEL_URL", ""
+        )
+        if not cloud_rest_url:
+            cloud_rest_url = get_setting(
+                "model.main.rest_url", "JARVIS_REST_MODEL_URL", ""
+            )
         if cloud_model_path or cloud_rest_url:
             if cloud_model_backend != "REST":
                 raise ValueError("Unsupported CLOUD_MODEL_BACKEND. Only 'REST' is supported for cloud.")
@@ -295,7 +264,7 @@ class ModelManager:
                     raise ValueError("JARVIS_VISION_MODEL_BACKEND must be set when JARVIS_VISION_MODEL_NAME is set")
 
             resolved_vision_name = vision_model_path or "jarvis-vision"
-            print(f"🔁 Initializing vision model: {resolved_vision_name}")
+            logger.info(f"🔁 Initializing vision model: {resolved_vision_name}")
 
             if vision_model_backend == "MOCK":
                 from backends.mock_backend import MockBackend
@@ -313,8 +282,8 @@ class ModelManager:
             elif vision_model_backend == "VLLM":
                 # VLLM vision models are loaded on-demand via queue worker (model swap pattern)
                 # to avoid GPU memory conflicts with the main model
-                print(f"ℹ️  Vision model configured for on-demand loading: {resolved_vision_name}")
-                print(f"   → Backend: VLLM (loaded via vision_inference job)")
+                logger.info(f"ℹ️  Vision model configured for on-demand loading: {resolved_vision_name}")
+                logger.info("   → Backend: VLLM (loaded via vision_inference job)")
                 self.vision_model = None
                 self.vision_model_name = resolved_vision_name
             elif vision_model_backend == "REST":
@@ -326,7 +295,7 @@ class ModelManager:
             elif vision_model_backend in ("GGUF", "GGUF_VISION"):
                 # GGUF vision models using llama-cpp-python's LLaVA support
                 from backends.gguf_vision_backend import GGUFVisionClient
-                vision_clip_path = _get_setting(
+                vision_clip_path = get_setting(
                     "model.vision.clip_model_path", "JARVIS_VISION_CLIP_MODEL_PATH", ""
                 )
                 if not vision_clip_path:
@@ -334,8 +303,8 @@ class ModelManager:
                         "JARVIS_VISION_CLIP_MODEL_PATH must be set for GGUF vision backend. "
                         "This should point to the mmproj/CLIP GGUF file (e.g., mmproj-model-f16.gguf)"
                     )
-                vision_n_gpu_layers = _get_setting(
-                    "model.vision.n_gpu_layers", "JARVIS_VISION_N_GPU_LAYERS", 0, "int"
+                vision_n_gpu_layers = get_int_setting(
+                    "model.vision.n_gpu_layers", "JARVIS_VISION_N_GPU_LAYERS", 0
                 )
                 self.vision_model = GGUFVisionClient(
                     model_path=resolved_vision_name,
@@ -347,7 +316,7 @@ class ModelManager:
                 self.vision_model_name = resolved_vision_name
             else:
                 raise ValueError(f"Unsupported VISION_MODEL_BACKEND '{vision_model_backend}'. Use 'MOCK', 'MLX', 'MLX_VISION', 'TRANSFORMERS', 'VLLM', 'REST', 'GGUF', or 'GGUF_VISION'.")
-            print(f"✅ Vision model loaded: {self.vision_model_name}")
+            logger.info(f"✅ Vision model loaded: {self.vision_model_name}")
         
         # Populate model registry
         self._populate_registry()
@@ -373,7 +342,9 @@ class ModelManager:
                 self.main_model = VLLMClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
-                rest_url = os.getenv("JARVIS_REST_MODEL_URL")
+                rest_url = get_setting(
+                    "model.main.rest_url", "JARVIS_REST_MODEL_URL", ""
+                )
                 if not rest_url:
                     raise ValueError("JARVIS_REST_MODEL_URL must be set when using REST backend")
                 self.main_model = RestClient(rest_url, new_model or "jarvis-llm", "main")
@@ -406,7 +377,9 @@ class ModelManager:
                 self.lightweight_model = VLLMClient(new_model, new_model_chat_format, None, new_model_context_window)
             elif new_model_backend.upper() == "REST":
                 from backends.rest_backend import RestClient
-                rest_url = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_URL")
+                rest_url = get_setting(
+                    "model.lightweight.rest_url", "JARVIS_REST_LIGHTWEIGHT_MODEL_URL", ""
+                )
                 if not rest_url:
                     raise ValueError("JARVIS_REST_LIGHTWEIGHT_MODEL_URL must be set when using REST backend")
                 self.lightweight_model = RestClient(rest_url, new_model or "jarvis-llm", "lightweight")
@@ -435,23 +408,23 @@ class ModelManager:
                             if loop.is_running():
                                 # Can't await in sync context with running loop
                                 asyncio.ensure_future(result)
-                                print(f"⚠️  Async unload for {name} scheduled (may complete later)")
+                                logger.warning(f"⚠️  Async unload for {name} scheduled (may complete later)")
                             else:
                                 loop.run_until_complete(result)
                         except RuntimeError:
                             # No event loop, create one
                             asyncio.run(result)
-                    print(f"🔄 Unloaded model: {name}")
+                    logger.info(f"🔄 Unloaded model: {name}")
                 except Exception as e:
-                    print(f"⚠️  Failed to unload {name}: {e}")
+                    logger.warning(f"⚠️  Failed to unload {name}: {e}")
     
     def _populate_registry(self):
         """Populate the model registry and aliases after models are initialized"""
         # Add main model to registry
         if self.main_model:
-            main_model_id = os.getenv("JARVIS_MODEL_NAME", "jarvis-text-8b")
-            main_backend = os.getenv("JARVIS_MODEL_BACKEND", "OLLAMA").upper()
-            main_context = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "4096"))
+            main_model_id = get_setting("model.main.name", "JARVIS_MODEL_NAME", "jarvis-text-8b")
+            main_backend = get_setting("model.main.backend", "JARVIS_MODEL_BACKEND", "OLLAMA").upper()
+            main_context = get_int_setting("model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 4096)
             self.registry[main_model_id] = ModelConfig(
                 model_id=main_model_id,
                 backend_type=main_backend,
@@ -461,13 +434,19 @@ class ModelManager:
             )
             # Alias: "full" -> main model
             self.aliases["full"] = main_model_id
-            print(f"📋 Registered main model: {main_model_id} (alias: 'full')")
+            logger.info(f"📋 Registered main model: {main_model_id} (alias: 'full')")
         
         # Add lightweight model to registry
         if self.lightweight_model and self.lightweight_model != self.main_model:
-            lightweight_model_id = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME", "jarvis-text-1b")
-            lightweight_backend = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_BACKEND", "").upper()
-            lightweight_context = int(os.getenv("JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", "4096"))
+            lightweight_model_id = get_setting(
+                "model.lightweight.name", "JARVIS_LIGHTWEIGHT_MODEL_NAME", "jarvis-text-1b"
+            )
+            lightweight_backend = get_setting(
+                "model.lightweight.backend", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND", ""
+            ).upper()
+            lightweight_context = get_int_setting(
+                "model.lightweight.context_window", "JARVIS_LIGHTWEIGHT_MODEL_CONTEXT_WINDOW", 4096
+            )
             self.registry[lightweight_model_id] = ModelConfig(
                 model_id=lightweight_model_id,
                 backend_type=lightweight_backend,
@@ -477,13 +456,17 @@ class ModelManager:
             )
             # Alias: "lightweight" -> lightweight model
             self.aliases["lightweight"] = lightweight_model_id
-            print(f"📋 Registered lightweight model: {lightweight_model_id} (alias: 'lightweight')")
+            logger.info(f"📋 Registered lightweight model: {lightweight_model_id} (alias: 'lightweight')")
         
         # Add cloud model to registry
         if self.cloud_model:
             cloud_model_id = self.cloud_model_name or "jarvis-cloud"
-            cloud_backend = os.getenv("JARVIS_CLOUD_MODEL_BACKEND", "REST").upper()
-            cloud_context = int(os.getenv("JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", "4096"))
+            cloud_backend = get_setting(
+                "model.cloud.backend", "JARVIS_CLOUD_MODEL_BACKEND", "REST"
+            ).upper()
+            cloud_context = get_int_setting(
+                "model.cloud.context_window", "JARVIS_CLOUD_MODEL_CONTEXT_WINDOW", 4096
+            )
             self.registry[cloud_model_id] = ModelConfig(
                 model_id=cloud_model_id,
                 backend_type=cloud_backend,
@@ -493,13 +476,17 @@ class ModelManager:
             )
             # Alias: "cloud" -> cloud model
             self.aliases["cloud"] = cloud_model_id
-            print(f"📋 Registered cloud model: {cloud_model_id} (alias: 'cloud')")
+            logger.info(f"📋 Registered cloud model: {cloud_model_id} (alias: 'cloud')")
         
         # Add vision model to registry
         if self.vision_model:
             vision_model_id = self.vision_model_name or "jarvis-vision-11b"
-            vision_backend = os.getenv("JARVIS_VISION_MODEL_BACKEND", "").upper()
-            vision_context = _get_int_env("JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072)
+            vision_backend = get_setting(
+                "model.vision.backend", "JARVIS_VISION_MODEL_BACKEND", ""
+            ).upper()
+            vision_context = get_int_setting(
+                "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 131072
+            )
             self.registry[vision_model_id] = ModelConfig(
                 model_id=vision_model_id,
                 backend_type=vision_backend,
@@ -509,7 +496,7 @@ class ModelManager:
             )
             # Alias: "vision" -> vision model
             self.aliases["vision"] = vision_model_id
-            print(f"📋 Registered vision model: {vision_model_id} (alias: 'vision', supports_images=True)")
+            logger.info(f"📋 Registered vision model: {vision_model_id} (alias: 'vision', supports_images=True)")
     
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """

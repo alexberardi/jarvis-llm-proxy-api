@@ -164,6 +164,29 @@ python scripts/convert_to_mlx.py \
 # JARVIS_MODEL_NAME=.models/llama-3.1-8b-instruct-jarvis
 ```
 
+## One-Command Build (build_jarvis_model.py)
+
+For the full pipeline (or partial), use the consolidated build script:
+
+```bash
+# Full pipeline: generate data → train → validate → merge → convert to GGUF
+python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct
+
+# Mac (Apple Silicon)
+python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --optim adamw_torch --batch-size 2
+
+# Skip training (adapter already exists), just merge + convert
+python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --skip-train
+
+# Output both GGUF and MLX
+python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --skip-train --formats gguf mlx
+
+# Dry run (show what would be done)
+python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --dry-run
+```
+
+The script automatically detects existing artifacts and skips completed steps. Delete outputs to force rebuild.
+
 ## All CLI Options
 
 ```
@@ -248,3 +271,4 @@ Consumers use `dynamic_patterns[].regex` to parse the numeric value from relativ
 | `pin_memory not supported on MPS` | Warning only, auto-disabled by script |
 | OOM during training | Reduce `--batch-size 1` and/or `--lora-r 8` |
 | Training data not found | Run `python scripts/generate_jarvis_training_data.py` first |
+| `No module named 'mistral_common'` (GGUF conversion) | `pip install mistral_common` — unconditional import in vendored llama.cpp converter |

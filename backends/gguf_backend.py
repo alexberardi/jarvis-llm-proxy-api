@@ -7,6 +7,12 @@ from typing import List, Dict, Any, Optional
 from .power_metrics import PowerMetrics
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
 from backends.base import LLMBackendBase
+from services.settings_helpers import (
+    get_bool_setting,
+    get_float_setting,
+    get_int_setting,
+    get_setting,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -40,40 +46,66 @@ class GGUFClient(LLMBackendBase):
 
         # Get context window from parameter or environment variable, default to 4096 for better performance
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "4096"))
+            context_window = get_int_setting(
+                "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 4096
+            )
 
         # Get optimal thread count based on CPU cores
-        n_threads = int(os.getenv("JARVIS_N_THREADS", min(10, os.cpu_count() or 4)))
+        n_threads = get_int_setting(
+            "inference.gguf.n_threads", "JARVIS_N_THREADS", min(10, os.cpu_count() or 4)
+        )
 
         # Get GPU layers - be more conservative to avoid memory issues
-        n_gpu_layers = int(os.getenv("JARVIS_N_GPU_LAYERS", "-1"))
+        n_gpu_layers = get_int_setting(
+            "inference.gguf.n_gpu_layers", "JARVIS_N_GPU_LAYERS", -1
+        )
 
 
         # Memory management settings
-        self.enable_cache = os.getenv("JARVIS_ENABLE_CONTEXT_CACHE", "true").lower() == "true"
-        self.max_cache_size = int(os.getenv("JARVIS_MAX_CACHE_SIZE", "100"))
+        self.enable_cache = get_bool_setting(
+            "inference.gguf.enable_context_cache", "JARVIS_ENABLE_CONTEXT_CACHE", True
+        )
+        self.max_cache_size = get_int_setting(
+            "inference.gguf.max_cache_size", "JARVIS_MAX_CACHE_SIZE", 100
+        )
 
         # LLaMA.cpp optimization parameters
-        n_batch = int(os.getenv("JARVIS_N_BATCH", "512"))
-        n_ubatch = int(os.getenv("JARVIS_N_UBATCH", "512"))
-        self.flash_attn = os.getenv("JARVIS_FLASH_ATTN", "true").lower() == "true"
-        rope_scaling_type = int(os.getenv("JARVIS_ROPE_SCALING_TYPE", "0"))
-        mul_mat_q = os.getenv("JARVIS_MUL_MAT_Q", "true").lower() == "true"
-        f16_kv = os.getenv("JARVIS_F16_KV", "true").lower() == "true"
-        seed = int(os.getenv("JARVIS_SEED", "42"))
-        verbose = os.getenv("JARVIS_VERBOSE", "false").lower() == "true"
+        n_batch = get_int_setting("inference.gguf.n_batch", "JARVIS_N_BATCH", 512)
+        n_ubatch = get_int_setting("inference.gguf.n_ubatch", "JARVIS_N_UBATCH", 512)
+        self.flash_attn = get_bool_setting(
+            "inference.gguf.flash_attn", "JARVIS_FLASH_ATTN", True
+        )
+        rope_scaling_type = get_int_setting(
+            "inference.gguf.rope_scaling_type", "JARVIS_ROPE_SCALING_TYPE", 0
+        )
+        mul_mat_q = get_bool_setting(
+            "inference.gguf.mul_mat_q", "JARVIS_MUL_MAT_Q", True
+        )
+        f16_kv = get_bool_setting("inference.gguf.f16_kv", "JARVIS_F16_KV", True)
+        seed = get_int_setting("inference.gguf.seed", "JARVIS_SEED", 42)
+        verbose = get_bool_setting("inference.gguf.verbose", "JARVIS_VERBOSE", False)
 
-        # Inference parameters
-        self.max_tokens = int(os.getenv("JARVIS_MAX_TOKENS", "7000"))
-        self.top_p = float(os.getenv("JARVIS_TOP_P", "0.95"))
-        self.top_k = int(os.getenv("JARVIS_TOP_K", "40"))
-        self.repeat_penalty = float(os.getenv("JARVIS_REPEAT_PENALTY", "1.1"))
-        self.mirostat_mode = int(os.getenv("JARVIS_MIROSTAT_MODE", "0"))
-        self.mirostat_tau = float(os.getenv("JARVIS_MIROSTAT_TAU", "5.0"))
-        self.mirostat_eta = float(os.getenv("JARVIS_MIROSTAT_ETA", "0.1"))
+        # Inference parameters — prefer settings service, fall back to env var
+        self.max_tokens = self._resolve_max_tokens()
+        self.top_p = get_float_setting("inference.general.top_p", "JARVIS_TOP_P", 0.95)
+        self.top_k = get_int_setting("inference.general.top_k", "JARVIS_TOP_K", 40)
+        self.repeat_penalty = get_float_setting(
+            "inference.general.repeat_penalty", "JARVIS_REPEAT_PENALTY", 1.1
+        )
+        self.mirostat_mode = get_int_setting(
+            "inference.gguf.mirostat_mode", "JARVIS_MIROSTAT_MODE", 0
+        )
+        self.mirostat_tau = get_float_setting(
+            "inference.gguf.mirostat_tau", "JARVIS_MIROSTAT_TAU", 5.0
+        )
+        self.mirostat_eta = get_float_setting(
+            "inference.gguf.mirostat_eta", "JARVIS_MIROSTAT_ETA", 0.1
+        )
 
         # Check inference engine preference
-        inference_engine = os.getenv("JARVIS_INFERENCE_ENGINE", "llama_cpp").lower()
+        inference_engine = get_setting(
+            "inference.general.engine", "JARVIS_INFERENCE_ENGINE", "llama_cpp"
+        ).lower()
 
         logger.debug(f"🔍 Debug: Inference engine: {inference_engine}")
         logger.debug(f"🔍 Debug: Model path: {model_path}")
@@ -93,6 +125,11 @@ class GGUFClient(LLMBackendBase):
         else:
             logger.info(f"🦙 Using llama.cpp inference engine")
             self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
+
+    @staticmethod
+    def _resolve_max_tokens() -> int:
+        """Resolve max_tokens from settings service, then env var, then default."""
+        return get_int_setting("inference.general.max_tokens", "JARVIS_MAX_TOKENS", 512)
 
     def _init_vllm(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
         """Initialize vLLM backend"""
@@ -298,7 +335,7 @@ class GGUFClient(LLMBackendBase):
             response_text, usage = self.backend.generate(
                 messages=messages,
                 temperature=temperature,
-                max_tokens=int(os.getenv("JARVIS_MAX_TOKENS", "7000")),
+                    max_tokens=get_int_setting("inference.general.max_tokens", "JARVIS_MAX_TOKENS", 7000),
                 top_p=0.95
             )
 
@@ -542,18 +579,22 @@ class GGUFClient(LLMBackendBase):
             )
             legacy_messages.append({"role": msg.role, "content": text_content})
 
+        effective_max_tokens = params.max_tokens or self.max_tokens
+
         # Use thread lock for thread safety
         with self._lock:
             # Handle adapter switching for llama.cpp engine
             if self.inference_engine == "llama_cpp" and params.adapter_settings:
                 self._handle_adapter_switch(params.adapter_settings)
 
+            gen_start = time.time()
+
             if self.inference_engine == "vllm":
                 # Use vLLM backend
                 response_text, usage = self.backend.generate(
                     messages=legacy_messages,
                     temperature=params.temperature,
-                    max_tokens=params.max_tokens or self.max_tokens,
+                    max_tokens=effective_max_tokens,
                     top_p=self.top_p,
                     # Pass response_format for JSON support
                     response_format=params.response_format,
@@ -561,6 +602,11 @@ class GGUFClient(LLMBackendBase):
                 # vLLM returns usage dict, but we need to store it
                 if isinstance(usage, dict):
                     self.last_usage = usage
+
+                elapsed = time.time() - gen_start
+                comp = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+                logger.info(f"⏱️  vLLM {comp} tokens in {elapsed:.2f}s ({comp/elapsed:.0f} tok/s, max_tokens={effective_max_tokens})")
+
                 return ChatResult(content=response_text, usage=usage)
             else:
                 # Use llama.cpp backend
@@ -568,7 +614,7 @@ class GGUFClient(LLMBackendBase):
                 completion_kwargs = {
                     "messages": legacy_messages,  # type: ignore
                     "temperature": params.temperature,
-                    "max_tokens": params.max_tokens or self.max_tokens,
+                    "max_tokens": effective_max_tokens,
                     "top_p": self.top_p,
                     "top_k": self.top_k,
                     "repeat_penalty": self.repeat_penalty,
@@ -589,6 +635,12 @@ class GGUFClient(LLMBackendBase):
                 content = response["choices"][0]["message"]["content"] or ""  # type: ignore
                 usage = response.get("usage", {})  # type: ignore
                 self.last_usage = usage
+
+                elapsed = time.time() - gen_start
+                comp = usage.get("completion_tokens", 0)
+                prompt_t = usage.get("prompt_tokens", 0)
+                tok_s = comp / elapsed if elapsed > 0 else 0
+                logger.info(f"⏱️  llama.cpp {comp} completion + {prompt_t} prompt tokens in {elapsed:.2f}s ({tok_s:.0f} tok/s, max_tokens={effective_max_tokens})")
 
                 return ChatResult(content=content, usage=usage)
 

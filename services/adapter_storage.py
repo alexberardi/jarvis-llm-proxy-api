@@ -23,30 +23,36 @@ Environment Variables:
 """
 
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
 from zipfile import ZipFile
 
 from storage import object_store
+from services.settings_helpers import get_setting
 
 logger = logging.getLogger(__name__)
 
 
 def _get_bucket() -> str:
     """Get the adapter bucket name from environment."""
-    return os.getenv("LLM_PROXY_ADAPTER_BUCKET", "jarvis-llm-proxy")
+    return get_setting(
+        "storage.adapter_bucket", "LLM_PROXY_ADAPTER_BUCKET", "jarvis-llm-proxy"
+    )
 
 
 def _get_prefix() -> str:
     """Get the adapter key prefix from environment."""
-    return os.getenv("LLM_PROXY_ADAPTER_PREFIX", "adapters")
+    return get_setting(
+        "storage.adapter_prefix", "LLM_PROXY_ADAPTER_PREFIX", "adapters"
+    )
 
 
 def _get_adapter_dir() -> Path:
     """Get the local adapter directory."""
-    adapter_dir = os.getenv("LLM_PROXY_ADAPTER_DIR", "/tmp/jarvis-adapters")
+    adapter_dir = get_setting(
+        "training.adapter_dir", "LLM_PROXY_ADAPTER_DIR", "/tmp/jarvis-adapters"
+    )
     return Path(adapter_dir)
 
 

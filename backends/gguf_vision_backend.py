@@ -31,6 +31,7 @@ from managers.chat_types import (
     NormalizedMessage,
     TextPart,
 )
+from services.settings_helpers import get_bool_setting, get_int_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -88,14 +89,20 @@ class GGUFVisionClient(LLMBackendBase):
 
         # Get context window from parameter or environment
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_VISION_MODEL_CONTEXT_WINDOW", "4096"))
+            context_window = get_int_setting(
+                "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 4096
+            )
         self.context_window = context_window
 
         # Get hardware settings from parameter or environment
         if n_gpu_layers is None:
-            n_gpu_layers = int(os.getenv("JARVIS_VISION_N_GPU_LAYERS", "0"))
-        n_threads = int(os.getenv("JARVIS_N_THREADS", str(min(10, os.cpu_count() or 4))))
-        verbose = os.getenv("JARVIS_VERBOSE", "false").lower() == "true"
+            n_gpu_layers = get_int_setting(
+                "model.vision.n_gpu_layers", "JARVIS_VISION_N_GPU_LAYERS", 0
+            )
+        n_threads = get_int_setting(
+            "inference.gguf.n_threads", "JARVIS_N_THREADS", min(10, os.cpu_count() or 4)
+        )
+        verbose = get_bool_setting("inference.gguf.verbose", "JARVIS_VERBOSE", False)
 
         logger.info(f"🔁 Loading GGUF Vision model: {model_path}")
         logger.info(f"   CLIP encoder: {clip_model_path}")

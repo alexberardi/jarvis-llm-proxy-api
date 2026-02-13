@@ -9,15 +9,16 @@ Pipeline:
     2. Quantize f16 → target type (Q4_K_M default) via llama-quantize
 
 Usage:
+    # Full weight (f16, default — no llama-quantize needed):
     python scripts/convert_to_gguf.py \
-        --model .models/llama-3.2-3b-instruct-date-merged \
-        --output .models/llama-3.2-3b-instruct-date-merged-Q4_K_M.gguf
+        --model .models/llama-3.1-8b-instruct-jarvis \
+        --output .models/llama-3.1-8b-instruct-jarvis.gguf
 
-    # Skip quantization (output f16 GGUF only):
+    # Quantized (requires llama-quantize binary):
     python scripts/convert_to_gguf.py \
-        --model .models/llama-3.2-3b-instruct-date-merged \
-        --output .models/llama-3.2-3b-instruct-date-merged-f16.gguf \
-        --quant-type f16
+        --model .models/llama-3.1-8b-instruct-jarvis \
+        --output .models/llama-3.1-8b-instruct-jarvis-Q4_K_M.gguf \
+        --quant-type Q4_K_M
 
     # Dry run:
     python scripts/convert_to_gguf.py \
@@ -60,8 +61,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quant-type",
-        default=os.environ.get("JARVIS_GGUF_QUANT_TYPE", "Q4_K_M"),
-        help="Quantization type (default: Q4_K_M, or JARVIS_GGUF_QUANT_TYPE env). Use 'f16' to skip quantization.",
+        default=os.environ.get("JARVIS_GGUF_QUANT_TYPE", "f16"),
+        help="Quantization type (default: f16 / full weight). Set to Q4_K_M, Q5_K_M, etc. to quantize.",
     )
     parser.add_argument(
         "--dry-run",

@@ -153,6 +153,34 @@ if [[ ! -f "$VENDOR_CONVERTER" ]]; then
     fi
 fi
 
+# Set up llama-quantize (needed for GGUF quantization after model conversion)
+if ! command -v llama-quantize >/dev/null 2>&1; then
+    echo ""
+    echo -e "${YELLOW}llama-quantize not found (needed to quantize GGUF models, e.g. f16 → Q4_K_M).${NC}"
+    echo -e "${YELLOW}Without it, GGUF conversion will output unquantized f16 files (~15 GiB for 8B models).${NC}"
+    if [[ "$OS" == "macos" ]]; then
+        if command -v brew >/dev/null 2>&1; then
+            read -p "Install llama.cpp via Homebrew? (provides llama-quantize) [Y/n]: " install_llama
+            install_llama=${install_llama:-Y}
+            if [[ "$install_llama" =~ ^[Yy]$ ]]; then
+                echo -e "${BLUE}Installing llama.cpp...${NC}"
+                brew install llama.cpp
+                echo -e "${GREEN}✅ llama-quantize installed${NC}"
+            else
+                echo -e "${YELLOW}Skipping. You can install later: brew install llama.cpp${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Homebrew not found. Install llama.cpp manually: brew install llama.cpp${NC}"
+        fi
+    elif [[ "$OS" == "linux" ]]; then
+        echo -e "${YELLOW}Install llama.cpp to get llama-quantize:${NC}"
+        echo -e "${YELLOW}  Option 1: Build from source — git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp && make${NC}"
+        echo -e "${YELLOW}  Option 2: Set JARVIS_LLAMA_QUANTIZE_CMD to point to your llama-quantize binary${NC}"
+    fi
+else
+    echo -e "${GREEN}✅ llama-quantize found: $(which llama-quantize)${NC}"
+fi
+
 echo -e "${BLUE}Next steps:${NC}"
 echo "1. Run './run.sh' to install dependencies and start the development server"
 echo "2. Or run './run-prod.sh' to start the production server"

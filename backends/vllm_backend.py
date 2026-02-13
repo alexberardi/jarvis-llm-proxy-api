@@ -19,6 +19,11 @@ from .power_metrics import PowerMetrics
 from services import adapter_cache
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
 from backends.base import LLMBackendBase
+from services.settings_helpers import (
+    get_float_setting,
+    get_int_setting,
+    get_setting,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -43,21 +48,33 @@ class VLLMClient(LLMBackendBase):
         
         # Get context window from parameter or environment variable, default to 4096 (vLLM typical)
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_MODEL_CONTEXT_WINDOW", "4096"))
+            context_window = get_int_setting(
+                "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 4096
+            )
         
         # Get vLLM specific configuration
-        tensor_parallel_size = int(os.getenv("JARVIS_VLLM_TENSOR_PARALLEL_SIZE", "1"))
-        gpu_memory_utilization = float(os.getenv("JARVIS_VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+        tensor_parallel_size = get_int_setting(
+            "inference.vllm.tensor_parallel_size", "JARVIS_VLLM_TENSOR_PARALLEL_SIZE", 1
+        )
+        gpu_memory_utilization = get_float_setting(
+            "inference.vllm.gpu_memory_utilization", "JARVIS_VLLM_GPU_MEMORY_UTILIZATION", 0.9
+        )
         max_model_len = context_window
-        vllm_quantization = os.getenv("JARVIS_VLLM_QUANTIZATION", "").strip().lower()
+        vllm_quantization = get_setting(
+            "inference.vllm.quantization", "JARVIS_VLLM_QUANTIZATION", ""
+        ).strip().lower()
         # Normalize common variants (e.g., awq-marlin -> awq_marlin)
         vllm_quantization = vllm_quantization.replace("-", "_")
         if vllm_quantization in {"", "none", "false", "off", "auto"}:
             vllm_quantization = None
         
         # Batching and scheduling parameters to reduce latency spikes
-        max_num_batched_tokens = int(os.getenv("JARVIS_VLLM_MAX_BATCHED_TOKENS", "8192"))
-        max_num_seqs = int(os.getenv("JARVIS_VLLM_MAX_NUM_SEQS", "256"))
+        max_num_batched_tokens = get_int_setting(
+            "inference.vllm.max_batched_tokens", "JARVIS_VLLM_MAX_BATCHED_TOKENS", 8192
+        )
+        max_num_seqs = get_int_setting(
+            "inference.vllm.max_num_seqs", "JARVIS_VLLM_MAX_NUM_SEQS", 256
+        )
         
         logger.debug(f"🚀 vLLM Debug: Model path: {model_path}")
         logger.debug(f"🚀 vLLM Debug: Chat format: {chat_format}")
@@ -95,8 +112,12 @@ class VLLMClient(LLMBackendBase):
                 "swap_space": 0,  # Disable CPU swap to avoid latency spikes
             }
             # Enable LoRA for dynamic per-request adapter loading
-            max_lora_rank = int(os.getenv("JARVIS_VLLM_MAX_LORA_RANK", "64"))
-            max_loras = int(os.getenv("JARVIS_VLLM_MAX_LORAS", "1"))
+            max_lora_rank = get_int_setting(
+                "inference.vllm.max_lora_rank", "JARVIS_VLLM_MAX_LORA_RANK", 64
+            )
+            max_loras = get_int_setting(
+                "inference.vllm.max_loras", "JARVIS_VLLM_MAX_LORAS", 1
+            )
             if max_loras > 0:
                 # vLLM 0.14+ passes enable_lora through kwargs to EngineArgs
                 llm_kwargs["enable_lora"] = True
@@ -161,7 +182,9 @@ class VLLMClient(LLMBackendBase):
         prompt = self._messages_to_prompt(messages)
         
         # Prepare sampling parameters
-        max_tokens = max_tokens or int(os.getenv("JARVIS_MAX_TOKENS", "2048"))
+        max_tokens = max_tokens or get_int_setting(
+            "inference.general.max_tokens", "JARVIS_MAX_TOKENS", 2048
+        )
         stop_tokens = stop or self.stop_tokens or []
         
         # Handle JSON structured output if requested

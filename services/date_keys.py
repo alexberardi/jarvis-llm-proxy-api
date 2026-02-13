@@ -2,20 +2,26 @@
 Date key extraction service and constants.
 
 This module defines the vocabulary of supported date keys and provides
-utilities for date key extraction using a hybrid FastText + LLM approach.
+utilities for date key extraction using a hybrid FastText + main-model approach.
 
-Extraction strategy:
+Extraction strategy (fast path - preferred):
 - FastText confidence >= 85%: Use FastText directly (fastest, ~1ms)
-- FastText confidence 75-85%: Add FastText hint to LLM prompt
-- FastText confidence < 75%: Let LLM handle independently
+- FastText confidence < 85%: Return FastText guess + flag for main model hint.
+  The caller injects a DATE_HINT system message into the main GGUF model's
+  conversation so it can validate/correct as part of its normal inference pass.
+  This avoids loading a separate CPU-bound Transformers model.
+
+Legacy strategy (extract_date_keys - still available):
+- Uses a separate LLM on CPU for medium/low confidence (slow, ~6-22s cold start)
 """
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple
+
+from services.settings_helpers import get_bool_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -295,13 +301,42 @@ class LLMDateKeyExtractor:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    @staticmethod
+    def _resolve_base_model(adapter_path: Path) -> Optional[str]:
+        """Read the base model from adapter_config.json and resolve to a local path if available."""
+        config_path = adapter_path / "adapter_config.json"
+        try:
+            with open(config_path) as f:
+                adapter_cfg = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"⚠️  Could not read adapter config: {e}")
+            return None
+
+        hf_model_id: str | None = adapter_cfg.get("base_model_name_or_path")
+        if not hf_model_id:
+            logger.warning("⚠️  No base_model_name_or_path in adapter config")
+            return None
+
+        # Check for local copy: .models/<model-name-lowercase>
+        model_name = hf_model_id.split("/")[-1].lower()
+        local_path = Path(f".models/{model_name}")
+        if local_path.exists():
+            logger.info(f"📦 Date key extractor: using local model {local_path}")
+            return str(local_path)
+
+        # Fall back to HuggingFace ID (will download if not cached)
+        logger.info(f"📦 Date key extractor: using HuggingFace model {hf_model_id}")
+        return hf_model_id
+
     def _ensure_loaded(self) -> bool:
         """Load the model if not already loaded. Returns True if loaded successfully."""
         if self._loaded:
             return True
 
         # Check if LLM extraction is disabled (e.g., when date extraction is merged into main model)
-        if os.getenv("JARVIS_DISABLE_DATE_KEY_LLM", "").lower() in ("1", "true", "yes"):
+        if get_bool_setting(
+            "date_keys.disable_llm", "JARVIS_DISABLE_DATE_KEY_LLM", False
+        ):
             logger.info("ℹ️  LLM date key extraction disabled via JARVIS_DISABLE_DATE_KEY_LLM")
             return False
 
@@ -310,12 +345,10 @@ class LLMDateKeyExtractor:
             logger.warning("⚠️  Date key adapter not trained yet, skipping LLM extraction")
             return False
 
-        # Use lightweight model env var, or fall back to Llama 1B
-        local_model_path = os.getenv("JARVIS_LIGHTWEIGHT_MODEL_NAME", ".models/llama-3.2-1b-instruct")
-        if os.path.exists(local_model_path):
-            base_model = local_model_path
-        else:
-            base_model = "meta-llama/Llama-3.2-1B-Instruct"
+        # Read base model from adapter config — must match the model it was trained on
+        base_model = self._resolve_base_model(adapter_path)
+        if not base_model:
+            return False
 
         try:
             logger.info(f"📦 Loading LLM date key extractor (base: {base_model}, adapter: {adapter_path})...")
@@ -325,7 +358,9 @@ class LLMDateKeyExtractor:
             from peft import PeftModel
 
             # Default to CPU to avoid GPU memory contention with vLLM
-            device_map = os.getenv("JARVIS_DATE_KEY_DEVICE_MAP", "cpu")
+            device_map = get_setting(
+                "date_keys.device_map", "JARVIS_DATE_KEY_DEVICE_MAP", "cpu"
+            )
             use_quantization = device_map != "cpu"
 
             self._tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -348,12 +383,12 @@ class LLMDateKeyExtractor:
                     torch_dtype=torch.float16,
                 )
             else:
-                logger.info(f"🖥️  Loading LLM date key extractor on CPU")
+                logger.info(f"🖥️  Loading LLM date key extractor on CPU (float16)")
                 base = AutoModelForCausalLM.from_pretrained(
                     base_model,
                     device_map="cpu",
                     trust_remote_code=True,
-                    torch_dtype=torch.float32,
+                    torch_dtype=torch.float16,
                     low_cpu_mem_usage=True,
                 )
 
@@ -557,6 +592,84 @@ def extract_date_keys(text: str) -> List[str]:
     if _extractor is None:
         _extractor = HybridDateKeyExtractor()
     return _extractor.extract(text)
+
+
+@dataclass
+class FastExtractResult:
+    """Result from fast (FastText-only) date key extraction."""
+    keys: List[str]
+    confidence: float
+    needs_llm_hint: bool  # True if confidence < HIGH threshold
+
+
+def extract_date_keys_fast(text: str) -> FastExtractResult:
+    """
+    Fast date key extraction using FastText only (~1ms).
+
+    Returns keys and a flag indicating whether the main LLM should
+    receive a date hint for validation (when confidence is below the
+    high-confidence threshold).
+
+    This avoids loading a separate Transformers model on CPU.
+    When needs_llm_hint is True, the caller should inject the hint
+    into the main model's messages so it can validate/correct as part
+    of its normal inference pass.
+    """
+    global _extractor
+    if _extractor is None:
+        _extractor = HybridDateKeyExtractor()
+
+    ft = _extractor._fasttext
+    ft_result = ft.predict(text)
+
+    if ft_result.max_confidence >= FASTTEXT_HIGH_CONFIDENCE:
+        logger.debug(
+            f"FastText high confidence ({ft_result.max_confidence:.2f}): {ft_result.keys}"
+        )
+        return FastExtractResult(
+            keys=ft_result.keys,
+            confidence=ft_result.max_confidence,
+            needs_llm_hint=False,
+        )
+
+    logger.debug(
+        f"FastText confidence ({ft_result.max_confidence:.2f}), "
+        f"flagging for main-model hint: {ft_result.keys}"
+    )
+    return FastExtractResult(
+        keys=ft_result.keys,
+        confidence=ft_result.max_confidence,
+        needs_llm_hint=True,
+    )
+
+
+def build_date_hint_message(ft_result: FastExtractResult) -> Optional[dict]:
+    """
+    Build a system message hinting the main LLM about detected date references.
+
+    Returns None if no hint is needed (high confidence or no keys detected).
+    The caller should append this message to the conversation before calling
+    the main model.
+    """
+    if not ft_result.needs_llm_hint:
+        return None
+
+    if ft_result.keys:
+        keys_str = ", ".join(ft_result.keys)
+        hint = (
+            f"[DATE_HINT] The user's message may reference these dates/times: "
+            f"[{keys_str}]. When populating datetime parameters in tool calls, "
+            f"use these date key values (e.g. 'today', 'tomorrow', 'next_monday'). "
+            f"If the hint seems wrong, use your own judgment."
+        )
+    else:
+        hint = (
+            "[DATE_HINT] The user's message may contain a date or time reference. "
+            "Look for any relative date phrases and use appropriate date key values "
+            "(e.g. 'today', 'tomorrow', 'next_monday') in datetime parameters."
+        )
+
+    return {"role": "system", "content": hint}
 
 
 def unload_date_key_extractor():

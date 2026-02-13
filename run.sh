@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Development run script
+#
+# Usage:
+#   ./run.sh               # Normal start (install deps if needed)
+#   ./run.sh --rebuild     # Force reinstall all dependencies, then start
 
 # Load common functions
 source "$(dirname "$0")/scripts/common.sh"
@@ -7,6 +11,21 @@ source "$(dirname "$0")/scripts/common.sh"
 # Initialize common variables
 init_common_vars
 ENV_FILE="${ENV_FILE:-.env}"
+
+# Parse arguments
+FORCE_REBUILD="false"
+USE_LOCAL_LIBS="${USE_LOCAL_LIBS:-false}"
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild)
+            FORCE_REBUILD="true"
+            ;;
+        --local)
+            USE_LOCAL_LIBS="true"
+            ;;
+    esac
+done
+export USE_LOCAL_LIBS
 
 # Development-specific configuration
 ENABLE_RELOAD="false"
@@ -24,6 +43,13 @@ ENABLE_RELOAD="false"
 
 # Create virtual environment (development strategy)
 create_venv_dev
+
+# Force clean reinstall if --rebuild
+if [[ "$FORCE_REBUILD" == "true" ]]; then
+    echo -e "${YELLOW}🔨 --rebuild: forcing full dependency reinstall${NC}"
+    "$PIP" install --force-reinstall --no-deps \
+        'jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main'
+fi
 echo -e "${GREEN}🐍 Using Python: $PY${NC}"
 
 # Install requirements

@@ -11,6 +11,7 @@ import httpx
 from fastapi import HTTPException
 
 from queues.redis_queue import current_timestamp_ms
+from services.settings_helpers import get_float_setting, get_setting
 
 
 def _setup_work_horse_signals():
@@ -70,7 +71,9 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     per_attempt_timeout = (
         payload.get("request", {}).get("timeouts", {}).get("per_attempt_seconds")
-        or os.getenv("LLM_PROXY_PER_ATTEMPT_TIMEOUT", None)
+        or get_float_setting(
+            "queue.per_attempt_timeout_seconds", "LLM_PROXY_PER_ATTEMPT_TIMEOUT", 0.0
+        )
     )
     per_attempt_timeout = float(per_attempt_timeout) if per_attempt_timeout else None
 
@@ -120,16 +123,18 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
             response_format=response_format,
         )
 
-        model_service_url = os.getenv("MODEL_SERVICE_URL")
+        model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
         internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
         if model_service_url:
             url = model_service_url.rstrip("/") + "/internal/model/chat"
             headers = {}
             if internal_token:
                 headers["X-Internal-Token"] = internal_token
-            timeout_s = float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
+            timeout_s = get_float_setting(
+                "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+            )
             _safe_print(f"🌐 Posting to model service {url} timeout={timeout_s}s job_id={job_id}")
-            with httpx.Client(timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))) as client:
+            with httpx.Client(timeout=timeout_s) as client:
                 resp = client.post(url, json=req_obj.dict(), headers=headers)
                 processing_ms = _elapsed_ms(started_ms)
                 if resp.status_code != 200:
@@ -384,7 +389,10 @@ def _send_callback(
     try:
         _safe_print(f"📬 Posting callback for job_id={job_id} job_type={job_type} to {url}")
         _safe_print(f"📨 Callback payload job_id={job_id}: {envelope}")
-        with httpx.Client(timeout=float(os.getenv("LLM_PROXY_CALLBACK_TIMEOUT", "10"))) as client:
+        callback_timeout = get_float_setting(
+            "queue.callback_timeout_seconds", "LLM_PROXY_CALLBACK_TIMEOUT", 10.0
+        )
+        with httpx.Client(timeout=callback_timeout) as client:
             resp = client.post(url, headers=headers, json=envelope)
             envelope["callback_status"] = resp.status_code
             envelope["callback_body"] = resp.text[:500]

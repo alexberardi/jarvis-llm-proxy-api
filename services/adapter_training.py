@@ -15,6 +15,8 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from sqlalchemy.orm import Session
 
+from services.settings_helpers import get_bool_setting, get_int_setting, get_setting
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,7 +82,9 @@ def _build_paths(
     job_id: str,
 ) -> Tuple[Path, Path, Path, Path]:
     # Use same env var as adapter_storage for consistency
-    adapter_dir = Path(os.getenv("LLM_PROXY_ADAPTER_DIR", "/tmp/jarvis-adapters"))
+    adapter_dir = Path(
+        get_setting("training.adapter_dir", "LLM_PROXY_ADAPTER_DIR", "/tmp/jarvis-adapters")
+    )
     work_root = adapter_dir / "work" / job_id
     output_dir = work_root / "adapter"
     # Flat structure: adapters stored directly by hash
@@ -90,7 +94,9 @@ def _build_paths(
 
 
 def _artifact_url(artifact_path: Path) -> str:
-    prefix = os.getenv("JARVIS_ADAPTER_PUBLIC_URL_PREFIX")
+    prefix = get_setting(
+        "training.public_url_prefix", "JARVIS_ADAPTER_PUBLIC_URL_PREFIX", ""
+    )
     if prefix:
         rel = artifact_path.as_posix()
         return prefix.rstrip("/") + "/" + rel.lstrip("/")
@@ -202,17 +208,27 @@ def _update_training_job_status(
         logger.error(f"Failed to update training job status: {e}")
 
 
+def _resolve_venv_python() -> str:
+    """Resolve the venv python for subprocess calls.
+
+    Priority:
+    1. venv/bin/python relative to repo root (dev layout)
+    2. sys.executable (fallback)
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    venv_py = repo_root / "venv" / "bin" / "python"
+    if venv_py.is_file():
+        return str(venv_py)
+    return sys.executable
+
+
 def _run_training_command(env: Dict[str, str], timeout_s: int) -> None:
-    cmd = os.getenv("JARVIS_ADAPTER_TRAIN_CMD")
+    cmd = get_setting("training.train_cmd", "JARVIS_ADAPTER_TRAIN_CMD", "")
     if not cmd:
         raise AdapterTrainingError("JARVIS_ADAPTER_TRAIN_CMD is not set")
     args = shlex.split(cmd)
-    if args:
-        executable = shutil.which(args[0])
-        if executable is not None:
-            args[0] = executable
-        elif args[0] in ("python", "python3"):
-            args[0] = sys.executable
+    if args and args[0] in ("python", "python3"):
+        args[0] = _resolve_venv_python()
     log_path = env.get("JARVIS_TRAIN_LOG_PATH")
     try:
         if log_path:
@@ -285,8 +301,8 @@ def _wait_for_gpu_memory(min_free_gb: float = 6.0, timeout_s: int = 30) -> bool:
 
 
 def _debug_pause_model_service() -> None:
-    debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    debug_enabled = get_bool_setting("debug.enabled", "DEBUG", False)
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     if not debug_enabled or not model_service_url:
         logger.debug("⏭️  Debug pause skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
         return
@@ -312,8 +328,8 @@ def _debug_pause_model_service() -> None:
 
 
 def _debug_resume_model_service() -> None:
-    debug_enabled = os.getenv("DEBUG", "false").lower() == "true"
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    debug_enabled = get_bool_setting("debug.enabled", "DEBUG", False)
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     if not debug_enabled or not model_service_url:
         logger.debug("⏭️  Debug resume skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
         return
@@ -406,7 +422,10 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
     dataset_path.write_text(_stable_json_dumps(dataset_ref), encoding="utf-8")
     params_path.write_text(_stable_json_dumps(params), encoding="utf-8")
 
-    timeout_s = int(os.getenv("JARVIS_ADAPTER_TRAIN_TIMEOUT_SECONDS") or ttl_seconds)
+    timeout_setting = get_int_setting(
+        "training.train_timeout_seconds", "JARVIS_ADAPTER_TRAIN_TIMEOUT_SECONDS", 0
+    )
+    timeout_s = int(timeout_setting or ttl_seconds)
     timeout_s = max(60, min(timeout_s, ttl_seconds))
 
     # Validate model ID - must be a HF model ID or local path
@@ -415,6 +434,68 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
     env = os.environ.copy()
     if not env.get("HF_TOKEN") and env.get("HUGGINGFACE_HUB_TOKEN"):
         env["HF_TOKEN"] = env["HUGGINGFACE_HUB_TOKEN"]
+    settings_env = {
+        "JARVIS_ADAPTER_MAX_SEQ_LEN": str(
+            get_int_setting("training.max_seq_len", "JARVIS_ADAPTER_MAX_SEQ_LEN", 2048)
+        ),
+        "JARVIS_ADAPTER_BATCH_SIZE": str(
+            get_int_setting("training.batch_size", "JARVIS_ADAPTER_BATCH_SIZE", 1)
+        ),
+        "JARVIS_ADAPTER_GRAD_ACCUM": str(
+            get_int_setting("training.grad_accum", "JARVIS_ADAPTER_GRAD_ACCUM", 4)
+        ),
+        "JARVIS_ADAPTER_EPOCHS": str(
+            get_int_setting("training.epochs", "JARVIS_ADAPTER_EPOCHS", 1)
+        ),
+        "JARVIS_ADAPTER_LEARNING_RATE": str(
+            get_setting("training.learning_rate", "JARVIS_ADAPTER_LEARNING_RATE", 2e-4)
+        ),
+        "JARVIS_ADAPTER_LORA_R": str(
+            get_int_setting("training.lora_r", "JARVIS_ADAPTER_LORA_R", 16)
+        ),
+        "JARVIS_ADAPTER_LORA_ALPHA": str(
+            get_int_setting("training.lora_alpha", "JARVIS_ADAPTER_LORA_ALPHA", 32)
+        ),
+        "JARVIS_ADAPTER_LORA_DROPOUT": str(
+            get_setting("training.lora_dropout", "JARVIS_ADAPTER_LORA_DROPOUT", 0.05)
+        ),
+        "JARVIS_ADAPTER_HF_BASE_MODEL_ID": get_setting(
+            "training.adapter_hf_base_model_id", "JARVIS_ADAPTER_HF_BASE_MODEL_ID", ""
+        ),
+        "JARVIS_ADAPTER_GGUF_CONVERT_CMD": get_setting(
+            "training.adapter_gguf_convert_cmd", "JARVIS_ADAPTER_GGUF_CONVERT_CMD", ""
+        ),
+        "JARVIS_ADAPTER_TRAIN_DTYPE": get_setting(
+            "training.adapter_train_dtype", "JARVIS_ADAPTER_TRAIN_DTYPE", "auto"
+        ),
+        "JARVIS_ADAPTER_TRAIN_LOAD_IN_4BIT": str(
+            get_bool_setting(
+                "training.adapter_train_load_in_4bit",
+                "JARVIS_ADAPTER_TRAIN_LOAD_IN_4BIT",
+                False,
+            )
+        ).lower(),
+        "JARVIS_ADAPTER_TRAIN_LOAD_IN_8BIT": str(
+            get_bool_setting(
+                "training.adapter_train_load_in_8bit",
+                "JARVIS_ADAPTER_TRAIN_LOAD_IN_8BIT",
+                False,
+            )
+        ).lower(),
+        "JARVIS_ADAPTER_TRAIN_DEVICE_MAP": get_setting(
+            "training.adapter_train_device_map", "JARVIS_ADAPTER_TRAIN_DEVICE_MAP", ""
+        ),
+        "JARVIS_DATE_ADAPTER_TRAIN_LOAD_IN_4BIT": str(
+            get_bool_setting(
+                "training.date_adapter_train_load_in_4bit",
+                "JARVIS_DATE_ADAPTER_TRAIN_LOAD_IN_4BIT",
+                True,
+            )
+        ).lower(),
+    }
+    for key, value in settings_env.items():
+        if value is not None and value != "":
+            env[key] = value
     env.update(
         {
             "JARVIS_TRAIN_JOB_ID": job_id,

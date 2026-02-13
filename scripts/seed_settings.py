@@ -3,6 +3,7 @@
 
 This script is intended for initial setup or migration. It reads all
 defined settings from environment variables and populates the database.
+Non-sensitive runtime config should live in settings; env is for bootstrap.
 
 Usage:
     python scripts/seed_settings.py [--dry-run] [--force]

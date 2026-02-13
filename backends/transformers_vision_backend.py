@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -19,6 +18,7 @@ except ImportError:
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
 from backends.base import LLMBackendBase
+from services.settings_helpers import get_setting
 
 
 class TransformersVisionClient(LLMBackendBase):
@@ -41,7 +41,9 @@ class TransformersVisionClient(LLMBackendBase):
         self.model_type = getattr(config, "model_type", "").lower()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-        attn_impl = os.getenv("JARVIS_VISION_ATTN_IMPL")
+        attn_impl = get_setting(
+            "model.vision.attn_impl", "JARVIS_VISION_ATTN_IMPL", ""
+        )
 
         if self.model_type in {"smolvlm", "smolvlm2"}:
             self.model = AutoModelForImageTextToText.from_pretrained(
@@ -78,7 +80,9 @@ class TransformersVisionClient(LLMBackendBase):
         return "cpu"
 
     def _get_dtype(self) -> Optional[torch.dtype]:
-        override = os.getenv("JARVIS_VISION_TORCH_DTYPE", "").lower()
+        override = get_setting(
+            "model.vision.torch_dtype", "JARVIS_VISION_TORCH_DTYPE", ""
+        ).lower()
         if override == "float16" or override == "fp16":
             return torch.float16
         if override == "bfloat16" or override == "bf16":
