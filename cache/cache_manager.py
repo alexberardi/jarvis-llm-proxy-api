@@ -1,7 +1,10 @@
-import os
-from typing import Optional, Any
+import logging
+from typing import Optional
 from .conversation_cache import ConversationCache
 from .local_conversation_cache import LocalConversationCache
+from services.settings_helpers import get_int_setting, get_setting
+
+logger = logging.getLogger("uvicorn")
 
 class CacheManager:
     """Manages conversation cache implementation based on environment configuration"""
@@ -12,21 +15,25 @@ class CacheManager:
     
     def _initialize_cache(self):
         """Initialize cache based on environment variables"""
-        cache_type = os.getenv("JARVIS_CACHE_TYPE", "local").lower()
-        ttl_seconds = int(os.getenv("JARVIS_SESSION_TTL", "600"))  # 10 minutes default
-        cleanup_interval = int(os.getenv("JARVIS_CACHE_CLEANUP_INTERVAL", "30"))  # 30 seconds default
+        cache_type = get_setting("cache.type", "JARVIS_CACHE_TYPE", "local").lower()
+        ttl_seconds = get_int_setting(
+            "cache.session_ttl_seconds", "JARVIS_SESSION_TTL", 600
+        )
+        cleanup_interval = get_int_setting(
+            "cache.cleanup_interval_seconds", "JARVIS_CACHE_CLEANUP_INTERVAL", 30
+        )
         
-        print(f"🔧 Initializing cache: type={cache_type}, ttl={ttl_seconds}s, cleanup_interval={cleanup_interval}s")
+        logger.info(f"🔧 Initializing cache: type={cache_type}, ttl={ttl_seconds}s, cleanup_interval={cleanup_interval}s")
         
         if cache_type == "local":
             self.cache = LocalConversationCache(ttl_seconds, cleanup_interval)
-            print("✅ Local in-memory cache initialized")
+            logger.info("✅ Local in-memory cache initialized")
         elif cache_type == "redis":
             # Future Redis implementation
-            print("⚠️  Redis cache not yet implemented, falling back to local")
+            logger.warning("⚠️  Redis cache not yet implemented, falling back to local")
             self.cache = LocalConversationCache(ttl_seconds, cleanup_interval)
         else:
-            print(f"⚠️  Unknown cache type '{cache_type}', falling back to local")
+            logger.warning(f"⚠️  Unknown cache type '{cache_type}', falling back to local")
             self.cache = LocalConversationCache(ttl_seconds, cleanup_interval)
     
     def get_cache(self) -> ConversationCache:

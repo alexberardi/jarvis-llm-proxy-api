@@ -16,6 +16,7 @@ from models.api_models import (
 )
 from services.message_service import request_has_images
 from services.response_helpers import create_openai_response, openai_error
+from services.settings_helpers import get_float_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -48,7 +49,7 @@ async def chat_completions(req: ChatCompletionRequest):
             )
 
     try:
-        model_service_url = os.getenv("MODEL_SERVICE_URL")
+        model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
         internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv(
             "LLM_PROXY_INTERNAL_TOKEN"
         )
@@ -62,8 +63,9 @@ async def chat_completions(req: ChatCompletionRequest):
         headers = {}
         if internal_token:
             headers["X-Internal-Token"] = internal_token
-        base_timeout = float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
-        timeout = base_timeout
+        timeout = get_float_setting(
+            "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+        )
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=req.dict(), headers=headers)

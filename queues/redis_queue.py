@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 import redis
 from rq import Queue
 
+from services.settings_helpers import get_setting
 
 def get_redis_connection() -> redis.Redis:
     url = os.getenv("REDIS_URL")
@@ -19,7 +20,9 @@ def get_redis_connection() -> redis.Redis:
 
 
 def get_queue(name: Optional[str] = None) -> Queue:
-    queue_name = name or os.getenv("LLM_PROXY_QUEUE_NAME", "llm_proxy_jobs")
+    queue_name = name or get_setting(
+        "queue.name", "LLM_PROXY_QUEUE_NAME", "llm_proxy_jobs"
+    )
     conn = get_redis_connection()
     return Queue(queue_name, connection=conn)
 

@@ -4,7 +4,6 @@ Endpoints for enqueueing async LLM processing jobs.
 """
 
 import logging
-import os
 import time
 from datetime import datetime
 
@@ -24,6 +23,7 @@ from queues.redis_queue import (
     enqueue_job,
 )
 from services.training_job_service import create_queued_training_job
+from services.settings_helpers import get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -138,7 +138,9 @@ async def enqueue_job_endpoint(req: EnqueueRequest, request: Request):
 
     payload = req.dict()
     payload["received_at"] = datetime.utcnow().isoformat()
-    payload["queue_name"] = os.getenv("LLM_PROXY_QUEUE_NAME", "llm_proxy_jobs")
+    payload["queue_name"] = get_setting(
+        "queue.name", "LLM_PROXY_QUEUE_NAME", "llm_proxy_jobs"
+    )
 
     try:
         enqueue_job(payload, req.ttl_seconds, queue_name=payload["queue_name"])
