@@ -30,6 +30,7 @@ from managers.chat_types import (
     NormalizedMessage,
     TextPart,
 )
+from services.settings_helpers import get_float_setting, get_int_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -65,24 +66,42 @@ class VLLMVisionClient(LLMBackendBase):
 
         # Get context window from parameter or environment variable
         if context_window is None:
-            context_window = int(os.getenv("JARVIS_VISION_MODEL_CONTEXT_WINDOW", "8192"))
+            context_window = get_int_setting(
+                "model.vision.context_window", "JARVIS_VISION_MODEL_CONTEXT_WINDOW", 8192
+            )
         self.context_window = context_window
 
         # vLLM configuration
-        tensor_parallel_size = int(os.getenv("JARVIS_VLLM_TENSOR_PARALLEL_SIZE", "1"))
-        gpu_memory_utilization = float(os.getenv("JARVIS_VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+        tensor_parallel_size = get_int_setting(
+            "inference.vllm.tensor_parallel_size", "JARVIS_VLLM_TENSOR_PARALLEL_SIZE", 1
+        )
+        gpu_memory_utilization = get_float_setting(
+            "inference.vllm.gpu_memory_utilization", "JARVIS_VLLM_GPU_MEMORY_UTILIZATION", 0.9
+        )
 
         # Use vision-specific quantization setting if available, else fallback to main
-        vllm_quantization = os.getenv("JARVIS_VISION_VLLM_QUANTIZATION", "").strip().lower()
+        vllm_quantization = get_setting(
+            "model.vision.vllm_quantization", "JARVIS_VISION_VLLM_QUANTIZATION", ""
+        ).strip().lower()
         if not vllm_quantization:
-            vllm_quantization = os.getenv("JARVIS_VLLM_QUANTIZATION", "").strip().lower()
+            vllm_quantization = get_setting(
+                "inference.vllm.quantization", "JARVIS_VLLM_QUANTIZATION", ""
+            ).strip().lower()
         vllm_quantization = vllm_quantization.replace("-", "_")
         if vllm_quantization in {"", "none", "false", "off", "auto"}:
             vllm_quantization = None
 
         # Batching parameters - more conservative for vision models
-        max_num_batched_tokens = int(os.getenv("JARVIS_VLLM_MAX_BATCHED_TOKENS", "4096"))
-        max_num_seqs = int(os.getenv("JARVIS_VLLM_MAX_NUM_SEQS", "8"))
+        max_num_batched_tokens = get_int_setting(
+            "model.vision.vllm_max_batched_tokens",
+            "JARVIS_VISION_VLLM_MAX_BATCHED_TOKENS",
+            4096,
+        )
+        max_num_seqs = get_int_setting(
+            "model.vision.vllm_max_num_seqs",
+            "JARVIS_VISION_VLLM_MAX_NUM_SEQS",
+            8,
+        )
 
         logger.info(f"🔭 vLLM Vision: Loading {model_path}")
         logger.debug(f"🔭 vLLM Vision: Context window: {context_window}")

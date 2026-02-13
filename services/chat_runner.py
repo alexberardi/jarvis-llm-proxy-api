@@ -2,12 +2,13 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
+
+from services.settings_helpers import get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -532,7 +533,9 @@ async def run_chat_completion(
     ):
         try:
             grammar = schema_to_gbnf(response_schema)
-            dump_path = os.getenv("JARVIS_DUMP_GBNF_PATH")
+            dump_path = get_setting(
+                "debug.dump_gbnf_path", "JARVIS_DUMP_GBNF_PATH", ""
+            )
             if dump_path:
                 try:
                     with open(dump_path, "w", encoding="utf-8") as handle:

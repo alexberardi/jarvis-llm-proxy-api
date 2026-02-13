@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
 from backends.base import LLMBackendBase
+from services.settings_helpers import get_int_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -27,9 +28,17 @@ class RestClient(LLMBackendBase):
         
         # Allow environment variable override of model name based on model type
         if model_type == "lightweight":
-            env_model_name = os.getenv("JARVIS_REST_LIGHTWEIGHT_MODEL_NAME")
+            env_model_name = get_setting(
+                "model.lightweight.rest_model_name",
+                "JARVIS_REST_LIGHTWEIGHT_MODEL_NAME",
+                "",
+            )
         else:
-            env_model_name = os.getenv("JARVIS_REST_MODEL_NAME")
+            env_model_name = get_setting(
+                "model.main.rest_model_name",
+                "JARVIS_REST_MODEL_NAME",
+                "",
+            )
             
         if env_model_name:
             self.model_name = env_model_name
@@ -40,18 +49,28 @@ class RestClient(LLMBackendBase):
         self.inference_engine = "rest"  # Remote API backend
         
         # Get authentication configuration from environment
-        self.auth_type = os.getenv("JARVIS_REST_AUTH_TYPE", "none").lower()
+        self.auth_type = get_setting(
+            "rest.auth_type", "JARVIS_REST_AUTH_TYPE", "none"
+        ).lower()
         self.auth_token = os.getenv("JARVIS_REST_AUTH_TOKEN", "")
-        self.auth_header_name = os.getenv("JARVIS_REST_AUTH_HEADER", "Authorization")
+        self.auth_header_name = get_setting(
+            "rest.auth_header_name", "JARVIS_REST_AUTH_HEADER", "Authorization"
+        )
         
         # Get provider-specific configuration
-        self.provider = os.getenv("JARVIS_REST_PROVIDER", "generic").lower()
+        self.provider = get_setting(
+            "rest.provider", "JARVIS_REST_PROVIDER", "generic"
+        ).lower()
         
         # Get request format configuration
-        self.request_format = os.getenv("JARVIS_REST_REQUEST_FORMAT", "openai").lower()
+        self.request_format = get_setting(
+            "rest.request_format", "JARVIS_REST_REQUEST_FORMAT", "openai"
+        ).lower()
         
         # Get timeout configuration
-        self.timeout = int(os.getenv("JARVIS_REST_TIMEOUT", "60"))
+        self.timeout = get_int_setting(
+            "rest.timeout_seconds", "JARVIS_REST_TIMEOUT", 60
+        )
         
         logger.info(f"🌐 Initialized REST backend for {self.provider}")
         logger.debug(f"🔗 Base URL: {self.base_url}")

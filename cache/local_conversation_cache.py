@@ -1,7 +1,10 @@
+import logging
 import time
 import threading
 from typing import List, Dict, Optional, Any
 from .conversation_cache import ConversationCache
+
+logger = logging.getLogger("uvicorn")
 
 class LocalConversationCache(ConversationCache):
     """In-memory conversation cache with automatic cleanup"""
@@ -51,10 +54,10 @@ class LocalConversationCache(ConversationCache):
                     # Append only the new messages
                     new_messages = messages[len(existing_messages):]
                     existing_messages.extend(new_messages)
-                    print(f"🔄 Updated session {conversation_id} with {len(new_messages)} new messages")
+                    logger.debug(f"🔄 Updated session {conversation_id} with {len(new_messages)} new messages")
                 else:
                     # No new messages to append
-                    print(f"🔄 Session {conversation_id} updated (no new messages)")
+                    logger.debug(f"🔄 Session {conversation_id} updated (no new messages)")
                 
                 # Update timestamps
                 existing_session["last_accessed"] = current_time
@@ -66,7 +69,7 @@ class LocalConversationCache(ConversationCache):
                     "last_accessed": current_time,
                     "warmup_status": "pending"  # Initialize warm-up status
                 }
-                print(f"🆕 Created new session {conversation_id} with {len(messages)} messages")
+                logger.debug(f"🆕 Created new session {conversation_id} with {len(messages)} messages")
             
             return True
     
@@ -75,7 +78,7 @@ class LocalConversationCache(ConversationCache):
         with self.lock:
             if conversation_id in self.cache:
                 del self.cache[conversation_id]
-                print(f"🗑️  Deleted session {conversation_id}")
+                logger.debug(f"🗑️  Deleted session {conversation_id}")
                 return True
             return False
     
@@ -94,7 +97,7 @@ class LocalConversationCache(ConversationCache):
                 del self.cache[conversation_id]
         
         if expired_sessions:
-            print(f"🧹 Cleaned up {len(expired_sessions)} expired sessions")
+            logger.debug(f"🧹 Cleaned up {len(expired_sessions)} expired sessions")
         
         return len(expired_sessions)
     
@@ -108,7 +111,7 @@ class LocalConversationCache(ConversationCache):
         with self.lock:
             if conversation_id in self.cache:
                 self.cache[conversation_id]["processed_context"] = processed_context
-                print(f"💾 Updated processed context for session {conversation_id}")
+                logger.debug(f"💾 Updated processed context for session {conversation_id}")
                 return True
             return False
     
@@ -131,7 +134,7 @@ class LocalConversationCache(ConversationCache):
         with self.lock:
             if conversation_id in self.cache:
                 self.cache[conversation_id]["warmup_status"] = status
-                print(f"🔄 Updated warm-up status for session {conversation_id}: {status}")
+                logger.debug(f"🔄 Updated warm-up status for session {conversation_id}: {status}")
                 return True
             return False
     
@@ -142,9 +145,9 @@ class LocalConversationCache(ConversationCache):
             try:
                 removed_count = self.cleanup_expired()
                 if removed_count > 0:
-                    print(f"🔄 Background cleanup removed {removed_count} expired sessions")
+                    logger.debug(f"🔄 Background cleanup removed {removed_count} expired sessions")
             except Exception as e:
-                print(f"⚠️  Error in background cleanup: {e}")
+                logger.warning(f"⚠️  Error in background cleanup: {e}")
     
     def __del__(self):
         """Cleanup on destruction"""

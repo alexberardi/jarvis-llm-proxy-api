@@ -11,6 +11,7 @@ import httpx
 
 from models.api_models import ModelListResponse
 from services.response_helpers import openai_error
+from services.settings_helpers import get_float_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/v1", tags=["models"])
 @router.get("/models", response_model=ModelListResponse)
 async def list_models():
     """Proxy model list from model service."""
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv(
         "LLM_PROXY_INTERNAL_TOKEN"
     )
@@ -34,9 +35,10 @@ async def list_models():
     headers = {}
     if internal_token:
         headers["X-Internal-Token"] = internal_token
-    async with httpx.AsyncClient(
-        timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
-    ) as client:
+    timeout = get_float_setting(
+        "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             openai_error(
@@ -71,7 +73,7 @@ async def get_engine_info():
         backend_type: the model backend type
         description: human-readable description of caching behavior
     """
-    model_service_url = os.getenv("MODEL_SERVICE_URL")
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
     internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv(
         "LLM_PROXY_INTERNAL_TOKEN"
     )
@@ -85,9 +87,10 @@ async def get_engine_info():
     headers = {}
     if internal_token:
         headers["X-Internal-Token"] = internal_token
-    async with httpx.AsyncClient(
-        timeout=float(os.getenv("MODEL_SERVICE_TIMEOUT", "60"))
-    ) as client:
+    timeout = get_float_setting(
+        "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
             openai_error(

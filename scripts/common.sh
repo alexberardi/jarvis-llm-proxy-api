@@ -111,11 +111,61 @@ configure_vllm_env() {
     fi
 }
 
+# Map jarvis package names to local directory names
+_jarvis_local_dir() {
+    local pkg="$1"
+    case "$pkg" in
+        jarvis-config-client)  echo "jarvis-config-client" ;;
+        jarvis-settings-client) echo "jarvis-settings-client" ;;
+        jarvis-auth-client)    echo "jarvis-auth-client" ;;
+        jarvis-log-client)     echo "jarvis-log-client" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Install base requirements
+# If USE_LOCAL_LIBS=true, jarvis-*-client packages are installed as editable
+# from sibling directories instead of being pulled from GitHub.
 install_base_requirements() {
     echo -e "${BLUE}📦 Installing base requirements${NC}"
     "$PIP" install -U pip setuptools
-    "$PIP" install -r requirements-base.txt
+
+    if [[ "${USE_LOCAL_LIBS:-false}" == "true" ]]; then
+        echo -e "${PURPLE}🏠 --local mode: jarvis libraries will be installed from local directories${NC}"
+        local workspace
+        workspace="$(dirname "$ROOT")"
+
+        # Build a filtered requirements file (skip jarvis-*-client git lines)
+        local tmpfile
+        tmpfile="$(mktemp)"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Match lines like: jarvis-foo-client @ git+https://...
+            if [[ "$line" =~ ^(jarvis-[a-z]+-client)[[:space:]]*@[[:space:]]*git\+ ]]; then
+                local pkg="${BASH_REMATCH[1]}"
+                local dir_name
+                dir_name="$(_jarvis_local_dir "$pkg")"
+                local local_path="${workspace}/${dir_name}"
+                if [[ -n "$dir_name" && -d "$local_path" ]]; then
+                    echo -e "${PURPLE}   📁 ${pkg} → ${local_path}${NC}"
+                    "$PIP" install -e "$local_path" 2>&1 | tail -1
+                else
+                    echo -e "${YELLOW}   ⚠️  Local dir not found for ${pkg} (${local_path}), falling back to git${NC}"
+                    echo "$line" >> "$tmpfile"
+                fi
+            else
+                echo "$line" >> "$tmpfile"
+            fi
+        done < requirements-base.txt
+
+        # Install remaining (non-jarvis) requirements
+        "$PIP" install --upgrade -r "$tmpfile"
+        rm -f "$tmpfile"
+    else
+        # Default: install everything from requirements (including git-sourced packages)
+        # --upgrade ensures git-sourced packages are re-installed when the remote
+        # branch has new commits at the same version number.
+        "$PIP" install --upgrade -r requirements-base.txt
+    fi
 }
 
 # Check if llama-cpp-python needs to be installed/updated

@@ -6,6 +6,8 @@ Sets up console logging and optional remote logging to jarvis-logs server.
 import logging
 import os
 
+from services.settings_helpers import get_setting
+
 _jarvis_handler = None
 
 
@@ -15,7 +17,9 @@ def setup_console_logging() -> logging.Logger:
     Returns:
         The configured uvicorn logger.
     """
-    console_level = os.getenv("JARVIS_LOG_CONSOLE_LEVEL", "WARNING")
+    console_level = get_setting(
+        "logging.console_level", "JARVIS_LOG_CONSOLE_LEVEL", "WARNING"
+    )
     logging.basicConfig(
         level=getattr(logging, console_level.upper(), logging.WARNING),
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -39,7 +43,9 @@ def setup_remote_logging() -> None:
 
         init_log_client(app_id=app_id, app_key=app_key)
 
-        remote_level = os.getenv("JARVIS_LOG_REMOTE_LEVEL", "DEBUG")
+        remote_level = get_setting(
+            "logging.remote_level", "JARVIS_LOG_REMOTE_LEVEL", "DEBUG"
+        )
         _jarvis_handler = JarvisLogHandler(
             service="llm-proxy",
             level=getattr(logging, remote_level.upper(), logging.DEBUG),
@@ -54,11 +60,16 @@ def setup_remote_logging() -> None:
 
 
 def print_startup_info() -> None:
-    """Print critical endpoint configs for visibility at startup."""
-    print(f"MODEL_SERVICE_URL={os.getenv('MODEL_SERVICE_URL')}")
-    print(
+    """Log critical endpoint configs for visibility at startup."""
+    startup_logger = logging.getLogger("uvicorn")
+    model_service_url = get_setting(
+        "model_service.url", "MODEL_SERVICE_URL", ""
+    )
+    startup_logger.info(f"MODEL_SERVICE_URL={model_service_url or 'not set'}")
+    startup_logger.info(
         f"MODEL_SERVICE_TOKEN set: {'yes' if os.getenv('MODEL_SERVICE_TOKEN') else 'no'}"
     )
-    print(
+    startup_logger.info(
         f"LLM_PROXY_INTERNAL_TOKEN set: {'yes' if os.getenv('LLM_PROXY_INTERNAL_TOKEN') else 'no'}"
     )
+    startup_logger.info(f"JARVIS_CONFIG_URL={os.getenv('JARVIS_CONFIG_URL', 'not set')}")

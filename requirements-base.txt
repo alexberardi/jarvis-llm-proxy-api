@@ -29,19 +29,23 @@ datasets>=2.14.0
 trl>=0.7.0
 accelerate>=0.21.0
 bitsandbytes>=0.41.0  # Required for 4-bit quantized training
-# Pin huggingface-hub to <1.0 to match transformers' requirement
-huggingface-hub>=0.34.0,<1.0
+# huggingface-hub: mlx-lm requires >=1.0 (via transformers 5.x)
+huggingface-hub>=0.34.0
 # FastText for date key extraction (use wheel to avoid compilation issues)
 fasttext-wheel>=0.9.2
 
 # jarvis-log-client installed from local mount at runtime
 # (provides centralized logging to jarvis-logs server)
 
+# jarvis-config-client for service discovery
+jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@main
+
 # jarvis-settings-client for settings management
 jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main
 
-# Required for GGUF LoRA conversion (convert_lora_to_gguf.py)
+# Required for GGUF conversion (vendored llama.cpp convert_hf_to_gguf.py / convert_lora_to_gguf.py)
 gguf>=0.10.0
+mistral_common>=1.0.0  # Unconditional import in vendored convert_hf_to_gguf.py
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python 0.3.16 (built against llama.cpp commit 4227c9b)
