@@ -28,7 +28,7 @@ init_common_vars() {
     cd "$ROOT"
     
     PYTHON_VERSION="${PYTHON_VERSION:-3.11.9}"
-    VENV="$ROOT/venv"
+    VENV="$ROOT/.venv"
     PY="$VENV/bin/python"
     PIP="$VENV/bin/pip"
     SETUP_CONFIG="$ROOT/.setup_config"
