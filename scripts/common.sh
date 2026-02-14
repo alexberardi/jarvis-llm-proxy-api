@@ -38,9 +38,13 @@ init_common_vars() {
 check_setup() {
     if [[ ! -f "$SETUP_CONFIG" ]]; then
         echo -e "${YELLOW}⚠️  Setup configuration not found. Running setup first...${NC}"
-        ./setup.sh
+        if [[ "${AUTO_SETUP:-}" == "true" ]]; then
+            ./setup.sh --auto
+        else
+            ./setup.sh
+        fi
     fi
-    
+
     # Load setup configuration
     source "$SETUP_CONFIG"
     echo -e "${GREEN}🔧 Using configuration: OS=$OS, Acceleration=$ACCELERATION${NC}"
@@ -267,21 +271,25 @@ needs_llama_cpp() {
     # llama-cpp-python is needed for:
     # 1. GGUF backend (always)
     # 2. Explicit llama_cpp inference engine
+    # 3. No backend configured (GGUF is the runtime default)
     local main_backend="${JARVIS_MODEL_BACKEND:-}"
     local lightweight_backend="${JARVIS_LIGHTWEIGHT_MODEL_BACKEND:-}"
     local engine="${JARVIS_INFERENCE_ENGINE:-}"
 
-    if [[ "$main_backend" == "GGUF" ]] || [[ "$lightweight_backend" == "GGUF" ]]; then
+    # Explicitly needed
+    if [[ "$main_backend" == "GGUF" ]] || [[ "$lightweight_backend" == "GGUF" ]] || [[ "$engine" == "llama_cpp" ]]; then
         echo "true"
         return
     fi
 
-    if [[ "$engine" == "llama_cpp" ]]; then
-        echo "true"
+    # Explicitly NOT needed (non-GGUF backend configured)
+    if [[ -n "$main_backend" ]] || [[ -n "$engine" ]]; then
+        echo "false"
         return
     fi
 
-    echo "false"
+    # No backend configured — default to true (GGUF is the runtime default)
+    echo "true"
 }
 
 # Install conditional requirements based on environment variables
