@@ -125,6 +125,7 @@ CLAUDE.md
 
 # Environments
 .env
+.venv/
 venv
 env/
 venv/
