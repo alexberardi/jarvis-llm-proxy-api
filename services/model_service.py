@@ -11,6 +11,7 @@ from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest
 from services.chat_runner import run_chat_completion
 from services.date_keys import extract_date_keys
+from services.mcp_client import get_mcp_client
 from api.settings_routes import router as settings_router
 
 load_dotenv()
@@ -212,24 +213,33 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
 
     # Extract date keys if requested
     date_keys: Optional[List[str]] = None
+    resolved_datetimes: Optional[List[str]] = None
     if req.include_date_context:
         user_text = _get_user_text(req)
         if user_text:
             logger.debug(f"🗓️  Extracting date keys from: {user_text!r}")
-            model_chat_fn = None
-            if model_manager.main_model and hasattr(model_manager.main_model, "chat_with_temperature"):
-                model_chat_fn = model_manager.main_model.chat_with_temperature
-            date_keys = extract_date_keys(user_text, model_chat_fn=model_chat_fn)
+            date_keys = extract_date_keys(user_text)
             logger.debug(f"🗓️  Extracted date keys: {date_keys}")
+
+            # Opt-in: resolve via MCP
+            if req.resolve_dates and date_keys:
+                mcp_client = get_mcp_client()
+                if mcp_client.is_connected():
+                    mcp_result = await mcp_client.resolve_date_keys(date_keys)
+                    if mcp_result:
+                        resolved_datetimes = mcp_result.get("resolved")
+                        logger.debug(f"🗓️  Resolved datetimes: {resolved_datetimes}")
 
     result = await run_chat_completion(model_manager, req, allow_images=True)
     preview = (result.content or "")[:1000]
     logger.debug(f"🧾 /internal/model/chat response_preview={preview!r}")
     logger.info(f"✅ /internal/model/chat model={req.model} done")
-    
+
     response = {"content": result.content, "usage": result.usage}
     if date_keys is not None:
         response["date_keys"] = date_keys
+    if resolved_datetimes is not None:
+        response["resolved_datetimes"] = resolved_datetimes
     return response
 
 
