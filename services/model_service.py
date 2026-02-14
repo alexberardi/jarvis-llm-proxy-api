@@ -147,9 +147,26 @@ def _atexit_cleanup():
 atexit.register(_atexit_cleanup)
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Connect MCP client on model service startup."""
+    try:
+        mcp_client = get_mcp_client()
+        await mcp_client.connect()
+    except Exception as e:
+        logger.warning(f"MCP client connection failed (non-fatal): {e}")
+
+
 @app.on_event("shutdown")
-def shutdown_event():
+async def shutdown_event():
     global _cleanup_done
+    # Disconnect MCP client
+    try:
+        mcp_client = get_mcp_client()
+        await mcp_client.disconnect()
+    except Exception as e:
+        logger.debug(f"MCP client disconnect error: {e}")
+
     if _cleanup_done:
         return
     _cleanup_done = True
