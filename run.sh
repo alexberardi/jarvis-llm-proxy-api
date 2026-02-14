@@ -14,6 +14,7 @@ ENV_FILE="${ENV_FILE:-.env}"
 
 # Parse arguments
 FORCE_REBUILD="false"
+SETUP_ONLY="false"
 USE_LOCAL_LIBS="${USE_LOCAL_LIBS:-false}"
 for arg in "$@"; do
     case "$arg" in
@@ -22,6 +23,9 @@ for arg in "$@"; do
             ;;
         --local)
             USE_LOCAL_LIBS="true"
+            ;;
+        --setup)
+            SETUP_ONLY="true"
             ;;
     esac
 done
@@ -67,6 +71,12 @@ fi
 
 # Run diagnostics
 run_diagnostics
+
+# Exit early if --setup (install only, no server start)
+if [[ "$SETUP_ONLY" == "true" ]]; then
+    echo -e "${GREEN}✅ Setup complete — dependencies installed${NC}"
+    exit 0
+fi
 
 # Setup cleanup handlers
 setup_signal_handlers
