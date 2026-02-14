@@ -104,3 +104,25 @@ services:
     depends_on:
       llm-proxy-model:
         condition: service_started
+
+  # --------------------------------------------------------------------------
+  # Standalone PostgreSQL (only with --profile standalone)
+  # --------------------------------------------------------------------------
+  postgres:
+    profiles: ["standalone"]
+    image: postgres:15
+    environment:
+      POSTGRES_DB: jarvis_llm_proxy
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - llm-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  llm-pg-data:
