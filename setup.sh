@@ -12,6 +12,14 @@ NC='\033[0m' # No Color
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 cd "$ROOT"
 
+# Parse arguments
+AUTO_MODE="${AUTO_SETUP:-false}"
+for arg in "$@"; do
+    case "$arg" in
+        --auto) AUTO_MODE=true ;;
+    esac
+done
+
 echo -e "${BLUE}🚀 Jarvis LLM Proxy API Setup${NC}"
 echo "=================================="
 
@@ -76,7 +84,11 @@ elif [[ "$OS" == "windows" ]]; then
 fi
 
 echo ""
-read -p "Select hardware acceleration (1-3, or press Enter for auto-detect): " choice
+if [[ "$AUTO_MODE" == "true" ]]; then
+    choice=""
+else
+    read -p "Select hardware acceleration (1-3, or press Enter for auto-detect): " choice
+fi
 
 # Auto-detect if no choice made
 if [[ -z "$choice" ]]; then
@@ -138,8 +150,12 @@ echo ""
 VENDOR_CONVERTER="$ROOT/scripts/vendor/llama.cpp/convert_lora_to_gguf.py"
 if [[ ! -f "$VENDOR_CONVERTER" ]]; then
     echo -e "${YELLOW}GGUF LoRA converter not found (needed for adapter training with GGUF models).${NC}"
-    read -p "Download version-locked converter? [Y/n]: " setup_converter
-    setup_converter=${setup_converter:-Y}
+    if [[ "$AUTO_MODE" == "true" ]]; then
+        setup_converter="Y"
+    else
+        read -p "Download version-locked converter? [Y/n]: " setup_converter
+        setup_converter=${setup_converter:-Y}
+    fi
     if [[ "$setup_converter" =~ ^[Yy]$ ]]; then
         if command -v git >/dev/null 2>&1; then
             echo -e "${BLUE}Setting up GGUF converter (version-locked to llama-cpp-python)...${NC}"
@@ -160,8 +176,12 @@ if ! command -v llama-quantize >/dev/null 2>&1; then
     echo -e "${YELLOW}Without it, GGUF conversion will output unquantized f16 files (~15 GiB for 8B models).${NC}"
     if [[ "$OS" == "macos" ]]; then
         if command -v brew >/dev/null 2>&1; then
-            read -p "Install llama.cpp via Homebrew? (provides llama-quantize) [Y/n]: " install_llama
-            install_llama=${install_llama:-Y}
+            if [[ "$AUTO_MODE" == "true" ]]; then
+                install_llama="Y"
+            else
+                read -p "Install llama.cpp via Homebrew? (provides llama-quantize) [Y/n]: " install_llama
+                install_llama=${install_llama:-Y}
+            fi
             if [[ "$install_llama" =~ ^[Yy]$ ]]; then
                 echo -e "${BLUE}Installing llama.cpp...${NC}"
                 brew install llama.cpp
