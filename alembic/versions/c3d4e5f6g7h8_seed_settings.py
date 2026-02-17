@@ -21,7 +21,7 @@ SETTINGS = [
     # model.main - only non-path settings
     {
         "key": "model.main.backend",
-        "value": "GGUF",
+        "value": "VLLM",
         "value_type": "string",
         "category": "model.main",
         "description": "Main model backend: GGUF, VLLM, TRANSFORMERS, REST, MOCK",
@@ -115,7 +115,7 @@ SETTINGS = [
     # inference.vllm
     {
         "key": "inference.vllm.gpu_memory_utilization",
-        "value": "0.9",
+        "value": "0.8",
         "value_type": "float",
         "category": "inference.vllm",
         "description": "GPU memory utilization (0.0-1.0)",

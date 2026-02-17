@@ -35,6 +35,7 @@ x-common: &common
     - ./queues:/app/queues
     - ./scripts:/app/scripts
     - ./services:/app/services
+    - ./storage:/app/storage
     - ./main.py:/app/main.py
     - ./alembic.ini:/app/alembic.ini
     - ./alembic:/app/alembic
@@ -63,18 +64,12 @@ services:
     container_name: llm-proxy-api
     ports:
       - "${SERVER_PORT:-8000}:8000"
-    command: >
-      sh -c "pip install -q -e /app/jarvis-settings-client -e /app/jarvis-config-client -e /app/jarvis-log-client &&
-             python -m uvicorn main:app
-             --host 0.0.0.0
-             --port 8000
-             --reload
-             --reload-dir /app/api
-             --reload-dir /app/config
-             --reload-dir /app/models
-             --reload-dir /app/services
-             --reload-dir /app/managers
-             --reload-dir /app/backends"
+    command:
+      - sh
+      - -c
+      - |
+        pip install -q -e /app/jarvis-settings-client -e /app/jarvis-config-client -e /app/jarvis-log-client &&
+        python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/api --reload-dir /app/config --reload-dir /app/models --reload-dir /app/services --reload-dir /app/managers --reload-dir /app/backends
     depends_on:
       llm-proxy-model:
         condition: service_started

@@ -132,6 +132,53 @@ case "$choice" in
         ;;
 esac
 
+# Ensure Docker can pass GPUs into containers (required for vLLM in Docker)
+if [[ "$ACCELERATION" == "cuda" ]] && command -v docker >/dev/null 2>&1; then
+    DOCKER_GPU_OK=false
+    if docker info 2>/dev/null | grep -q "nvidia"; then
+        DOCKER_GPU_OK=true
+    fi
+
+    if [[ "$DOCKER_GPU_OK" == "true" ]]; then
+        echo -e "${GREEN}✅ Docker GPU passthrough already configured${NC}"
+    elif [[ "$OS" == "linux" ]]; then
+        echo ""
+        echo -e "${YELLOW}NVIDIA Container Toolkit not found.${NC}"
+        echo -e "${YELLOW}Docker needs this to pass GPUs into containers (required for vLLM in Docker).${NC}"
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            install_ctk="Y"
+        else
+            read -p "Install NVIDIA Container Toolkit? [Y/n]: " install_ctk
+            install_ctk=${install_ctk:-Y}
+        fi
+        if [[ "$install_ctk" =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}Installing NVIDIA Container Toolkit...${NC}"
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+                | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+                | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+                | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y nvidia-container-toolkit
+            sudo nvidia-ctk runtime configure --runtime=docker
+            sudo systemctl restart docker
+            echo -e "${GREEN}✅ NVIDIA Container Toolkit installed and Docker configured${NC}"
+        else
+            echo -e "${YELLOW}Skipping. Docker will not be able to use the GPU.${NC}"
+            echo -e "${YELLOW}You can install later:${NC}"
+            echo -e "${YELLOW}  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html${NC}"
+        fi
+    elif [[ "$OS" == "windows" ]]; then
+        echo ""
+        echo -e "${YELLOW}Docker Desktop GPU passthrough not detected.${NC}"
+        echo -e "${YELLOW}Docker Desktop uses WSL2 for GPU access. Please ensure:${NC}"
+        echo -e "${YELLOW}  1. WSL2 backend is enabled in Docker Desktop settings${NC}"
+        echo -e "${YELLOW}  2. WSL kernel is up to date: ${NC}${BLUE}wsl --update${NC}"
+        echo -e "${YELLOW}  3. NVIDIA drivers are up to date (Game Ready or Studio)${NC}"
+        echo -e "${YELLOW}  See: https://docs.docker.com/desktop/features/gpu/${NC}"
+    fi
+fi
+
 # Create configuration file
 CONFIG_FILE="$ROOT/.setup_config"
 cat > "$CONFIG_FILE" << EOF
