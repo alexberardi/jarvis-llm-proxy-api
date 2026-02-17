@@ -9,19 +9,17 @@
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Builder — compile wheels, install heavy deps
+# Stage 1: Builder — install precompiled wheels
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# System build dependencies
+# Build-time dependencies (git needed for pip git+ installs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     git \
-    cmake \
     python3.11 \
     python3.11-dev \
     python3.11-venv \
@@ -41,7 +39,7 @@ WORKDIR /build
 COPY requirements-base.txt .
 RUN pip install --no-cache-dir -r requirements-base.txt
 
-# Install vLLM requirements (heavy — torch, triton, vllm from git)
+# Install vLLM from precompiled wheel (no source compilation needed)
 COPY requirements-vllm.txt .
 RUN pip install --no-cache-dir -r requirements-vllm.txt
 
@@ -55,11 +53,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 # Runtime system dependencies
+# gcc is required by torch inductor / triton for JIT CUDA graph compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
+    python3.11-dev \
     libgomp1 \
     curl \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # Make python3.11 the default
@@ -84,6 +85,7 @@ COPY models/ ./models/
 COPY queues/ ./queues/
 COPY scripts/ ./scripts/
 COPY services/ ./services/
+COPY storage/ ./storage/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY main.py .

@@ -20,6 +20,7 @@ from services import adapter_cache
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
 from backends.base import LLMBackendBase
 from services.settings_helpers import (
+    get_bool_setting,
     get_float_setting,
     get_int_setting,
     get_setting,
@@ -75,6 +76,9 @@ class VLLMClient(LLMBackendBase):
         max_num_seqs = get_int_setting(
             "inference.vllm.max_num_seqs", "JARVIS_VLLM_MAX_NUM_SEQS", 256
         )
+        enforce_eager = get_bool_setting(
+            "inference.vllm.enforce_eager", "JARVIS_VLLM_ENFORCE_EAGER", True
+        )
         
         logger.debug(f"🚀 vLLM Debug: Model path: {model_path}")
         logger.debug(f"🚀 vLLM Debug: Chat format: {chat_format}")
@@ -102,7 +106,7 @@ class VLLMClient(LLMBackendBase):
                 "gpu_memory_utilization": gpu_memory_utilization,
                 "max_model_len": max_model_len,
                 "trust_remote_code": True,  # For custom model architectures
-                "enforce_eager": False,  # Use CUDA graphs for better performance
+                "enforce_eager": enforce_eager,  # True = skip CUDA graphs (saves VRAM, slower); False = compile graphs (faster, needs more VRAM)
                 "disable_log_stats": True,  # Reduce log noise
                 # Batching parameters to reduce latency spikes
                 "max_num_batched_tokens": max_num_batched_tokens,

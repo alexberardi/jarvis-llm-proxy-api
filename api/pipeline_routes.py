@@ -21,7 +21,7 @@ from services.pipeline_service import get_pipeline_service
 
 logger = logging.getLogger("uvicorn")
 
-require_superuser = create_superuser_auth(get_auth_url)
+require_superuser = create_superuser_auth(get_auth_url())
 
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
 
