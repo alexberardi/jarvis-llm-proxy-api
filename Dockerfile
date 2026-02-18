@@ -94,7 +94,7 @@ COPY pyproject.toml .
 # Create directories that may be needed at runtime
 RUN mkdir -p /app/.models /app/logs /tmp/jarvis-adapters
 
-# API (8000) + Model service (8008)
-EXPOSE 8000 8008
+# API (7704) + Model service (8008 internal)
+EXPOSE 7704 8008
 
 # No CMD — each compose service specifies its own command
