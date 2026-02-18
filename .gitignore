@@ -286,7 +286,6 @@ docker-compose.override.yaml
 prod.env
 *.env
 adapters/
-storage/
 spike_*.json
 tools/
 
