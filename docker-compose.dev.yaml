@@ -57,19 +57,19 @@ x-common: &common
 
 services:
   # --------------------------------------------------------------------------
-  # API Server (port 8000) — FastAPI app with hot reload
+  # API Server (port 7704) — FastAPI app with hot reload
   # --------------------------------------------------------------------------
   llm-proxy-api:
     <<: *common
     container_name: llm-proxy-api
     ports:
-      - "${SERVER_PORT:-8000}:8000"
+      - "${SERVER_PORT:-7704}:7704"
     command:
       - sh
       - -c
       - |
         pip install -q -e /app/jarvis-settings-client -e /app/jarvis-config-client -e /app/jarvis-log-client &&
-        python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/api --reload-dir /app/config --reload-dir /app/models --reload-dir /app/services --reload-dir /app/managers --reload-dir /app/backends
+        python -m uvicorn main:app --host 0.0.0.0 --port 7704 --reload --reload-dir /app/api --reload-dir /app/config --reload-dir /app/models --reload-dir /app/services --reload-dir /app/managers --reload-dir /app/backends
     depends_on:
       llm-proxy-model:
         condition: service_started
@@ -81,7 +81,7 @@ services:
     <<: *common
     container_name: llm-proxy-model
     ports:
-      - "${MODEL_SERVICE_PORT:-8008}:8008"
+      - "${MODEL_SERVICE_PORT:-7705}:8008"
     command: >
       python -m uvicorn services.model_service:app
       --host 0.0.0.0

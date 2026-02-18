@@ -25,7 +25,7 @@ Usage:
 
 Environment:
     JARVIS_ADMIN_TOKEN  Admin token for authentication
-    LLM_PROXY_URL       API URL (default: http://localhost:8010)
+    LLM_PROXY_URL       API URL (default: http://localhost:7705)
 """
 
 import argparse
@@ -294,7 +294,7 @@ Examples:
         "--url",
         type=str,
         default=None,
-        help="API URL (defaults to LLM_PROXY_URL or http://localhost:8010)",
+        help="API URL (defaults to LLM_PROXY_URL or http://localhost:7705)",
     )
 
     # Parse known args to allow arbitrary --key=value pairs
@@ -307,7 +307,7 @@ Examples:
         print("Set the environment variable or use --token")
         return 1
 
-    base_url = args.url or os.getenv("LLM_PROXY_URL", "http://localhost:8010")
+    base_url = args.url or os.getenv("LLM_PROXY_URL", "http://localhost:7705")
 
     # Handle --list
     if args.list:
