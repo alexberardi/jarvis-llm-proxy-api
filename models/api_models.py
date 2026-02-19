@@ -66,7 +66,6 @@ class ChatCompletionRequest(APIModel):
     response_format: Optional[ResponseFormat] = None
     # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
     include_date_context: Optional[bool] = None  # If true, extract date keys from input
-    resolve_dates: Optional[bool] = None  # If true, resolve date keys to ISO datetimes via MCP
     adapter_settings: Optional[AdapterSettings] = None  # Per-request LoRA adapter selection
 
 
@@ -91,7 +90,6 @@ class ChatCompletionResponse(APIModel):
     usage: Usage
     # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
     date_keys: Optional[List[str]] = None  # Extracted date keys when include_date_context=true
-    resolved_datetimes: Optional[List[str]] = None  # ISO datetimes when resolve_dates=true
 
 
 class ErrorDetail(APIModel):

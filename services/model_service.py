@@ -11,7 +11,6 @@ from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest
 from services.chat_runner import run_chat_completion
 from services.date_keys import extract_date_keys
-from services.mcp_client import get_mcp_client
 from api.settings_routes import router as settings_router
 
 load_dotenv()
@@ -147,26 +146,9 @@ def _atexit_cleanup():
 atexit.register(_atexit_cleanup)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Connect MCP client on model service startup."""
-    try:
-        mcp_client = get_mcp_client()
-        await mcp_client.connect()
-    except Exception as e:
-        logger.warning(f"MCP client connection failed (non-fatal): {e}")
-
-
 @app.on_event("shutdown")
 async def shutdown_event():
     global _cleanup_done
-    # Disconnect MCP client
-    try:
-        mcp_client = get_mcp_client()
-        await mcp_client.disconnect()
-    except Exception as e:
-        logger.debug(f"MCP client disconnect error: {e}")
-
     if _cleanup_done:
         return
     _cleanup_done = True
@@ -230,22 +212,12 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
 
     # Extract date keys if requested
     date_keys: Optional[List[str]] = None
-    resolved_datetimes: Optional[List[str]] = None
     if req.include_date_context:
         user_text = _get_user_text(req)
         if user_text:
             logger.debug(f"🗓️  Extracting date keys from: {user_text!r}")
             date_keys = extract_date_keys(user_text)
             logger.debug(f"🗓️  Extracted date keys: {date_keys}")
-
-            # Opt-in: resolve via MCP
-            if req.resolve_dates and date_keys:
-                mcp_client = get_mcp_client()
-                if mcp_client.is_connected():
-                    mcp_result = await mcp_client.resolve_date_keys(date_keys)
-                    if mcp_result:
-                        resolved_datetimes = mcp_result.get("resolved")
-                        logger.debug(f"🗓️  Resolved datetimes: {resolved_datetimes}")
 
     result = await run_chat_completion(model_manager, req, allow_images=True)
     preview = (result.content or "")[:1000]
@@ -255,8 +227,6 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     response = {"content": result.content, "usage": result.usage}
     if date_keys is not None:
         response["date_keys"] = date_keys
-    if resolved_datetimes is not None:
-        response["resolved_datetimes"] = resolved_datetimes
     return response
 
 
