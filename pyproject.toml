@@ -3,7 +3,14 @@ name = "jarvis-llm-proxy-api"
 version = "0.1.0"
 description = "LLM proxy API for Jarvis voice assistant"
 requires-python = ">=3.10"
-# Dependencies managed via requirements*.txt for platform flexibility
+# Full dependencies managed via requirements*.txt for platform flexibility.
+# Minimal deps here so `pip install -e .` works for migrations.
+dependencies = [
+    "alembic>=1.12.1",
+    "sqlalchemy>=2.0.23",
+    "psycopg2-binary>=2.9.9",
+    "python-dotenv",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
