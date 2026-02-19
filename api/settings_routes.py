@@ -203,6 +203,59 @@ async def get_setting(
     )
 
 
+# NOTE: PUT "/" must be declared BEFORE PUT "/{key:path}" because
+# Starlette's {key:path} wildcard will match the empty path, shadowing the bulk endpoint.
+@router.put("/", response_model=BulkUpdateResponse)
+async def bulk_update_settings(
+    body: BulkSettingUpdate,
+    request: Request,
+    _auth: None = Depends(require_app_auth),
+) -> BulkUpdateResponse:
+    """Update multiple settings at once.
+
+    The response indicates whether any settings require a model reload.
+    """
+    calling_app = getattr(request.state, "calling_app_id", None)
+    service = get_settings_service()
+
+    # Validate all keys first
+    invalid_keys = [k for k in body.settings.keys() if k not in service._definitions]
+    if invalid_keys:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": f"Unknown setting keys: {', '.join(invalid_keys)}",
+                    "code": "invalid_keys",
+                }
+            },
+        )
+
+    results: dict[str, bool] = {}
+    for key, value in body.settings.items():
+        results[key] = service.set(key, value)
+
+    # Check if any updated settings require reload
+    requires_reload = False
+    for key, success in results.items():
+        if success and service._definitions[key].requires_reload:
+            requires_reload = True
+            break
+
+    total_updated = sum(1 for v in results.values() if v)
+    total_failed = sum(1 for v in results.values() if not v)
+
+    logger.info(f"Bulk update: {total_updated} updated, {total_failed} failed by app: {calling_app}")
+
+    return BulkUpdateResponse(
+        results=results,
+        total_updated=total_updated,
+        total_failed=total_failed,
+        requires_reload=requires_reload,
+    )
+
+
 @router.put("/{key:path}", response_model=UpdateResponse)
 async def update_setting(
     key: str,
@@ -266,55 +319,6 @@ async def update_setting(
         key=key,
         requires_reload=definition.requires_reload,
         message=message,
-    )
-
-
-@router.put("/", response_model=BulkUpdateResponse)
-async def bulk_update_settings(
-    body: BulkSettingUpdate,
-    request: Request,
-    _auth: None = Depends(require_app_auth),
-) -> BulkUpdateResponse:
-    """Update multiple settings at once.
-
-    The response indicates whether any settings require a model reload.
-    """
-    calling_app = getattr(request.state, "calling_app_id", None)
-    service = get_settings_service()
-
-    # Validate all keys first
-    invalid_keys = [k for k in body.settings.keys() if k not in service._definitions]
-    if invalid_keys:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "type": "invalid_request",
-                    "message": f"Unknown setting keys: {', '.join(invalid_keys)}",
-                    "code": "invalid_keys",
-                }
-            },
-        )
-
-    results = service.set_bulk(body.settings)
-
-    # Check if any updated settings require reload
-    requires_reload = False
-    for key, success in results.items():
-        if success and service._definitions[key].requires_reload:
-            requires_reload = True
-            break
-
-    total_updated = sum(1 for v in results.values() if v)
-    total_failed = sum(1 for v in results.values() if not v)
-
-    logger.info(f"Bulk update: {total_updated} updated, {total_failed} failed by app: {calling_app}")
-
-    return BulkUpdateResponse(
-        results=results,
-        total_updated=total_updated,
-        total_failed=total_failed,
-        requires_reload=requires_reload,
     )
 
 

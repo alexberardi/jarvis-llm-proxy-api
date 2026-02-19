@@ -27,16 +27,21 @@ async def _get_health_status():
     timeout = get_float_setting(
         "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code != 200:
-            return {
-                "status": "degraded",
-                "reason": f"Model service error {resp.status_code}",
-                "body": resp.text[:200],
-            }
-        data = resp.json()
-        return {"status": "healthy", "model_service": data}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return {
+                    "status": "degraded",
+                    "reason": f"Model service error {resp.status_code}",
+                    "body": resp.text[:200],
+                }
+            data = resp.json()
+            return {"status": "healthy", "model_service": data}
+    except httpx.ConnectError:
+        return {"status": "degraded", "reason": f"Cannot reach model service at {url}"}
+    except httpx.TimeoutException:
+        return {"status": "degraded", "reason": "Model service health check timed out"}
 
 
 @router.get("/health")
