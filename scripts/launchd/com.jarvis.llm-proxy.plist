@@ -25,7 +25,7 @@
         <key>RUN_MODEL_SERVICE</key>
         <string>true</string>
         <key>MODEL_SERVICE_PORT</key>
-        <string>8008</string>
+        <string>7705</string>
         <key>RUN_QUEUE_WORKER</key>
         <string>true</string>
     </dict>

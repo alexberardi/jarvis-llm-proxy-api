@@ -19,7 +19,7 @@ x-common: &common
   env_file: .env
   environment:
     - VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+    - MODEL_SERVICE_URL=http://llm-proxy-model:7705
   extra_hosts:
     - "host.docker.internal:host-gateway"
   volumes:
@@ -78,17 +78,17 @@ services:
         condition: service_started
 
   # --------------------------------------------------------------------------
-  # Model Service (port 8008) — Standalone model inference
+  # Model Service (port 7705) — Standalone model inference
   # --------------------------------------------------------------------------
   llm-proxy-model:
     <<: *common
     container_name: llm-proxy-model
     ports:
-      - "${MODEL_SERVICE_PORT:-8008}:8008"
+      - "${MODEL_SERVICE_PORT:-7705}:7705"
     command: >
       python -m uvicorn services.model_service:app
       --host 0.0.0.0
-      --port 8008
+      --port 7705
 
   # --------------------------------------------------------------------------
   # Queue Worker — RQ worker for async jobs (training, vision, etc.)
@@ -98,7 +98,7 @@ services:
     container_name: llm-proxy-worker
     environment:
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - MODEL_SERVICE_URL=http://llm-proxy-model:8008
+      - MODEL_SERVICE_URL=http://llm-proxy-model:7705
       - LLM_PROXY_PROCESS_ROLE=worker
     command: python scripts/queue_worker.py
     depends_on:

@@ -381,7 +381,7 @@ cleanup() {
     # Collect all PIDs to kill (uvicorn processes on our ports)
     local pids_to_kill=()
     local api_port="${SERVER_PORT:-8000}"
-    local model_port="${MODEL_SERVICE_PORT:-8008}"
+    local model_port="${MODEL_SERVICE_PORT:-7705}"
 
     # Find uvicorn processes by port (more reliable than tracking pipeline PIDs)
     for port in "$api_port" "$model_port"; do

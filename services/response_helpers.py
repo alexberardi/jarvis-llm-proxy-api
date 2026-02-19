@@ -22,7 +22,6 @@ def create_openai_response(
     model_name: str,
     usage: Optional[Dict] = None,
     date_keys: Optional[List[str]] = None,
-    resolved_datetimes: Optional[List[str]] = None,
 ) -> ChatCompletionResponse:
     """Create an OpenAI-style chat completion response."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
@@ -44,7 +43,6 @@ def create_openai_response(
         ],
         usage=Usage(**usage),
         date_keys=date_keys,
-        resolved_datetimes=resolved_datetimes,
     )
 
 

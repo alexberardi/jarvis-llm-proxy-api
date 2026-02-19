@@ -68,7 +68,7 @@ app.include_router(settings_router)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize service config, remote logging, MCP client, and pre-warm DB on startup."""
+    """Initialize service config, remote logging, and pre-warm DB on startup."""
     # Service discovery first (auth URL, logs URL, etc.)
     try:
         from db.session import engine as db_engine
@@ -82,14 +82,6 @@ async def startup_event():
             pass
 
     setup_remote_logging()
-
-    # Connect to jarvis-mcp (non-blocking, service works without it)
-    try:
-        from services.mcp_client import get_mcp_client
-        mcp_client = get_mcp_client()
-        await mcp_client.connect()
-    except Exception as e:
-        logger.warning(f"MCP client connection failed (non-fatal): {e}")
 
     # Pre-warm database connection to avoid first-request failures
     try:
@@ -109,15 +101,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up MCP client, service config, and logging handlers on shutdown."""
-    # Disconnect MCP client
-    try:
-        from services.mcp_client import get_mcp_client
-        mcp_client = get_mcp_client()
-        await mcp_client.disconnect()
-    except Exception as e:
-        logger.debug(f"MCP client disconnect error (non-fatal): {e}")
-
+    """Clean up service config and logging handlers on shutdown."""
     shutdown_service_config()
     for handler in logger.handlers:
         if hasattr(handler, "close"):
