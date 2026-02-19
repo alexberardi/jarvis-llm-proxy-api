@@ -692,7 +692,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         key="model_service.url",
         category="model_service",
         value_type="string",
-        default="http://127.0.0.1:8008",
+        default="http://127.0.0.1:7705",
         description="Internal model service URL",
         env_fallback="MODEL_SERVICE_URL",
     ),
