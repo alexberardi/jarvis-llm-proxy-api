@@ -239,10 +239,14 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     preview = (result.content or "")[:1000]
     logger.debug(f"🧾 /internal/model/chat response_preview={preview!r}")
     logger.info(f"✅ /internal/model/chat model={req.model} done")
-    
+
     response = {"content": result.content, "usage": result.usage}
     if date_keys is not None:
         response["date_keys"] = date_keys
+    if result.tool_calls is not None:
+        response["tool_calls"] = result.tool_calls
+    if result.finish_reason is not None:
+        response["finish_reason"] = result.finish_reason
     return response
 
 

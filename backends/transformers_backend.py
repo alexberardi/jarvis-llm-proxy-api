@@ -492,7 +492,7 @@ class TransformersClient(LLMBackendBase):
             })
 
         content = self.chat_with_temperature(dict_messages, params.temperature)
-        return ChatResult(content=content, usage=self.last_usage)
+        return ChatResult(content=content, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""

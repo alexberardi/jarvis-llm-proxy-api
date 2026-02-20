@@ -180,7 +180,7 @@ class GGUFVisionClient(LLMBackendBase):
                 f"({tokens_per_second:.1f} tok/s)"
             )
 
-            return ChatResult(content=content, usage=usage)
+            return ChatResult(content=content, usage=usage, tool_calls=None, finish_reason="stop")
 
     def _convert_messages(
         self, messages: List[NormalizedMessage]

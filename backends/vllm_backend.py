@@ -319,7 +319,7 @@ class VLLMClient(LLMBackendBase):
             lora_request=per_request_lora,
         )
 
-        return ChatResult(content=response_text, usage=usage)
+        return ChatResult(content=response_text, usage=usage, tool_calls=None, finish_reason="stop")
 
     def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
         """Convert messages to prompt based on chat format"""

@@ -47,8 +47,13 @@ run_diagnostics
 setup_signal_handlers
 
 # Start model service if configured
+# Auto-disable on macOS: model service requires vLLM which is Linux-only
 MODEL_SERVICE_PORT="${MODEL_SERVICE_PORT:-7705}"
-RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
+if [[ "$(uname)" == "Darwin" ]]; then
+    RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-false}"
+else
+    RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
+fi
 MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
 MODEL_SERVICE_TOKEN_EXPORT="${MODEL_SERVICE_TOKEN:-${LLM_PROXY_INTERNAL_TOKEN:-}}"
 

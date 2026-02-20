@@ -297,7 +297,7 @@ class MlxClient(LLMBackendBase):
 
         formatted = self._to_dict_messages(messages)
         content = self.chat_with_temperature(formatted, params.temperature)
-        return ChatResult(content=content, usage=self.last_usage)
+        return ChatResult(content=content, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     async def generate_vision_chat(
         self,
@@ -335,8 +335,8 @@ class MlxClient(LLMBackendBase):
         tokens_per_second = completion_tokens / (end_time - start_time) if end_time > start_time else 0
         logger.debug(f"🚀 [MLX vision] ~{completion_tokens} tokens in {end_time - start_time:.2f}s ({tokens_per_second:.1f} tok/s)")
 
-        return ChatResult(content=response.strip(), usage=self.last_usage)
-    
+        return ChatResult(content=response.strip(), usage=self.last_usage, tool_calls=None, finish_reason="stop")
+
     def process_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Process context without generating a response - for warm-up purposes"""
         try:

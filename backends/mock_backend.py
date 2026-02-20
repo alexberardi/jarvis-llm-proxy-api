@@ -33,7 +33,7 @@ class MockBackend(LLMBackendBase):
             "completion_tokens": len(content.split()),
             "total_tokens": len(combined.split()) + len(content.split()),
         }
-        return ChatResult(content=content, usage=usage)
+        return ChatResult(content=content, usage=usage, tool_calls=None, finish_reason="stop")
 
     async def generate_vision_chat(
         self,
@@ -59,7 +59,7 @@ class MockBackend(LLMBackendBase):
             "completion_tokens": len(content.split()),
             "total_tokens": len(combined.split()) + len(content.split()),
         }
-        return ChatResult(content=content, usage=usage)
+        return ChatResult(content=content, usage=usage, tool_calls=None, finish_reason="stop")
 
     def unload(self) -> None:
         """No-op for mock backend."""
