@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 
 @dataclass
@@ -40,10 +40,14 @@ class GenerationParams:
     grammar: Optional[str] = None  # GBNF grammar for constrained generation
     # Per-request adapter settings: {"hash": str, "scale": float, "enabled": bool}
     adapter_settings: Optional[dict] = None
+    tools: Optional[list] = None  # OpenAI-format tool definitions for native tool calling
+    tool_choice: Optional[Any] = None  # "auto", "none", or {"type": "function", "function": {"name": "..."}}
 
 
 @dataclass
 class ChatResult:
     content: str
     usage: Optional[dict] = None
+    tool_calls: Optional[list] = None  # Structured tool calls from native tool calling
+    finish_reason: Optional[str] = None  # "stop" or "tool_calls"
 

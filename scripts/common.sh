@@ -531,7 +531,7 @@ setup_signal_handlers() {
 start_server() {
     local enable_reload="${1:-true}"
     local host="${2:-0.0.0.0}"
-    local port="${3:-8000}"
+    local port="${3:-${SERVER_PORT:-8000}}"
     
     echo -e "${GREEN}🚀 Starting Jarvis LLM Proxy API...${NC}"
     echo -e "${BLUE}📍 Server will be available at: http://$host:$port${NC}"

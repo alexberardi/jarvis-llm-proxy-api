@@ -57,7 +57,10 @@ def parse_data_url(data_url: str) -> tuple[bytes, str]:
 
 def normalize_message(message: Message) -> NormalizedMessage:
     content_parts: List[Any] = []
-    if isinstance(message.content, str):
+    if message.content is None:
+        # Messages with tool_calls may have no content
+        content_parts.append(TextPart(text=""))
+    elif isinstance(message.content, str):
         content_parts.append(TextPart(text=message.content))
     elif isinstance(message.content, list):
         for part in message.content:
@@ -553,6 +556,13 @@ async def run_chat_completion(
         adapter_settings_dict = req.adapter_settings.model_dump()
         logger.info(f"🧩 Adapter settings: hash={req.adapter_settings.hash}, scale={req.adapter_settings.scale}")
 
+    # Build tool definitions for native tool calling
+    tools_list = None
+    tool_choice = None
+    if req.tools:
+        tools_list = [t.model_dump(exclude_none=True) for t in req.tools]
+        tool_choice = req.tool_choice
+
     params = GenerationParams(
         temperature=req.temperature or 0.7,
         max_tokens=req.max_tokens,
@@ -560,6 +570,8 @@ async def run_chat_completion(
         response_format=response_format_dict,
         grammar=grammar,
         adapter_settings=adapter_settings_dict,
+        tools=tools_list,
+        tool_choice=tool_choice,
     )
 
     try:
@@ -613,6 +625,16 @@ async def run_chat_completion(
 
         final_content = result.content
 
+        # Skip JSON repair when native tool calls are present — the response is structured
+        if result.tool_calls:
+            usage = result.usage
+            return ChatResult(
+                content=final_content,
+                usage=usage,
+                tool_calls=result.tool_calls,
+                finish_reason=result.finish_reason,
+            )
+
         if requires_json:
             repaired_content, json_valid = parse_json_response(final_content)
             schema_error = None
@@ -652,7 +674,12 @@ async def run_chat_completion(
         usage = result.usage
         end_time = time.time()
         # store timing? currently unused
-        return ChatResult(content=final_content, usage=usage)
+        return ChatResult(
+            content=final_content,
+            usage=usage,
+            tool_calls=result.tool_calls,
+            finish_reason=result.finish_reason,
+        )
 
     except HTTPException:
         raise

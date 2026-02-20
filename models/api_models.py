@@ -27,9 +27,33 @@ class ImageContentPart(APIModel):
 ContentPart = Annotated[Union[TextContentPart, ImageContentPart], Field(discriminator="type")]
 
 
+class FunctionDefinition(APIModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ToolDefinition(APIModel):
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
+
+
+class FunctionCall(APIModel):
+    name: str
+    arguments: str  # JSON string
+
+
+class ToolCall(APIModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class Message(APIModel):
     role: str
-    content: Union[str, List[ContentPart]]
+    content: Optional[Union[str, List[ContentPart]]] = None
+    tool_calls: Optional[List[ToolCall]] = None
+    tool_call_id: Optional[str] = None
 
 
 class ResponseFormat(APIModel):
@@ -64,6 +88,8 @@ class ChatCompletionRequest(APIModel):
     max_tokens: Optional[int] = None
     stream: Optional[bool] = None
     response_format: Optional[ResponseFormat] = None
+    tools: Optional[List[ToolDefinition]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
     include_date_context: Optional[bool] = None  # If true, extract date keys from input
     adapter_settings: Optional[AdapterSettings] = None  # Per-request LoRA adapter selection

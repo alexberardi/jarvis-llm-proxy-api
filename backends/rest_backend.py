@@ -360,7 +360,7 @@ class RestClient(LLMBackendBase):
                 self.chat_with_temperature(dict_messages, params.temperature)
             )
 
-        return ChatResult(content=content, usage=self.last_usage)
+        return ChatResult(content=content, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     async def generate_vision_chat(
         self,
@@ -434,7 +434,7 @@ class RestClient(LLMBackendBase):
             else:
                 logger.debug(f"🚀 [Vision] Generated response in {total_time:.2f}s")
 
-            return ChatResult(content=content.strip(), usage=self.last_usage)
+            return ChatResult(content=content.strip(), usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
         except Exception as e:
             logger.error(f"❌ Error in vision chat: {e}")

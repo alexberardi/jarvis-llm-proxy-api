@@ -187,6 +187,8 @@ class GGUFClient(LLMBackendBase):
             "f16_kv": f16_kv,
             "flash_attn": self.flash_attn,
         }
+        if chat_format:
+            self._llama_init_kwargs["chat_format"] = chat_format
 
         logger.debug(f"🔍 Debug: LLAMA_METAL env var: {os.getenv('LLAMA_METAL', 'not set')}")
         logger.debug(f"🔍 Debug: Metal will be enabled: {os.getenv('LLAMA_METAL', 'false').lower() == 'true'}")
@@ -607,7 +609,7 @@ class GGUFClient(LLMBackendBase):
                 comp = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
                 logger.info(f"⏱️  vLLM {comp} tokens in {elapsed:.2f}s ({comp/elapsed:.0f} tok/s, max_tokens={effective_max_tokens})")
 
-                return ChatResult(content=response_text, usage=usage)
+                return ChatResult(content=response_text, usage=usage, tool_calls=None, finish_reason="stop")
             else:
                 # Use llama.cpp backend
                 # Note: llama.cpp's create_chat_completion automatically detects chat format from the model
@@ -623,7 +625,14 @@ class GGUFClient(LLMBackendBase):
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
                 }
-                if params.grammar:
+                # Native tool calling: pass tools to llama-cpp-python
+                # When tools are present, skip GBNF grammar (tool calling has its own constrained generation)
+                if params.tools:
+                    completion_kwargs["tools"] = params.tools
+                    if params.tool_choice is not None:
+                        completion_kwargs["tool_choice"] = params.tool_choice
+                    logger.info("🔧 Native tool calling enabled for llama.cpp request (%d tools)", len(params.tools))
+                elif params.grammar:
                     try:
                         from llama_cpp import LlamaGrammar
                         completion_kwargs["grammar"] = LlamaGrammar.from_string(params.grammar)
@@ -632,7 +641,9 @@ class GGUFClient(LLMBackendBase):
                         logger.warning(f"⚠️ Failed to apply GGUF grammar: {e}")
                 response = self.model.create_chat_completion(**completion_kwargs)
 
-                content = response["choices"][0]["message"]["content"] or ""  # type: ignore
+                content = response["choices"][0]["message"].get("content") or ""  # type: ignore
+                tool_calls_raw = response["choices"][0]["message"].get("tool_calls")  # type: ignore
+                finish_reason = response["choices"][0].get("finish_reason", "stop")  # type: ignore
                 usage = response.get("usage", {})  # type: ignore
                 self.last_usage = usage
 
@@ -642,7 +653,12 @@ class GGUFClient(LLMBackendBase):
                 tok_s = comp / elapsed if elapsed > 0 else 0
                 logger.info(f"⏱️  llama.cpp {comp} completion + {prompt_t} prompt tokens in {elapsed:.2f}s ({tok_s:.0f} tok/s, max_tokens={effective_max_tokens})")
 
-                return ChatResult(content=content, usage=usage)
+                return ChatResult(
+                    content=content,
+                    usage=usage,
+                    tool_calls=tool_calls_raw,
+                    finish_reason=finish_reason,
+                )
 
     def _handle_adapter_switch(self, adapter_settings: dict) -> None:
         """Check adapter_settings and reload model if adapter changed.
