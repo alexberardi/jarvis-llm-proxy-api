@@ -162,7 +162,7 @@ class TransformersVisionClient(LLMBackendBase):
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
             }
-            return ChatResult(content=text, usage=self.last_usage)
+            return ChatResult(content=text, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
         if self.model_type in {"qwen3vl", "qwen2vl", "qwen2_5_vl"} and Qwen3VLForConditionalGeneration:
             proc_messages = self._to_processor_messages_smol(messages)
@@ -197,7 +197,7 @@ class TransformersVisionClient(LLMBackendBase):
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
             }
-            return ChatResult(content=text, usage=self.last_usage)
+            return ChatResult(content=text, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
         proc_messages, images = self._to_processor_messages(messages)
 
@@ -248,7 +248,7 @@ class TransformersVisionClient(LLMBackendBase):
             "total_tokens": total_tokens,
         }
 
-        return ChatResult(content=text, usage=self.last_usage)
+        return ChatResult(content=text, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     def generate_text_chat(
         self,

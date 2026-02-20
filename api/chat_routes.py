@@ -79,9 +79,16 @@ async def chat_completions(req: ChatCompletionRequest):
             content = data.get("content")
             usage = data.get("usage")
             date_keys = data.get("date_keys")  # Jarvis extension
+            tool_calls = data.get("tool_calls")  # Native tool calling
+            finish_reason = data.get("finish_reason")  # Native tool calling
             model_name = req.model
             return create_openai_response(
-                content=content, model_name=model_name, usage=usage, date_keys=date_keys
+                content=content,
+                model_name=model_name,
+                usage=usage,
+                date_keys=date_keys,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
             )
     except HTTPException:
         raise

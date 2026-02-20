@@ -297,7 +297,7 @@ class VLLMVisionClient(LLMBackendBase):
             }
             self.last_usage = usage
 
-            return ChatResult(content=generated_text, usage=usage)
+            return ChatResult(content=generated_text, usage=usage, tool_calls=None, finish_reason="stop")
 
         except Exception as e:
             logger.error(f"❌ vLLM Vision generation error: {e}")
