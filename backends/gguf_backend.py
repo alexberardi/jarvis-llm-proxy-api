@@ -233,12 +233,64 @@ class GGUFClient(LLMBackendBase):
     # ADAPTER SUPPORT (constructor-based reload)
     # =========================================================================
 
+    def _check_adapter_compatibility(self, adapter_dir) -> bool:
+        """Check if adapter was trained for the currently loaded base model.
+
+        Reads adapter_config.json and compares base_model_name_or_path against
+        the loaded model path. This prevents loading a Hermes adapter on a Qwen
+        model (or similar architecture mismatches).
+
+        Returns:
+            True if compatible or check cannot be performed, False if incompatible.
+        """
+        import json
+        from pathlib import Path
+
+        config_path = Path(adapter_dir) / "adapter_config.json"
+        if not config_path.is_file():
+            logger.debug("No adapter_config.json found, skipping compatibility check")
+            return True
+
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to read adapter_config.json: {e}")
+            return True
+
+        adapter_base = config.get("base_model_name_or_path", "")
+        if not adapter_base:
+            return True
+
+        # Normalize for comparison: extract the model identifier
+        # e.g. "NousResearch/Hermes-3-Llama-3.1-8B" -> "hermes-3-llama-3.1-8b"
+        adapter_base_lower = adapter_base.rsplit("/", 1)[-1].lower()
+        model_path_lower = self.model_path.rsplit("/", 1)[-1].lower()
+
+        # Check if the adapter's base model name appears in the loaded model path
+        # or vice versa (handles GGUF filenames like "Hermes-3-Llama-3.1-8B-Q4_K_M.gguf")
+        compatible = (
+            adapter_base_lower in model_path_lower
+            or model_path_lower.replace(".gguf", "").replace("-", "").startswith(
+                adapter_base_lower.replace("-", "")[:20]
+            )
+        )
+
+        if not compatible:
+            logger.warning(
+                "Adapter/model mismatch: adapter trained on '%s', loaded model is '%s'",
+                adapter_base,
+                self.model_path,
+            )
+        return compatible
+
     def _resolve_gguf_adapter(self, adapter_hash: str) -> Optional[str]:
         """Resolve adapter hash to a GGUF adapter file path.
 
         Looks up the adapter via adapter_cache, then checks for:
-        1. gguf/adapter.gguf (preferred, from dual-format training)
-        2. Any *.gguf file in the adapter directory root (fallback)
+        1. Adapter compatibility with the loaded base model
+        2. gguf/adapter.gguf (preferred, from dual-format training)
+        3. Any *.gguf file in the adapter directory root (fallback)
 
         Returns:
             Path to the .gguf adapter file, or None if not found.
@@ -248,6 +300,11 @@ class GGUFClient(LLMBackendBase):
         adapter_dir = adapter_cache.get_adapter_path(adapter_hash)
         if adapter_dir is None:
             logger.warning(f"Adapter {adapter_hash} not found in cache/storage")
+            return None
+
+        # Check adapter was trained for the currently loaded model
+        if not self._check_adapter_compatibility(adapter_dir):
+            logger.warning(f"Skipping incompatible adapter {adapter_hash} for model {self.model_path}")
             return None
 
         # Preferred: gguf/adapter.gguf from dual-format training output
@@ -665,17 +722,21 @@ class GGUFClient(LLMBackendBase):
 
         Must be called with self._lock held.
 
-        Sticky behavior: if adapter_settings is provided but has no hash,
-        the current adapter stays loaded (avoids unnecessary reloads).
+        If no adapter is requested (hash is None/empty or disabled), any
+        currently loaded adapter is unloaded to restore the base model.
         """
         adapter_hash = adapter_settings.get("hash")
         adapter_scale = adapter_settings.get("scale", 1.0)
         adapter_enabled = adapter_settings.get("enabled", True)
 
         if not adapter_hash or not adapter_enabled:
-            # No adapter requested or explicitly disabled — keep current state
-            if adapter_hash and not adapter_enabled:
-                logger.debug(f"🧩 [GGUF] Adapter disabled by request: hash={adapter_hash}")
+            # No adapter requested — unload current adapter if one is active
+            if self._current_adapter_path is not None:
+                logger.info("🧩 [GGUF] No adapter requested, unloading current adapter")
+                self._reload_with_adapter(None)
+                self._current_adapter_hash = None
+                self._current_adapter_path = None
+                self._current_adapter_scale = 1.0
             return
 
         # Same adapter already loaded — skip reload
