@@ -862,11 +862,19 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
     ),
     # ==================== training extras ====================
     SettingDefinition(
+        key="training.backend",
+        category="training",
+        value_type="string",
+        default="auto",
+        description="Training backend: auto (MLX on Apple Silicon, Transformers elsewhere), mlx, or transformers",
+        env_fallback="JARVIS_ADAPTER_TRAIN_BACKEND",
+    ),
+    SettingDefinition(
         key="training.train_cmd",
         category="training",
         value_type="string",
         default="python3 scripts/train_adapter.py",
-        description="Adapter training command",
+        description="Adapter training command (overrides backend auto-detection if changed from default)",
         env_fallback="JARVIS_ADAPTER_TRAIN_CMD",
     ),
     SettingDefinition(

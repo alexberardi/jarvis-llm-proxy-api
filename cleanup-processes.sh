@@ -27,8 +27,8 @@ pkill -9 -f "uvicorn" 2>/dev/null && echo "Uvicorn processes killed" || echo "No
 
 # Kill processes on API ports
 echo -e "${BLUE}Killing processes on API ports 8000 and 8010...${NC}"
-lsof -ti:8000 | xargs -r kill -9 2>/dev/null && echo "Port 8000 cleared" || echo "Port 8000 was free"
-lsof -ti:8010 | xargs -r kill -9 2>/dev/null && echo "Port 8010 cleared" || echo "Port 8010 was free"
+lsof -ti:7704 | xargs -r kill -9 2>/dev/null && echo "Port 7704 cleared" || echo "Port 7704 was free"
+lsof -ti:7705 | xargs -r kill -9 2>/dev/null && echo "Port 7705 cleared" || echo "Port 7705 was free"
 
 # Kill debug port processes
 DEBUG_PORT="${DEBUG_PORT:-5678}"
