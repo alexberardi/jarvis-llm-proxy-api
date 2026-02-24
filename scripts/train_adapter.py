@@ -22,17 +22,29 @@ def _read_json(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _extract_examples(dataset_ref: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+def _extract_examples(
+    dataset_ref: Dict[str, Any],
+) -> List[Tuple[str, Dict[str, Any], str | None, str | None]]:
+    """Extract examples from dataset.
+
+    Returns list of (voice_command, tool_call, formatted_prompt, formatted_completion) tuples.
+    formatted_prompt/formatted_completion are None when the dataset was built without a provider.
+    """
     data = dataset_ref.get("data") if isinstance(dataset_ref, dict) else None
     payload = data if isinstance(data, dict) else dataset_ref
     commands = payload.get("commands", []) if isinstance(payload, dict) else []
-    examples: List[Tuple[str, Dict[str, Any]]] = []
+    examples: List[Tuple[str, Dict[str, Any], str | None, str | None]] = []
     for cmd in commands:
         for ex in cmd.get("examples", []):
             voice = ex.get("voice_command")
             tool_call = ex.get("expected_tool_call")
             if voice and tool_call:
-                examples.append((voice, tool_call))
+                examples.append((
+                    voice,
+                    tool_call,
+                    ex.get("formatted_prompt"),
+                    ex.get("formatted_completion"),
+                ))
     return examples
 
 
@@ -52,20 +64,23 @@ class TokenizedExample:
 
 
 class PromptDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenizer, examples: List[Tuple[str, Dict[str, Any]]], max_len: int):
+    def __init__(self, tokenizer, examples: List[Tuple[str, Dict[str, Any], str | None, str | None]], max_len: int):
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.items: List[TokenizedExample] = []
-        for voice, tool_call in examples:
-            prompt = _format_prompt(voice)
-            # Wrap tool_call in OpenAI-compatible response format
-            response = {
-                "message": "",
-                "tool_calls": [tool_call],
-                "error": None
-            }
-            completion = json.dumps(response, ensure_ascii=False)
-            full_text = prompt + " " + completion
+        for voice, tool_call, fmt_prompt, fmt_completion in examples:
+            prompt = fmt_prompt if fmt_prompt else _format_prompt(voice)
+            if fmt_completion:
+                completion = fmt_completion
+            else:
+                # Fallback: raw Jarvis JSON (backward compatible)
+                response = {
+                    "message": "",
+                    "tool_calls": [tool_call],
+                    "error": None
+                }
+                completion = " " + json.dumps(response, ensure_ascii=False)
+            full_text = prompt + completion
             prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
             full = tokenizer(full_text, add_special_tokens=True, truncation=True, max_length=max_len)
             input_ids = full["input_ids"]

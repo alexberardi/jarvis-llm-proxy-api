@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -222,10 +223,41 @@ def _resolve_venv_python() -> str:
     return sys.executable
 
 
+def _is_apple_silicon() -> bool:
+    """Check if running on Apple Silicon (macOS arm64)."""
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def _resolve_training_command() -> str:
+    """Resolve the training command based on backend setting and platform.
+
+    Priority:
+    1. Explicit JARVIS_ADAPTER_TRAIN_CMD (preserves existing override behavior)
+    2. Backend auto-detection: MLX on Apple Silicon, Transformers elsewhere
+    """
+    explicit_cmd = get_setting("training.train_cmd", "JARVIS_ADAPTER_TRAIN_CMD", "")
+
+    # Check if the default was overridden by user
+    default_cmd = "python3 scripts/train_adapter.py"
+    if explicit_cmd and explicit_cmd != default_cmd:
+        return explicit_cmd
+
+    # Auto-detect backend
+    backend = get_setting(
+        "training.backend", "JARVIS_ADAPTER_TRAIN_BACKEND", "auto"
+    )
+    if backend == "auto":
+        backend = "mlx" if _is_apple_silicon() else "transformers"
+
+    if backend == "mlx":
+        return "python3 scripts/train_adapter_mlx.py"
+    return default_cmd
+
+
 def _run_training_command(env: Dict[str, str], timeout_s: int) -> None:
-    cmd = get_setting("training.train_cmd", "JARVIS_ADAPTER_TRAIN_CMD", "")
+    cmd = _resolve_training_command()
     if not cmd:
-        raise AdapterTrainingError("JARVIS_ADAPTER_TRAIN_CMD is not set")
+        raise AdapterTrainingError("No training command resolved (check JARVIS_ADAPTER_TRAIN_CMD or training.backend)")
     args = shlex.split(cmd)
     if args and args[0] in ("python", "python3"):
         args[0] = _resolve_venv_python()
@@ -506,6 +538,7 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
             "JARVIS_TRAIN_PARAMS_PATH": str(params_path),
             "JARVIS_TRAIN_OUTPUT_DIR": str(output_dir),
             "JARVIS_TRAIN_LOG_PATH": str(work_root / "train.log"),
+            "JARVIS_TRAIN_PROVIDER_NAME": request.get("provider_name", ""),
             "PYTHONUNBUFFERED": "1",
         }
     )
