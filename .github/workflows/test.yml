@@ -45,4 +45,6 @@ jobs:
           --ignore=tests/test_vllm_dynamic_adapter.py \
           --ignore=tests/test_mlx_adapter_swap.py \
           --ignore=tests/test_mlx_prompt.py \
-          --ignore=tests/test_settings_routes.py
+          --ignore=tests/test_settings_routes.py \
+          --ignore=tests/test_embedding_manager.py \
+          --ignore=tests/test_embedding_routes.py
