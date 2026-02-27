@@ -47,6 +47,9 @@ jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-clie
 gguf>=0.10.0
 mistral_common>=1.0.0  # Unconditional import in vendored convert_hf_to_gguf.py
 
+# Embeddings (CPU-based, independent of chat model backend)
+sentence-transformers>=2.2.0
+
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python 0.3.16 (built against llama.cpp commit 4227c9b)
 # - mlx-lm (macOS only)

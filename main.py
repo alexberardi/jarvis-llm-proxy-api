@@ -42,6 +42,7 @@ from api.training_routes import router as training_router
 from api.adapter_routes import router as adapter_router
 from api.pipeline_routes import router as pipeline_router
 from api.settings_routes import router as settings_router
+from api.embedding_routes import router as embedding_router
 
 # Initialize logging
 logger = setup_console_logging()
@@ -64,6 +65,7 @@ app.include_router(training_router)
 app.include_router(adapter_router)
 app.include_router(pipeline_router)
 app.include_router(settings_router)
+app.include_router(embedding_router)
 
 
 @app.on_event("startup")
