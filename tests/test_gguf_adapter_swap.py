@@ -83,6 +83,7 @@ def _make_gguf_client_mock():
     client.mirostat_tau = 5.0
     client.mirostat_eta = 0.1
     client.last_usage = None
+    client.stop_tokens = []
     return client
 
 
