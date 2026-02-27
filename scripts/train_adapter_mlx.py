@@ -38,16 +38,18 @@ def _read_json(path: str) -> dict:
 
 def _extract_examples(
     dataset_ref: Dict[str, Any],
-) -> List[Tuple[str, Dict[str, Any], str | None, str | None]]:
+) -> List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]]:
     """Extract examples from dataset.
 
-    Returns list of (voice_command, tool_call, formatted_prompt, formatted_completion) tuples.
-    formatted_prompt/formatted_completion are None when the dataset was built without a provider.
+    Returns list of (voice_command, tool_call, formatted_prompt, formatted_completion,
+    formatted_system_prompt) tuples.
+    formatted_prompt/formatted_completion/formatted_system_prompt are None when the
+    dataset was built without a provider.
     """
     data = dataset_ref.get("data") if isinstance(dataset_ref, dict) else None
     payload = data if isinstance(data, dict) else dataset_ref
     commands = payload.get("commands", []) if isinstance(payload, dict) else []
-    examples: List[Tuple[str, Dict[str, Any], str | None, str | None]] = []
+    examples: List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]] = []
     for cmd in commands:
         for ex in cmd.get("examples", []):
             voice = ex.get("voice_command")
@@ -58,6 +60,7 @@ def _extract_examples(
                     tool_call,
                     ex.get("formatted_prompt"),
                     ex.get("formatted_completion"),
+                    ex.get("formatted_system_prompt"),
                 ))
     return examples
 
@@ -86,25 +89,54 @@ def _get_param(params: Dict[str, Any], key: str, default: Any) -> Any:
 class TokenizedDataset:
     """Pre-tokenized dataset compatible with mlx_lm's iterate_batches/CacheDataset.
 
-    Unlike CompletionsDataset which uses apply_chat_template (which can fail with
-    some tokenizer templates), this directly tokenizes the prompt+completion and
-    returns (tokens, prompt_offset) tuples matching the expected format.
+    When formatted_system_prompt is available, uses the tokenizer's apply_chat_template
+    to build properly formatted training data with correct special tokens (BOS, EOS,
+    role markers). This ensures training data matches the inference format exactly,
+    so the model learns to emit proper stop tokens.
+
+    Falls back to raw text concatenation for backward compatibility with older datasets.
     """
 
     def __init__(
         self,
         tokenizer: Any,
-        examples: List[Tuple[str, Dict[str, Any], str | None, str | None]],
+        examples: List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]],
         max_tokens: int,
     ):
         self._items: List[Tuple[List[int], int]] = []
-        for voice, tool_call, fmt_prompt, fmt_completion in examples:
-            prompt = fmt_prompt if fmt_prompt else _format_prompt(voice)
-            completion = fmt_completion if fmt_completion else _format_completion(tool_call)
-            full_text = prompt + completion
+        # Check if tokenizer supports chat templates
+        has_chat_template: bool = hasattr(tokenizer, "apply_chat_template")
 
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            full_ids = tokenizer.encode(full_text, add_special_tokens=True)
+        for voice, tool_call, fmt_prompt, fmt_completion, fmt_system_prompt in examples:
+            completion = fmt_completion if fmt_completion else _format_completion(tool_call)
+
+            if fmt_system_prompt and has_chat_template:
+                # Chat template path: proper special tokens matching inference format.
+                # The tokenizer wraps messages with role markers and EOS tokens,
+                # so the model learns when to stop generating.
+                prompt_messages = [
+                    {"role": "system", "content": fmt_system_prompt},
+                    {"role": "user", "content": voice},
+                ]
+                full_messages = prompt_messages + [
+                    {"role": "assistant", "content": completion.strip()},
+                ]
+                prompt_ids = tokenizer.apply_chat_template(
+                    prompt_messages, add_generation_prompt=True,
+                )
+                full_ids = tokenizer.apply_chat_template(full_messages)
+            else:
+                # Fallback: raw text concatenation (backward compat for old datasets)
+                prompt = fmt_prompt if fmt_prompt else _format_prompt(voice)
+                full_text = prompt + completion
+
+                prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+                full_ids = tokenizer.encode(full_text, add_special_tokens=True)
+
+                # Append EOS token so the model learns to stop after the completion.
+                eos_id = getattr(tokenizer, "eos_token_id", None)
+                if eos_id is not None and (not full_ids or full_ids[-1] != eos_id):
+                    full_ids.append(eos_id)
 
             # Truncate to max_tokens
             if len(full_ids) > max_tokens:

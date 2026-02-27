@@ -7,20 +7,19 @@ Steps can be skipped if artifacts already exist.
 
 Usage:
     # Full pipeline (train + merge + convert)
-    python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct
+    python scripts/build_jarvis_model.py --base-model .models/Hermes-3-Llama-3.1-8B
 
     # Skip training (adapter already exists), just merge + convert
-    python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --skip-train
+    python scripts/build_jarvis_model.py --base-model .models/Hermes-3-Llama-3.1-8B --skip-train
 
     # Mac (Apple Silicon)
-    python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --optim adamw_torch --batch-size 2
+    python scripts/build_jarvis_model.py --base-model .models/Hermes-3-Llama-3.1-8B --optim adamw_torch --batch-size 2
 
     # Quantized GGUF (Q4_K_M ~4.5 GiB instead of ~15 GiB f16)
-    python scripts/build_jarvis_model.py --base-model .models/llama-3.1-8b-instruct --skip-train --gguf-quant Q4_K_M
+    python scripts/build_jarvis_model.py --base-model .models/Hermes-3-Llama-3.1-8B --skip-train --gguf-quant Q4_K_M
 """
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--base-model",
         type=str,
-        default=os.getenv("JARVIS_MODEL_NAME", ".models/llama-3.1-8b-instruct"),
-        help="HuggingFace-format base model path (default: JARVIS_MODEL_NAME)",
+        required=True,
+        help="HuggingFace-format base model path (e.g. .models/Hermes-3-Llama-3.1-8B)",
     )
     parser.add_argument(
         "--adapter-dir",
@@ -103,9 +102,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_python() -> str:
+    """Resolve the venv python, preferring .venv/bin/python over sys.executable."""
+    venv_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if venv_python.is_file():
+        return str(venv_python)
+    return sys.executable
+
+
 def main() -> int:
     args = parse_args()
-    python = sys.executable
+    python = _resolve_python()
 
     base_model = Path(args.base_model)
     adapter_dir = Path(args.adapter_dir)

@@ -24,16 +24,18 @@ def _read_json(path: str) -> dict:
 
 def _extract_examples(
     dataset_ref: Dict[str, Any],
-) -> List[Tuple[str, Dict[str, Any], str | None, str | None]]:
+) -> List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]]:
     """Extract examples from dataset.
 
-    Returns list of (voice_command, tool_call, formatted_prompt, formatted_completion) tuples.
-    formatted_prompt/formatted_completion are None when the dataset was built without a provider.
+    Returns list of (voice_command, tool_call, formatted_prompt, formatted_completion,
+    formatted_system_prompt) tuples.
+    formatted_prompt/formatted_completion/formatted_system_prompt are None when the
+    dataset was built without a provider.
     """
     data = dataset_ref.get("data") if isinstance(dataset_ref, dict) else None
     payload = data if isinstance(data, dict) else dataset_ref
     commands = payload.get("commands", []) if isinstance(payload, dict) else []
-    examples: List[Tuple[str, Dict[str, Any], str | None, str | None]] = []
+    examples: List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]] = []
     for cmd in commands:
         for ex in cmd.get("examples", []):
             voice = ex.get("voice_command")
@@ -44,6 +46,7 @@ def _extract_examples(
                     tool_call,
                     ex.get("formatted_prompt"),
                     ex.get("formatted_completion"),
+                    ex.get("formatted_system_prompt"),
                 ))
     return examples
 
@@ -64,12 +67,13 @@ class TokenizedExample:
 
 
 class PromptDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenizer, examples: List[Tuple[str, Dict[str, Any], str | None, str | None]], max_len: int):
+    def __init__(self, tokenizer, examples: List[Tuple[str, Dict[str, Any], str | None, str | None, str | None]], max_len: int):
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.items: List[TokenizedExample] = []
-        for voice, tool_call, fmt_prompt, fmt_completion in examples:
-            prompt = fmt_prompt if fmt_prompt else _format_prompt(voice)
+        has_chat_template: bool = hasattr(tokenizer, "apply_chat_template")
+
+        for voice, tool_call, fmt_prompt, fmt_completion, fmt_system_prompt in examples:
             if fmt_completion:
                 completion = fmt_completion
             else:
@@ -80,11 +84,41 @@ class PromptDataset(torch.utils.data.Dataset):
                     "error": None
                 }
                 completion = " " + json.dumps(response, ensure_ascii=False)
-            full_text = prompt + completion
-            prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            full = tokenizer(full_text, add_special_tokens=True, truncation=True, max_length=max_len)
-            input_ids = full["input_ids"]
-            attention_mask = full["attention_mask"]
+
+            if fmt_system_prompt and has_chat_template:
+                # Chat template path: proper special tokens matching inference format.
+                prompt_messages = [
+                    {"role": "system", "content": fmt_system_prompt},
+                    {"role": "user", "content": voice},
+                ]
+                full_messages = prompt_messages + [
+                    {"role": "assistant", "content": completion.strip()},
+                ]
+                prompt_ids = tokenizer.apply_chat_template(
+                    prompt_messages, add_generation_prompt=True,
+                )
+                full_ids = tokenizer.apply_chat_template(full_messages)
+                # Truncate to max_len
+                if len(full_ids) > max_len:
+                    full_ids = full_ids[:max_len]
+                input_ids = full_ids
+                attention_mask = [1] * len(input_ids)
+            else:
+                # Fallback: raw text concatenation (backward compat for old datasets)
+                prompt = fmt_prompt if fmt_prompt else _format_prompt(voice)
+                full_text = prompt + completion
+                prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+                full = tokenizer(full_text, add_special_tokens=True, truncation=True, max_length=max_len)
+                input_ids = full["input_ids"]
+                attention_mask = full["attention_mask"]
+
+                # Append EOS token so the model learns to stop after the completion
+                eos_id = getattr(tokenizer, "eos_token_id", None)
+                if eos_id is not None and (not input_ids or input_ids[-1] != eos_id):
+                    if len(input_ids) < max_len:
+                        input_ids.append(eos_id)
+                        attention_mask.append(1)
+
             labels = input_ids.copy()
             prompt_len = min(len(prompt_ids), len(labels))
             for i in range(prompt_len):

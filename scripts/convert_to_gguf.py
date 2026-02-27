@@ -33,6 +33,7 @@ Requirements:
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -63,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         "--quant-type",
         default=os.environ.get("JARVIS_GGUF_QUANT_TYPE", "f16"),
         help="Quantization type (default: f16 / full weight). Set to Q4_K_M, Q5_K_M, etc. to quantize.",
+    )
+    parser.add_argument(
+        "--imatrix",
+        default=None,
+        help="Path to importance matrix file for imatrix-aware quantization",
     )
     parser.add_argument(
         "--dry-run",
@@ -148,30 +154,113 @@ def find_llama_quantize() -> Path | None:
     return None
 
 
+def normalize_rope_config(model_path: Path) -> str | None:
+    """Fix config.json for compatibility with the llama.cpp GGUF converter.
+
+    Transformers >= 5.x normalizes rope_theta + rope_scaling into a single
+    ``rope_parameters`` dict.  The vendored ``convert_hf_to_gguf.py`` reads the
+    config via ``AutoConfig.from_pretrained().to_dict()`` which always returns
+    the new format regardless of what's in config.json.
+
+    The converter expects:
+      - ``rope_theta`` at the top level
+      - ``rope_scaling`` as a separate dict (without ``rope_theta`` inside it)
+
+    Fix: rewrite config.json to the old format AND remove ``model_type`` so
+    that ``AutoConfig.from_pretrained()`` fails and the converter falls back to
+    raw ``json.load()`` (which preserves our format).
+
+    Returns the original config contents for restoration after conversion.
+    """
+    config_path = model_path / "config.json"
+    with open(config_path, "r", encoding="utf-8") as f:
+        original_text = f.read()
+    config = json.loads(original_text)
+
+    rope_params = config.get("rope_parameters")
+    rope_scaling = config.get("rope_scaling")
+    has_rope_config = rope_params is not None or rope_scaling is not None
+
+    if not has_rope_config:
+        return None  # no RoPE config to fix
+
+    # Normalize rope_parameters → rope_scaling + top-level rope_theta
+    if rope_params is not None:
+        if "rope_theta" in rope_params and "rope_theta" not in config:
+            config["rope_theta"] = rope_params["rope_theta"]
+        scaling = {k: v for k, v in rope_params.items() if k != "rope_theta"}
+        config["rope_scaling"] = scaling
+        del config["rope_parameters"]
+    # Also extract rope_theta from rope_scaling if needed
+    elif rope_scaling is not None and "rope_theta" in rope_scaling:
+        if "rope_theta" not in config:
+            config["rope_theta"] = rope_scaling["rope_theta"]
+        config["rope_scaling"] = {
+            k: v for k, v in rope_scaling.items() if k != "rope_theta"
+        }
+
+    # Remove model_type to force the converter to fall back to raw json.load()
+    # instead of AutoConfig.from_pretrained().to_dict() which re-normalizes
+    # rope config into the incompatible rope_parameters format.
+    # The converter uses 'architectures' (not model_type) to determine the
+    # model class, so removing model_type is safe.
+    config.pop("model_type", None)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+    print(f"  Normalized config.json: rope_theta={config.get('rope_theta')}, "
+          f"rope_type={config.get('rope_scaling', {}).get('rope_type')}")
+    return original_text
+
+
+def restore_config(model_path: Path, original_text: str) -> None:
+    """Restore config.json to its original state after conversion."""
+    config_path = model_path / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(original_text)
+
+
 def run_hf_to_gguf(model_path: Path, output_gguf: Path) -> None:
     """Convert HF model to f16 GGUF using the vendored converter."""
     print("Step 1: Converting HF model to f16 GGUF...")
-    cmd = [
-        sys.executable,
-        str(VENDOR_CONVERTER),
-        str(model_path),
-        "--outfile", str(output_gguf),
-        "--outtype", "f16",
-    ]
-    print(f"  Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=False)
-    if result.returncode != 0:
-        print("Error: HF to GGUF conversion failed", file=sys.stderr)
-        sys.exit(1)
-    print(f"  f16 GGUF written to: {output_gguf}")
+    original_config = normalize_rope_config(model_path)
+    try:
+        cmd = [
+            sys.executable,
+            str(VENDOR_CONVERTER),
+            str(model_path),
+            "--outfile", str(output_gguf),
+            "--outtype", "f16",
+        ]
+        print(f"  Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=False)
+        if result.returncode != 0:
+            print("Error: HF to GGUF conversion failed", file=sys.stderr)
+            sys.exit(1)
+        print(f"  f16 GGUF written to: {output_gguf}")
+    finally:
+        if original_config is not None:
+            restore_config(model_path, original_config)
 
 
 def run_quantize(
-    f16_gguf: Path, output_gguf: Path, quant_type: str, quantize_bin: Path
+    f16_gguf: Path,
+    output_gguf: Path,
+    quant_type: str,
+    quantize_bin: Path,
+    imatrix_path: Path | None = None,
 ) -> None:
     """Quantize f16 GGUF to target quantization type."""
-    print(f"Step 2: Quantizing f16 → {quant_type}...")
-    cmd = [str(quantize_bin), str(f16_gguf), str(output_gguf), quant_type]
+    label = f"f16 → {quant_type}"
+    if imatrix_path:
+        label += " (imatrix)"
+    print(f"Step 2: Quantizing {label}...")
+    cmd = [str(quantize_bin)]
+    if imatrix_path:
+        cmd.extend(["--imatrix", str(imatrix_path)])
+    cmd.extend([str(f16_gguf), str(output_gguf), quant_type])
     print(f"  Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
@@ -187,11 +276,16 @@ def main() -> None:
     output_path = Path(args.output)
     quant_type: str = args.quant_type
     skip_quantize = quant_type.lower() == "f16"
+    imatrix_path: Path | None = Path(args.imatrix) if args.imatrix else None
 
     # Validate inputs
     validate_model_path(model_path)
     validate_output_path(output_path)
     validate_converter()
+
+    if imatrix_path and not imatrix_path.is_file():
+        print(f"Error: imatrix file not found: {imatrix_path}", file=sys.stderr)
+        sys.exit(1)
 
     quantize_bin: Path | None = None
     if not skip_quantize:
@@ -204,6 +298,8 @@ def main() -> None:
     print(f"Output:         {output_path}")
     print(f"Quant type:     {quant_type}")
     print(f"Converter:      {VENDOR_CONVERTER}")
+    if imatrix_path:
+        print(f"imatrix:        {imatrix_path}")
     if skip_quantize:
         print("Quantization:   skipped (f16 output)")
     elif quantize_bin:
@@ -226,7 +322,7 @@ def main() -> None:
             f16_path = Path(tmp_dir) / "model-f16.gguf"
             run_hf_to_gguf(model_path, f16_path)
             print()
-            run_quantize(f16_path, output_path, quant_type, quantize_bin)
+            run_quantize(f16_path, output_path, quant_type, quantize_bin, imatrix_path)
     else:
         # No quantize binary - fall back to f16
         print(
