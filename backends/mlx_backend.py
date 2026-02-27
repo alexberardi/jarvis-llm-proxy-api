@@ -1,10 +1,12 @@
 import io
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
-from mlx_lm.generate import generate
+from mlx_lm.generate import generate, stream_generate
+from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 from mlx_lm.utils import load
 
@@ -12,6 +14,14 @@ from managers.chat_types import ChatResult, GenerationParams, ImagePart, Normali
 from backends.base import LLMBackendBase
 
 logger = logging.getLogger("uvicorn")
+
+
+@dataclass
+class _PromptCacheState:
+    """Persistent KV cache state for prompt prefix reuse."""
+    cache: list                # per-layer KVCache objects (mutated in-place by generate)
+    cached_tokens: list[int]   # token IDs processed into the cache
+    is_trimmable: bool         # whether trim_prompt_cache works for this model
 
 
 class MlxClient(LLMBackendBase):
@@ -48,6 +58,7 @@ class MlxClient(LLMBackendBase):
         self._lora_layers_applied: bool = False
         self.last_usage = None
         self.inference_engine = "mlx"  # Apple Silicon MLX backend
+        self._cache_state: _PromptCacheState | None = None
 
         # Load model with optional initial adapter
         if adapter_path:
@@ -99,6 +110,7 @@ class MlxClient(LLMBackendBase):
             self.model = load_adapters(self.model, adapter_path)
             self._current_adapter_path = adapter_path
             self._lora_layers_applied = True
+            self._invalidate_cache()
 
             elapsed = time.time() - start_time
             logger.info(f"✅ MLX adapter loaded in {elapsed:.2f}s")
@@ -133,6 +145,7 @@ class MlxClient(LLMBackendBase):
             self._current_adapter_path = None
             self._current_adapter_hash = None
             self._lora_layers_applied = False
+            self._invalidate_cache()
 
             elapsed = time.time() - start_time
             logger.info(f"✅ MLX adapter removed in {elapsed:.2f}s")
@@ -207,83 +220,162 @@ class MlxClient(LLMBackendBase):
         self.load_adapter(adapter_path)
         self._current_adapter_hash = adapter_hash
 
-    def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
-        """Chat method with temperature support"""
-        return self.chat_with_temperature(messages, temperature)
-    
-    def chat_with_temperature(self, messages: list[dict], temperature: float = 0.7) -> str:
-        # Start timing
-        start_time = time.time()
-        
-        # Use the tokenizer's chat template if available
-        if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None:
-            # Convert messages to the format expected by apply_chat_template
-            formatted_messages = []
-            for msg in messages:
-                formatted_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-            
-            # Apply chat template
-            full_prompt = self.tokenizer.apply_chat_template(
-                formatted_messages, 
-                add_generation_prompt=True,
-                tokenize=False
-            )
-        else:
-            # Fallback to simple format if no chat template
-            full_prompt = ""
-            for msg in messages:
-                role = msg["role"]
-                content = msg["content"]
-                if role == "system":
-                    full_prompt += f"[SYSTEM] {content}\n"
-                elif role == "user":
-                    full_prompt += f"[USER] {content}\n"
-                elif role == "assistant":
-                    full_prompt += f"[ASSISTANT] {content}\n"
-            full_prompt = full_prompt.strip()
+    # ── KV cache helpers ──────────────────────────────────────────────
 
-        logger.debug("⚙️  Generating with MLX...")
-        logger.debug(f"🌡️  Temperature: {temperature}")
-        logger.debug(f"🔍 Debug: Using chat template: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
-        
-        # Create sampler with temperature
+    def _invalidate_cache(self) -> None:
+        """Invalidate the KV cache (e.g., after adapter switch or model unload)."""
+        self._cache_state = None
+
+    def _build_prompt_string(self, messages: list[dict]) -> str:
+        """Build a prompt string from messages using the tokenizer's chat template."""
+        if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None:
+            formatted_messages = [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in messages
+            ]
+            return self.tokenizer.apply_chat_template(
+                formatted_messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+        # Fallback to simple format if no chat template
+        parts: list[str] = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                parts.append(f"[SYSTEM] {content}")
+            elif role == "user":
+                parts.append(f"[USER] {content}")
+            elif role == "assistant":
+                parts.append(f"[ASSISTANT] {content}")
+        return "\n".join(parts).strip()
+
+    def _tokenize_prompt(self, prompt_str: str) -> list[int]:
+        """Tokenize a prompt string matching stream_generate's exact logic."""
+        # Match stream_generate: skip BOS if the prompt already starts with it
+        raw_tokenizer = getattr(self.tokenizer, '_tokenizer', self.tokenizer)
+        bos = getattr(raw_tokenizer, 'bos_token', None)
+        add_special = bos is None or not prompt_str.startswith(bos)
+        return self.tokenizer.encode(prompt_str, add_special_tokens=add_special)
+
+    @staticmethod
+    def _find_common_prefix_length(a: list[int], b: list[int]) -> int:
+        """Return length of longest common prefix of two token lists."""
+        min_len = min(len(a), len(b))
+        for i in range(min_len):
+            if a[i] != b[i]:
+                return i
+        return min_len
+
+    # ── Core generation with KV cache ─────────────────────────────────
+
+    def _generate_with_cache(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 256,
+    ) -> tuple[str, int, int, float]:
+        """Generate with KV cache reuse for prompt prefix caching.
+
+        Returns: (response_text, prompt_tokens, completion_tokens, generation_tps)
+        """
+        prompt_str = self._build_prompt_string(messages)
+        new_tokens = self._tokenize_prompt(prompt_str)
+
+        # Determine cache + suffix tokens to process
+        if self._cache_state is not None and self._cache_state.is_trimmable:
+            common_len = self._find_common_prefix_length(
+                self._cache_state.cached_tokens, new_tokens
+            )
+            if common_len > 0:
+                # Trim cache to common prefix point
+                tokens_to_trim = len(self._cache_state.cached_tokens) - common_len
+                if tokens_to_trim > 0:
+                    trim_prompt_cache(self._cache_state.cache, tokens_to_trim)
+                suffix_tokens = new_tokens[common_len:]
+                cache = self._cache_state.cache
+                logger.info(
+                    f"🔄 KV cache hit: {common_len}/{len(new_tokens)} tokens reused, "
+                    f"processing {len(suffix_tokens)} new tokens"
+                )
+            else:
+                logger.info("🔄 No KV cache prefix match, creating new cache")
+                cache = make_prompt_cache(self.model)
+                suffix_tokens = new_tokens
+        else:
+            if self._cache_state is not None:
+                logger.info("🔄 KV cache not trimmable, creating new cache")
+            else:
+                logger.info("🔄 No KV cache, creating new one")
+            cache = make_prompt_cache(self.model)
+            suffix_tokens = new_tokens
+
+        # Edge case: identical prompt — pop 1 token so stream_generate has input
+        if len(suffix_tokens) == 0:
+            trim_prompt_cache(cache, 1)
+            suffix_tokens = new_tokens[-1:]
+
         sampler = make_sampler(temp=temperature)
-        
-        # Generate response with sampler
-        response = generate(
+        response_text = ""
+        gen_tokens = 0
+        generation_tps = 0.0
+
+        for response in stream_generate(
             self.model,
             self.tokenizer,
-            full_prompt,
-            verbose=False,
+            suffix_tokens,  # List[int] skips re-tokenization
+            max_tokens=max_tokens,
             sampler=sampler,
+            prompt_cache=cache,
+        ):
+            response_text += response.text
+            gen_tokens = response.generation_tokens
+            generation_tps = response.generation_tps
+
+        # Trim generated tokens so cache contains only prompt tokens
+        if gen_tokens > 0:
+            trim_prompt_cache(cache, gen_tokens)
+
+        # Update cache state
+        self._cache_state = _PromptCacheState(
+            cache=cache,
+            cached_tokens=list(new_tokens),
+            is_trimmable=can_trim_prompt_cache(cache),
         )
-        
-        # Calculate timing
-        end_time = time.time()
-        total_time = end_time - start_time
-        
-        # Estimate token usage (rough approximation)
-        # This is a simplified token count - MLX doesn't provide exact token counts
-        prompt_tokens = len(full_prompt.split())  # Rough word count
-        completion_tokens = len(response.split())  # Rough word count
-        total_tokens = prompt_tokens + completion_tokens
-        
-        # Store usage information for OpenAI-style response
+
+        return response_text.strip(), len(new_tokens), gen_tokens, generation_tps
+
+    # ── Public generation methods ─────────────────────────────────────
+
+    def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
+        """Chat method with temperature support."""
+        return self.chat_with_temperature(messages, temperature)
+
+    def chat_with_temperature(self, messages: list[dict], temperature: float = 0.7, max_tokens: int = 256) -> str:
+        start_time = time.time()
+
+        response_text, prompt_tokens, completion_tokens, generation_tps = self._generate_with_cache(
+            messages, temperature, max_tokens
+        )
+
+        total_time = time.time() - start_time
+
         self.last_usage = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens
+            "total_tokens": prompt_tokens + completion_tokens,
         }
-        
-        # Print performance metrics
-        tokens_per_second = completion_tokens / total_time if total_time > 0 else 0
-        logger.debug(f"🚀 Generated ~{completion_tokens} tokens in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-        logger.debug(f"📊 Prompt: ~{prompt_tokens} tokens | Completion: ~{completion_tokens} tokens | Total: ~{total_tokens} tokens")
-        
-        return response.strip()
+
+        logger.debug(
+            f"🚀 Generated {completion_tokens} tokens in {total_time:.2f}s "
+            f"({generation_tps:.1f} tok/s)"
+        )
+        logger.debug(
+            f"📊 Prompt: {prompt_tokens} tokens | Completion: {completion_tokens} tokens"
+        )
+
+        return response_text
 
     async def generate_text_chat(
         self,
@@ -296,7 +388,8 @@ class MlxClient(LLMBackendBase):
             self._handle_adapter_switch(params.adapter_settings)
 
         formatted = self._to_dict_messages(messages)
-        content = self.chat_with_temperature(formatted, params.temperature)
+        max_tokens = params.max_tokens or 256
+        content = self.chat_with_temperature(formatted, params.temperature, max_tokens=max_tokens)
         return ChatResult(content=content, usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     async def generate_vision_chat(
@@ -338,72 +431,28 @@ class MlxClient(LLMBackendBase):
         return ChatResult(content=response.strip(), usage=self.last_usage, tool_calls=None, finish_reason="stop")
 
     def process_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Process context without generating a response - for warm-up purposes"""
+        """Process context for warm-up — populates the KV cache with the system prompt."""
         try:
-            # Use the tokenizer's chat template if available
-            if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None:
-                # Convert messages to the format expected by apply_chat_template
-                formatted_messages = []
-                for msg in messages:
-                    formatted_messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    })
-                
-                # Apply chat template
-                full_prompt = self.tokenizer.apply_chat_template(
-                    formatted_messages, 
-                    add_generation_prompt=True,
-                    tokenize=False
-                )
-            else:
-                # Fallback to simple format if no chat template
-                full_prompt = ""
-                for msg in messages:
-                    role = msg["role"]
-                    content = msg["content"]
-                    if role == "system":
-                        full_prompt += f"[SYSTEM] {content}\n"
-                    elif role == "user":
-                        full_prompt += f"[USER] {content}\n"
-                    elif role == "assistant":
-                        full_prompt += f"[ASSISTANT] {content}\n"
-                full_prompt = full_prompt.strip()
-            
-            # Create deterministic sampler for context processing
-            sampler = make_sampler(temp=0.0)
-            
-            # Use minimal generation to process context
-            response = generate(
-                self.model, 
-                self.tokenizer, 
-                full_prompt, 
-                verbose=False,
-                sampler=sampler,
-                max_tokens=1  # Minimal tokens
-            )
-            
-            # Extract the internal context representation
-            processed_context = {
+            self._generate_with_cache(messages, temperature=0.0, max_tokens=1)
+
+            logger.debug(f"🔥 Context processed for {len(messages)} messages")
+            return {
                 "messages": messages,
                 "context_processed": True,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
-            
-            logger.debug(f"🔥 Context processed for {len(messages)} messages")
-            return processed_context
 
         except Exception as e:
             logger.warning(f"⚠️  Error processing context: {e}")
-            # Fallback to storing raw messages
             return {
                 "messages": messages,
                 "context_processed": False,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
     
     def unload(self):
         """Unload the model and clean up resources"""
+        self._invalidate_cache()
         if hasattr(self, 'model'):
             del self.model
             self.model = None

@@ -86,8 +86,10 @@ class TransformersClient(LLMBackendBase):
             "inference.general.engine", "JARVIS_INFERENCE_ENGINE", "transformers"
         ).lower()
         self.vllm_backend = None
-        # Note: Dynamic per-request adapters only supported on vLLM backend
-        # Transformers backend runs base model only
+
+        # Adapter state
+        self._current_adapter_path: Optional[str] = None
+        self._current_adapter_hash: Optional[str] = None
         
         logger.debug(f"🔍 Debug: Model path: {model_path}")
         logger.debug(f"🔍 Debug: Chat format: {chat_format}")
@@ -479,6 +481,10 @@ class TransformersClient(LLMBackendBase):
         """
         from managers.chat_types import ChatResult, TextPart
 
+        # Handle adapter switching
+        if params.adapter_settings:
+            self._handle_adapter_switch(params.adapter_settings)
+
         # Convert NormalizedMessage to simple dict format
         dict_messages = []
         for msg in messages:
@@ -610,6 +616,102 @@ class TransformersClient(LLMBackendBase):
                 "model_name": self.model_name
             }
     
+    # =========================================================================
+    # ADAPTER SUPPORT (PEFT / LoRA)
+    # =========================================================================
+
+    def _handle_adapter_switch(self, adapter_settings: dict) -> None:
+        """Check adapter_settings and load/unload PEFT adapter as needed."""
+        adapter_hash = adapter_settings.get("hash")
+        adapter_enabled = adapter_settings.get("enabled", True)
+
+        if not adapter_hash or not adapter_enabled:
+            if self._current_adapter_path is not None:
+                logger.info("No adapter requested, removing current adapter")
+                self.remove_adapter()
+                self._current_adapter_hash = None
+            return
+
+        if adapter_hash == self._current_adapter_hash:
+            logger.debug("Adapter %s already loaded, skipping", adapter_hash[:8])
+            return
+
+        # Resolve adapter hash to PEFT directory
+        adapter_path = self._resolve_peft_adapter(adapter_hash)
+        if adapter_path is None:
+            logger.warning("Adapter not found for hash: %s", adapter_hash)
+            return
+
+        adapter_scale = adapter_settings.get("scale", 1.0)
+        self.load_adapter(adapter_path, adapter_scale)
+        self._current_adapter_hash = adapter_hash
+
+    def _resolve_peft_adapter(self, adapter_hash: str) -> Optional[str]:
+        """Resolve adapter hash to a PEFT adapter directory path.
+
+        Looks for adapter_model.safetensors in the adapter cache directory.
+        """
+        from services import adapter_cache
+
+        adapter_dir = adapter_cache.get_adapter_path(adapter_hash)
+        if adapter_dir is None:
+            logger.warning("Adapter %s not found in cache/storage", adapter_hash)
+            return None
+
+        # Check for PEFT adapter files (adapter_model.safetensors or adapter_model.bin)
+        for filename in ("adapter_model.safetensors", "adapter_model.bin"):
+            if (adapter_dir / filename).is_file():
+                logger.debug("Resolved PEFT adapter: %s", adapter_dir)
+                return str(adapter_dir)
+
+        logger.warning("No PEFT adapter files found in %s", adapter_dir)
+        return None
+
+    def load_adapter(self, adapter_path: str, scale: float = 1.0) -> None:
+        """Load a PEFT LoRA adapter on top of the base model.
+
+        Args:
+            adapter_path: Path to adapter directory containing
+                adapter_model.safetensors and adapter_config.json.
+            scale: Adapter scaling factor (not used by PEFT but kept
+                for interface compatibility).
+        """
+        from peft import PeftModel
+
+        if self._current_adapter_path == adapter_path:
+            logger.debug("Adapter %s already loaded, skipping", adapter_path)
+            return
+
+        # If an adapter is already loaded, remove it first
+        if self._current_adapter_path is not None:
+            self.remove_adapter()
+
+        logger.info("Loading PEFT adapter from %s", adapter_path)
+        self.model = PeftModel.from_pretrained(
+            self.model,
+            adapter_path,
+            is_trainable=False,
+        )
+        self.model.eval()
+        self._current_adapter_path = adapter_path
+        logger.info("PEFT adapter loaded successfully")
+
+    def remove_adapter(self) -> None:
+        """Remove the currently loaded PEFT adapter, reverting to the base model."""
+        if self._current_adapter_path is None:
+            return
+
+        logger.info("Removing PEFT adapter, reverting to base model")
+        self.model = self.model.unmerge_adapter()
+        self.model = self.model.base_model.model
+        self.model.eval()
+        self._current_adapter_path = None
+        logger.info("Base model restored")
+
+    def get_current_adapter(self) -> Optional[str]:
+        """Return the path of the currently loaded adapter, if any."""
+        return self._current_adapter_path
+
     def unload(self):
         """Unload the model and clean up resources"""
         # IMPORTANT: Unload vLLM backend first - this kills the EngineCore subprocess

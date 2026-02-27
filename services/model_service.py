@@ -298,10 +298,10 @@ async def get_engine_info(x_internal_token: str | None = Header(default=None)):
     if model_manager.main_model and hasattr(model_manager.main_model, "inference_engine"):
         inference_engine = model_manager.main_model.inference_engine
 
-    # llama.cpp benefits from warmup messages (prefix caching reuses KV cache for matching prefixes)
+    # llama.cpp and MLX benefit from warmup messages (prefix caching reuses KV cache for matching prefixes)
     # vLLM has automatic prefix caching but doesn't benefit from explicit warmup messages
     # transformers has no prefix caching optimization
-    allows_caching = inference_engine == "llama_cpp"
+    allows_caching = inference_engine in ("llama_cpp", "mlx")
 
     return {
         "inference_engine": inference_engine,
@@ -309,6 +309,7 @@ async def get_engine_info(x_internal_token: str | None = Header(default=None)):
         "allows_caching": allows_caching,
         "description": {
             "llama_cpp": "llama.cpp with prefix caching - benefits from warmup messages",
+            "mlx": "MLX with KV cache prefix caching - benefits from warmup messages",
             "vllm": "vLLM with automatic prefix caching - no warmup needed",
             "transformers": "HuggingFace Transformers - no prefix caching",
         }.get(inference_engine, "Unknown engine"),

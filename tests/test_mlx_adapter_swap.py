@@ -71,6 +71,7 @@ def _make_mlx_client_mock():
     client._current_adapter_hash = None
     client._lora_layers_applied = False
     client.last_usage = None
+    client._cache_state = None
     return client
 
 
@@ -238,7 +239,10 @@ class TestGenerateTextChatAdapterSwitch:
         )
         messages = [NormalizedMessage(role="user", content=[TextPart(text="hello")])]
 
-        with patch.object(client, "_handle_adapter_switch") as mock_switch:
+        with patch.object(client, "_handle_adapter_switch") as mock_switch, \
+             patch.object(client, "chat_with_temperature", return_value="test response") as mock_chat:
+            mock_chat.return_value = "test response"
+            client.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             asyncio.get_event_loop().run_until_complete(
                 client.generate_text_chat(None, messages, params)
             )
@@ -256,7 +260,10 @@ class TestGenerateTextChatAdapterSwitch:
         params = GenerationParams(temperature=0.7)
         messages = [NormalizedMessage(role="user", content=[TextPart(text="hello")])]
 
-        with patch.object(client, "_handle_adapter_switch") as mock_switch:
+        with patch.object(client, "_handle_adapter_switch") as mock_switch, \
+             patch.object(client, "chat_with_temperature", return_value="test response") as mock_chat:
+            mock_chat.return_value = "test response"
+            client.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             asyncio.get_event_loop().run_until_complete(
                 client.generate_text_chat(None, messages, params)
             )

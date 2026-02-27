@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from services.settings_helpers import get_setting
 
 logger = logging.getLogger("uvicorn")
 
@@ -20,7 +19,6 @@ from managers.chat_types import (
     ChatResult,
 )
 from models.api_models import Message, ChatCompletionRequest
-from services.json_grammar import schema_to_gbnf
 
 
 # JSON system message to inject when response_format is json_object
@@ -527,29 +525,6 @@ async def run_chat_completion(
     if requires_json and response_format_dict:
         response_schema = response_format_dict.get("json_schema")
 
-    grammar = None
-    if (
-        response_schema
-        and model_config.backend_type == "GGUF"
-        and hasattr(model_config.backend_instance, "inference_engine")
-        and model_config.backend_instance.inference_engine == "llama_cpp"
-    ):
-        try:
-            grammar = schema_to_gbnf(response_schema)
-            dump_path = get_setting(
-                "debug.dump_gbnf_path", "JARVIS_DUMP_GBNF_PATH", ""
-            )
-            if dump_path:
-                try:
-                    with open(dump_path, "w", encoding="utf-8") as handle:
-                        handle.write(grammar)
-                    logger.debug(f"🧩 GGUF grammar dumped to {dump_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to dump GGUF grammar: {e}")
-            logger.info("🧩 GGUF JSON grammar enabled for this request")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to build GGUF JSON grammar: {e}")
-
     # Extract adapter settings if provided and enabled
     adapter_settings_dict = None
     if req.adapter_settings and req.adapter_settings.enabled:
@@ -568,7 +543,6 @@ async def run_chat_completion(
         max_tokens=req.max_tokens,
         stream=req.stream or False,
         response_format=response_format_dict,
-        grammar=grammar,
         adapter_settings=adapter_settings_dict,
         tools=tools_list,
         tool_choice=tool_choice,
