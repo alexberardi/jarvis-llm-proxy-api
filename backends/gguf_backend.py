@@ -172,6 +172,10 @@ class GGUFClient(LLMBackendBase):
         """Initialize llama.cpp backend, optionally with a LoRA adapter."""
         from llama_cpp import Llama
 
+        if isinstance(stop_tokens, str):
+            stop_tokens = [t.strip() for t in stop_tokens.split(",") if t.strip()]
+        self.stop_tokens = stop_tokens or []
+
         # Store init kwargs so we can reload with a different adapter later
         self._llama_init_kwargs = {
             "model_path": model_path,
@@ -682,20 +686,14 @@ class GGUFClient(LLMBackendBase):
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
                 }
+                if self.stop_tokens:
+                    completion_kwargs["stop"] = self.stop_tokens
                 # Native tool calling: pass tools to llama-cpp-python
-                # When tools are present, skip GBNF grammar (tool calling has its own constrained generation)
                 if params.tools:
                     completion_kwargs["tools"] = params.tools
                     if params.tool_choice is not None:
                         completion_kwargs["tool_choice"] = params.tool_choice
                     logger.info("🔧 Native tool calling enabled for llama.cpp request (%d tools)", len(params.tools))
-                elif params.grammar:
-                    try:
-                        from llama_cpp import LlamaGrammar
-                        completion_kwargs["grammar"] = LlamaGrammar.from_string(params.grammar)
-                        logger.info("🧩 GGUF grammar applied to llama.cpp request")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to apply GGUF grammar: {e}")
                 response = self.model.create_chat_completion(**completion_kwargs)
 
                 content = response["choices"][0]["message"].get("content") or ""  # type: ignore

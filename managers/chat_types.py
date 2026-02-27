@@ -37,7 +37,6 @@ class GenerationParams:
     max_tokens: Optional[int] = None
     stream: bool = False
     response_format: Optional[dict] = None  # For JSON output: {"type": "json_object"}
-    grammar: Optional[str] = None  # GBNF grammar for constrained generation
     # Per-request adapter settings: {"hash": str, "scale": float, "enabled": bool}
     adapter_settings: Optional[dict] = None
     tools: Optional[list] = None  # OpenAI-format tool definitions for native tool calling
