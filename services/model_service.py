@@ -1,15 +1,18 @@
 import atexit
+import json
 import logging
 import os
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+from managers.chat_types import GenerationParams
 from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest, Message
-from services.chat_runner import run_chat_completion
+from services.chat_runner import run_chat_completion, normalize_messages
 from services.date_keys import extract_date_keys_fast, build_date_hint_message
 from api.settings_routes import router as settings_router
 from services.settings_helpers import get_setting
@@ -185,6 +188,9 @@ def reload_models(x_internal_token: str | None = Header(default=None)):
         model_manager.unload_all()
     except (RuntimeError, AttributeError) as e:
         logger.debug(f"unload_all during reload failed: {e}")
+    # Reset singleton so __init__ re-reads settings
+    ModelManager._instance = None
+    ModelManager._initialized = False
     model_manager = ModelManager()
     return {"status": "ok"}
 
@@ -248,6 +254,69 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     if result.finish_reason is not None:
         response["finish_reason"] = result.finish_reason
     return response
+
+
+@app.post("/internal/model/chat/stream")
+async def model_chat_stream(
+    req: ChatCompletionRequest,
+    x_internal_token: str | None = Header(default=None),
+):
+    """SSE streaming chat completion endpoint.
+
+    Returns Server-Sent Events with token deltas, followed by a final
+    event containing the full content and usage stats.
+    """
+    require_internal_token(x_internal_token)
+    logger.info(f"▶️  /internal/model/chat/stream model={req.model} messages={len(req.messages)}")
+
+    # Date key extraction (same as non-streaming)
+    date_keys: Optional[List[str]] = None
+    if req.include_date_context:
+        user_text = _get_user_text(req)
+        if user_text:
+            ft_result = extract_date_keys_fast(user_text)
+            date_keys = ft_result.keys
+            hint_msg = build_date_hint_message(ft_result)
+            if hint_msg:
+                req.messages.append(Message(**hint_msg))
+
+    model_config = model_manager.get_model_config(req.model)
+    if not model_config:
+        raise HTTPException(status_code=404, detail=f"Model '{req.model}' not found")
+
+    backend = model_config.backend_instance
+    if not hasattr(backend, "generate_text_chat_stream"):
+        raise HTTPException(status_code=501, detail="Backend does not support streaming")
+
+    normalized = normalize_messages(req.messages)
+    params = GenerationParams(
+        temperature=req.temperature or 0.7,
+        max_tokens=req.max_tokens,
+        stream=True,
+        adapter_settings=(
+            req.adapter_settings.model_dump()
+            if req.adapter_settings and req.adapter_settings.enabled
+            else None
+        ),
+    )
+
+    def event_generator():
+        try:
+            for event in backend.generate_text_chat_stream(model_config, normalized, params):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/health")

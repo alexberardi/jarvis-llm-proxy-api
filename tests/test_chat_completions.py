@@ -1,6 +1,7 @@
 import base64
 import importlib
 import os
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,12 +37,20 @@ def client(set_mock_env, mock_auth, mock_model_service):
 
 
 def test_model_alias_resolution(set_mock_env):
-    manager = ModelManager()
-    assert manager.get_model_config("full").model_id == "jarvis-text-8b"
-    assert manager.get_model_config("lightweight").model_id == "jarvis-text-1b"
-    vision_cfg = manager.get_model_config("vision")
-    assert vision_cfg.model_id == "jarvis-vision-11b"
-    assert vision_cfg.supports_images is True
+    # Reset singleton so env vars take effect, and disable the settings
+    # service so get_setting() falls back to the patched env vars.
+    ModelManager._instance = None
+    ModelManager._initialized = False
+    with patch("services.settings_helpers._get_settings_service", return_value=None):
+        manager = ModelManager()
+        assert manager.get_model_config("full").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("lightweight").model_id == "jarvis-text-1b"
+        vision_cfg = manager.get_model_config("vision")
+        assert vision_cfg.model_id == "jarvis-vision-11b"
+        assert vision_cfg.supports_images is True
+    # Reset singleton after test to avoid polluting other tests
+    ModelManager._instance = None
+    ModelManager._initialized = False
 
 
 def test_chat_with_string_content(client):

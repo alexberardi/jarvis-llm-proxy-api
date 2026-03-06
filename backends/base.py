@@ -1,7 +1,7 @@
 """Abstract base class for LLM inference backends."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from managers.chat_types import ChatResult, GenerationParams, NormalizedMessage
 
@@ -77,6 +77,26 @@ class LLMBackendBase(ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support vision/multimodal"
+        )
+
+    def generate_text_chat_stream(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Stream text response token-by-token.
+
+        Yields dicts with either:
+        - {"delta": "token text"} for incremental tokens
+        - {"done": True, "content": "full text", "usage": {...},
+           "tool_calls": [...], "finish_reason": "stop"} as final event
+
+        Default implementation raises NotImplementedError.
+        Override in backends that support streaming.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support streaming"
         )
 
     # =========================================================================

@@ -13,17 +13,20 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from services.settings_service import (
-    LLMProxySettingsService,
-    SETTINGS_DEFINITIONS,
-)
-from auth.app_auth import require_app_auth
+from jarvis_settings_client import SettingsService
+from services.settings_service import SETTINGS_DEFINITIONS
+
+# Ensure JARVIS_AUTH_BASE_URL is set before importing settings_routes,
+# since the module creates require_app_auth at import time via get_auth_url().
+os.environ.setdefault("JARVIS_AUTH_BASE_URL", "http://localhost:7701")
+
+from api.settings_routes import require_app_auth, router  # noqa: E402
 
 
 @pytest.fixture
 def mock_service():
     """Create a mock settings service."""
-    service = LLMProxySettingsService(
+    service = SettingsService(
         definitions=SETTINGS_DEFINITIONS,
         get_db_session=lambda: None,
         setting_model=None,
@@ -34,12 +37,11 @@ def mock_service():
 @pytest.fixture
 def client(mock_service):
     """Create test client with mocked dependencies."""
-    from api.settings_routes import router
-
     app = FastAPI()
     app.include_router(router)
 
-    # Override the auth dependency to always succeed
+    # Override the auth dependency to always succeed — must use the same
+    # require_app_auth object that the router uses (from api.settings_routes).
     async def mock_auth():
         return None
 
@@ -53,13 +55,10 @@ def client(mock_service):
 @pytest.fixture
 def unauthenticated_client():
     """Create test client without auth override (auth will fail)."""
-    from api.settings_routes import router
-
     app = FastAPI()
     app.include_router(router)
 
     # Don't override auth - let it fail naturally
-    # We need to set up the env to not have valid auth
     with patch.dict(os.environ, {}, clear=False):
         yield TestClient(app)
 
