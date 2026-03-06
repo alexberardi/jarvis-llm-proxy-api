@@ -43,6 +43,10 @@ RUN pip install --no-cache-dir -r requirements-base.txt
 COPY requirements-vllm.txt .
 RUN pip install --no-cache-dir -r requirements-vllm.txt
 
+# Install llama-cpp-python with prebuilt CUDA 12.4 wheels (for GGUF backend)
+RUN pip install --no-cache-dir llama-cpp-python \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — slim image with only what we need
 # ---------------------------------------------------------------------------
