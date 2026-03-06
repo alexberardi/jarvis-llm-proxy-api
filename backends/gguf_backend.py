@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from .power_metrics import PowerMetrics
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
@@ -60,6 +60,28 @@ class GGUFClient(LLMBackendBase):
             "inference.gguf.n_gpu_layers", "JARVIS_N_GPU_LAYERS", -1
         )
 
+        # Multi-GPU configuration
+        # split_mode: 0=NONE (single GPU), 1=LAYER (split layers across GPUs), 2=ROW (split rows across GPUs)
+        split_mode = get_int_setting(
+            "inference.gguf.split_mode", "JARVIS_GGUF_SPLIT_MODE", 1
+        )
+        # main_gpu: index of the GPU to use for scratch buffers and small tensors
+        main_gpu = get_int_setting(
+            "inference.gguf.main_gpu", "JARVIS_GGUF_MAIN_GPU", 0
+        )
+        # tensor_split: comma-separated proportions for VRAM allocation per GPU (e.g. "0.5,0.5" for even split)
+        tensor_split_str = get_setting(
+            "inference.gguf.tensor_split", "JARVIS_GGUF_TENSOR_SPLIT", ""
+        ).strip()
+        tensor_split: list[float] | None = None
+        if tensor_split_str:
+            try:
+                tensor_split = [float(x.strip()) for x in tensor_split_str.split(",") if x.strip()]
+                logger.info(f"Multi-GPU tensor split: {tensor_split}")
+            except ValueError:
+                logger.warning(f"Invalid JARVIS_GGUF_TENSOR_SPLIT value: {tensor_split_str!r}, ignoring")
+                tensor_split = None
+
 
         # Memory management settings
         self.enable_cache = get_bool_setting(
@@ -113,6 +135,8 @@ class GGUFClient(LLMBackendBase):
         logger.debug(f"🔍 Debug: Context window: {context_window}")
         logger.debug(f"🔍 Debug: Threads: {n_threads}")
         logger.debug(f"🔍 Debug: GPU layers: {n_gpu_layers}")
+        if tensor_split:
+            logger.debug(f"🔍 Debug: Multi-GPU split_mode: {split_mode}, main_gpu: {main_gpu}, tensor_split: {tensor_split}")
         logger.debug(f"🔍 Debug: Context cache: {'enabled' if self.enable_cache else 'disabled'}")
         logger.debug(f"🔍 Debug: Batch size: {n_batch}")
         logger.debug(f"🔍 Debug: Micro batch size: {n_ubatch}")
@@ -124,7 +148,7 @@ class GGUFClient(LLMBackendBase):
             self._init_vllm(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
         else:
             logger.info(f"🦙 Using llama.cpp inference engine")
-            self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
+            self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv, split_mode=split_mode, main_gpu=main_gpu, tensor_split=tensor_split)
 
     @staticmethod
     def _resolve_max_tokens() -> int:
@@ -132,23 +156,10 @@ class GGUFClient(LLMBackendBase):
         return get_int_setting("inference.general.max_tokens", "JARVIS_MAX_TOKENS", 512)
 
     def _init_vllm(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
-        """Initialize vLLM backend"""
-        try:
-            from .vllm_backend import VLLMClient
-            self.backend = VLLMClient(model_path, chat_format, stop_tokens, context_window)
-            self.inference_engine = "vllm"
-        except ValueError as e:
-            if "vLLM requires HuggingFace model names" in str(e):
-                logger.warning("🔧 CONFIGURATION SUGGESTION:")
-                logger.warning("   For GGUF files, use: JARVIS_INFERENCE_ENGINE=llama_cpp")
-                logger.warning("   For vLLM, switch to TRANSFORMERS backend with HF models:")
-                logger.warning("   JARVIS_MODEL_BACKEND=TRANSFORMERS")
-                logger.warning("   JARVIS_MODEL_NAME=microsoft/Phi-3-mini-4k-instruct")
-                logger.warning("   JARVIS_INFERENCE_ENGINE=vllm")
-                logger.info(f"🔄 Falling back to llama.cpp for GGUF file...")
-                self._init_llama_cpp(model_path, chat_format, stop_tokens, context_window, n_threads, n_gpu_layers, verbose, seed, context_window, n_batch, n_ubatch, rope_scaling_type, mul_mat_q, f16_kv)
-            else:
-                raise
+        """Initialize vLLM backend (supports both HF models and GGUF files)."""
+        from .vllm_backend import VLLMClient
+        self.backend = VLLMClient(model_path, chat_format, stop_tokens, context_window)
+        self.inference_engine = "vllm"
 
     def _init_llama_cpp(
         self,
@@ -168,6 +179,9 @@ class GGUFClient(LLMBackendBase):
         f16_kv: bool,
         lora_path: Optional[str] = None,
         lora_scale: float = 1.0,
+        split_mode: int = 1,
+        main_gpu: int = 0,
+        tensor_split: list[float] | None = None,
     ):
         """Initialize llama.cpp backend, optionally with a LoRA adapter."""
         from llama_cpp import Llama
@@ -190,7 +204,11 @@ class GGUFClient(LLMBackendBase):
             "mul_mat_q": mul_mat_q,
             "f16_kv": f16_kv,
             "flash_attn": self.flash_attn,
+            "split_mode": split_mode,
+            "main_gpu": main_gpu,
         }
+        if tensor_split:
+            self._llama_init_kwargs["tensor_split"] = tensor_split
         if chat_format:
             self._llama_init_kwargs["chat_format"] = chat_format
 
@@ -714,6 +732,94 @@ class GGUFClient(LLMBackendBase):
                     tool_calls=tool_calls_raw,
                     finish_reason=finish_reason,
                 )
+
+    def generate_text_chat_stream(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Stream chat completion token-by-token.
+
+        Yields dicts:
+        - {"delta": "token"} for each token
+        - {"done": True, "content": "...", "usage": {...}, ...} as final event
+
+        Only supported for the llama.cpp engine.
+        """
+        if self.inference_engine != "llama_cpp":
+            raise NotImplementedError("Streaming only supported for llama.cpp engine")
+
+        # Convert NormalizedMessage to legacy dict format
+        legacy_messages: list[dict[str, str]] = []
+        for msg in messages:
+            text_content = " ".join(
+                part.text for part in msg.content if isinstance(part, TextPart)
+            )
+            legacy_messages.append({"role": msg.role, "content": text_content})
+
+        effective_max_tokens: int = params.max_tokens or self.max_tokens
+
+        with self._lock:
+            if params.adapter_settings:
+                self._handle_adapter_switch(params.adapter_settings)
+
+            gen_start = time.time()
+
+            completion_kwargs: dict[str, Any] = {
+                "messages": legacy_messages,
+                "temperature": params.temperature,
+                "max_tokens": effective_max_tokens,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "repeat_penalty": self.repeat_penalty,
+                "stream": True,
+                "mirostat_mode": self.mirostat_mode,
+                "mirostat_tau": self.mirostat_tau,
+                "mirostat_eta": self.mirostat_eta,
+            }
+            if self.stop_tokens:
+                completion_kwargs["stop"] = self.stop_tokens
+
+            full_content = ""
+            finish_reason = "stop"
+
+            for chunk in self.model.create_chat_completion(**completion_kwargs):
+                choice = chunk["choices"][0]  # type: ignore
+                delta = choice.get("delta", {})
+                delta_content = delta.get("content")
+
+                if delta_content:
+                    full_content += delta_content
+                    yield {"delta": delta_content}
+
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+
+            elapsed = time.time() - gen_start
+            usage = chunk.get("usage") if chunk else {}  # type: ignore
+            if not usage:
+                # llama-cpp-python doesn't always provide usage in streaming mode
+                # Estimate from content length
+                usage = {}
+
+            self.last_usage = usage
+
+            comp = usage.get("completion_tokens", 0)
+            prompt_t = usage.get("prompt_tokens", 0)
+            tok_s = comp / elapsed if elapsed > 0 and comp > 0 else 0
+            logger.info(
+                f"⏱️  llama.cpp stream {comp} completion + {prompt_t} prompt tokens "
+                f"in {elapsed:.2f}s ({tok_s:.0f} tok/s)"
+            )
+
+            yield {
+                "done": True,
+                "content": full_content,
+                "usage": usage,
+                "tool_calls": None,
+                "finish_reason": finish_reason,
+            }
 
     def _handle_adapter_switch(self, adapter_settings: dict) -> None:
         """Check adapter_settings and reload model if adapter changed.

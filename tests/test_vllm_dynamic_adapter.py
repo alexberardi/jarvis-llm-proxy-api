@@ -14,6 +14,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# vLLM is Linux+CUDA only — skip entire module on macOS / non-CUDA systems
+vllm = pytest.importorskip("vllm", reason="vLLM not available (requires Linux + CUDA)")
+
 
 class TestVLLMDynamicAdapterLoading:
     """Tests for per-request adapter loading in vLLM backend."""
