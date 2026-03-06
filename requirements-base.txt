@@ -38,7 +38,7 @@ fasttext-wheel>=0.9.2
 # (provides centralized logging to jarvis-logs server)
 
 # jarvis-config-client for service discovery
-jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@main
+jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@ea1c63a
 
 # jarvis-settings-client for settings management
 jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main
