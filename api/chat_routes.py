@@ -7,6 +7,7 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 import httpx
 
 from auth.app_auth import require_app_auth
@@ -59,7 +60,6 @@ async def chat_completions(req: ChatCompletionRequest):
                 "MODEL_SERVICE_URL is not set; API is passthrough-only.",
                 500,
             )
-        url = model_service_url.rstrip("/") + "/internal/model/chat"
         headers = {}
         if internal_token:
             headers["X-Internal-Token"] = internal_token
@@ -67,6 +67,34 @@ async def chat_completions(req: ChatCompletionRequest):
             "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
         )
 
+        # Streaming mode: proxy SSE from model service
+        if req.stream:
+            url = model_service_url.rstrip("/") + "/internal/model/chat/stream"
+
+            async def stream_proxy():
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST", url, json=req.dict(), headers=headers
+                    ) as resp:
+                        if resp.status_code != 200:
+                            yield f"data: {{'error': 'Model service error {resp.status_code}'}}\n\n"
+                            return
+                        async for line in resp.aiter_lines():
+                            if line:
+                                yield f"{line}\n\n"
+
+            return StreamingResponse(
+                stream_proxy(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        # Non-streaming mode: existing behavior
+        url = model_service_url.rstrip("/") + "/internal/model/chat"
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=req.dict(), headers=headers)
             if resp.status_code != 200:

@@ -90,13 +90,6 @@ class VLLMClient(LLMBackendBase):
         logger.debug(f"🚀 vLLM Debug: Max sequences: {max_num_seqs}")
         logger.debug(f"🚀 vLLM Debug: Quantization: {vllm_quantization or 'none'}")
         
-        # Check if model_path is a local GGUF file
-        if model_path.endswith('.gguf') and ('/' in model_path or '\\' in model_path):
-            logger.warning(f"⚠️  vLLM does not support local GGUF files directly")
-            logger.info(f"💡 For GGUF files, use JARVIS_INFERENCE_ENGINE=llama_cpp instead")
-            logger.info(f"💡 For vLLM, use HuggingFace model names like: microsoft/Phi-3-mini-4k-instruct")
-            raise ValueError(f"vLLM requires HuggingFace model names or converted models, not local GGUF files: {model_path}")
-
         # Initialize vLLM engine
         try:
             logger.info(f"🚀 Loading vLLM model: {model_path}")
@@ -115,6 +108,23 @@ class VLLMClient(LLMBackendBase):
                 "enable_prefix_caching": True,
                 "swap_space": 0,  # Disable CPU swap to avoid latency spikes
             }
+
+            # GGUF files need an explicit tokenizer (HF repo) since the
+            # tokenizer isn't always bundled in the GGUF container format.
+            if model_path.endswith(".gguf"):
+                gguf_tokenizer = get_setting(
+                    "inference.vllm.tokenizer", "JARVIS_VLLM_TOKENIZER", ""
+                ).strip()
+                if gguf_tokenizer:
+                    llm_kwargs["tokenizer"] = gguf_tokenizer
+                    logger.info(f"🔤 GGUF tokenizer override: {gguf_tokenizer}")
+                else:
+                    logger.warning(
+                        "GGUF model detected but JARVIS_VLLM_TOKENIZER is not set. "
+                        "vLLM will attempt to infer the tokenizer from the GGUF metadata, "
+                        "but this may fail. Set JARVIS_VLLM_TOKENIZER to the HuggingFace "
+                        "repo ID (e.g., 'Qwen/Qwen2.5-7B-Instruct') for reliability."
+                    )
             # Enable LoRA for dynamic per-request adapter loading
             max_lora_rank = get_int_setting(
                 "inference.vllm.max_lora_rank", "JARVIS_VLLM_MAX_LORA_RANK", 64
