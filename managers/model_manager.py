@@ -8,9 +8,6 @@ from services.settings_helpers import (
     get_setting,
 )
 
-# Old alias names that trigger deprecation warnings
-_DEPRECATED_ALIASES = {"full", "lightweight", "cloud", "vision"}
-
 
 class ModelConfig:
     """Configuration for a single model"""
@@ -66,32 +63,6 @@ class ModelManager:
         self.aliases: Dict[str, str] = {}
 
         self._initialize_models()
-
-    # ---- Backwards-compat property aliases ----
-
-    @property
-    def main_model(self) -> Any:
-        return self.live_model
-
-    @main_model.setter
-    def main_model(self, value: Any) -> None:
-        self.live_model = value
-
-    @property
-    def lightweight_model(self) -> Any:
-        return self.live_model
-
-    @lightweight_model.setter
-    def lightweight_model(self, value: Any) -> None:
-        self.live_model = value
-
-    @property
-    def cloud_model(self) -> Any:
-        return self.background_model
-
-    @property
-    def vision_model(self) -> Any:
-        return self.background_model
 
     # ------------------------------------------------------------------ #
     #  Backend factory                                                     #
@@ -347,13 +318,6 @@ class ModelManager:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    # Backwards-compat aliases
-    def swap_main_model(self, *args, **kwargs):
-        return self.swap_live_model(*args, **kwargs)
-
-    def swap_lightweight_model(self, *args, **kwargs):
-        return self.swap_background_model(*args, **kwargs)
-
     def unload_all(self):
         """Unload all model backends (best-effort)."""
         import asyncio
@@ -424,12 +388,8 @@ class ModelManager:
                 supports_images=False,
                 context_length=live_context,
             )
-            # Canonical alias
             self.aliases["live"] = live_model_id
-            # Deprecated aliases → live
-            self.aliases["full"] = live_model_id
-            self.aliases["lightweight"] = live_model_id
-            logger.info(f"📋 Registered live model: {live_model_id} (aliases: 'live', 'full', 'lightweight')")
+            logger.info(f"📋 Registered live model: {live_model_id} (alias: 'live')")
 
         # Register background model
         if self.background_model and self.background_model is not self.live_model:
@@ -441,37 +401,22 @@ class ModelManager:
                 context_length=bg_context,
             )
             self.aliases["background"] = bg_model_id
-            # Deprecated aliases → background
-            self.aliases["cloud"] = bg_model_id
-            self.aliases["vision"] = bg_model_id
-            logger.info(f"📋 Registered background model: {bg_model_id} (aliases: 'background', 'cloud', 'vision')")
+            logger.info(f"📋 Registered background model: {bg_model_id} (alias: 'background')")
         elif self.background_model:
-            # Shared instance — all aliases point to the same model
             self.aliases["background"] = live_model_id
-            self.aliases["cloud"] = live_model_id
-            self.aliases["vision"] = live_model_id
-            logger.info(f"📋 Background aliases point to shared live model: {live_model_id}")
+            logger.info(f"📋 Background alias points to shared live model: {live_model_id}")
 
     def get_model_config(self, model_name: str) -> Optional[ModelConfig]:
         """
         Get model configuration by name (supports both direct model IDs and aliases).
 
         Args:
-            model_name: Either a direct model ID or an alias
-                        (live, background, full, lightweight, vision, cloud)
+            model_name: Either a direct model ID or an alias ('live' or 'background')
 
         Returns:
             ModelConfig if found, None otherwise
         """
         lower_name = model_name.lower()
-
-        # Log deprecation warning for old aliases
-        if lower_name in _DEPRECATED_ALIASES:
-            logger.warning(
-                "⚠️  Deprecated model alias '%s' used. "
-                "Migrate to 'live' or 'background'.",
-                model_name,
-            )
 
         # First check if it's an alias
         if lower_name in self.aliases:
