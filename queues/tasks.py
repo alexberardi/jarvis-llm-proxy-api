@@ -114,8 +114,9 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         sampling = (request_body.get("sampling") or {})
         response_format = request_body.get("response_format")
 
+        # Implicit routing: queue worker always uses the background model
         req_obj = ChatCompletionRequest(
-            model=request_body.get("model"),
+            model="background",
             messages=request_body.get("messages") or [],
             temperature=sampling.get("temperature", request_body.get("temperature", 0.7)),
             max_tokens=sampling.get("max_tokens") or request_body.get("max_tokens"),

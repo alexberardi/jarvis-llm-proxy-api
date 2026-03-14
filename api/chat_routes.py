@@ -15,7 +15,6 @@ from models.api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from services.message_service import request_has_images
 from services.response_helpers import create_openai_response, openai_error
 from services.settings_helpers import get_float_setting, get_setting
 
@@ -35,19 +34,14 @@ async def chat_completions(req: ChatCompletionRequest):
     Supports:
     - Text-only messages (string content)
     - Multimodal messages (structured content with text + images)
-    - Model selection via model field (supports aliases: full, lightweight, vision, cloud)
+
+    Defaults to the **live** model. Consumers may explicitly request
+    "background" when needed (e.g. heavy summarisation that shouldn't
+    block the live model).
     """
-    # Validate: reject images for non-vision models early
-    # Check by model alias rather than loading ModelManager (which is expensive
-    # and doesn't work across process boundaries)
-    if request_has_images(req.messages):
-        vision_model_aliases = {"vision", "vision-model"}
-        model_lower = (req.model or "").lower()
-        if model_lower not in vision_model_aliases:
-            openai_error(
-                "invalid_request_error",
-                f"Model '{req.model}' does not support images. Use 'vision' model instead.",
-            )
+    # Default to live; allow explicit "background" pass-through
+    if not req.model or req.model.lower() not in ("live", "background"):
+        req.model = "live"
 
     try:
         model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
