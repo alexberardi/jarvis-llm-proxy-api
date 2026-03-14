@@ -21,8 +21,6 @@ def set_mock_env(monkeypatch):
     for var in (
         "JARVIS_LIVE_MODEL_NAME", "JARVIS_LIVE_MODEL_BACKEND",
         "JARVIS_BACKGROUND_MODEL_NAME", "JARVIS_BACKGROUND_MODEL_BACKEND",
-        "JARVIS_LIGHTWEIGHT_MODEL_NAME", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND",
-        "JARVIS_VISION_MODEL_NAME", "JARVIS_VISION_MODEL_BACKEND",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -42,8 +40,6 @@ def set_mock_env_separate_bg(monkeypatch):
     monkeypatch.delenv("JARVIS_REST_MODEL_URL", raising=False)
     for var in (
         "JARVIS_LIVE_MODEL_NAME", "JARVIS_LIVE_MODEL_BACKEND",
-        "JARVIS_LIGHTWEIGHT_MODEL_NAME", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND",
-        "JARVIS_VISION_MODEL_NAME", "JARVIS_VISION_MODEL_BACKEND",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -74,20 +70,6 @@ def test_model_alias_resolution_live_and_background(set_mock_env):
     ModelManager._initialized = False
 
 
-def test_backwards_compat_aliases(set_mock_env):
-    """Verify old aliases (full, lightweight, cloud, vision) still resolve."""
-    ModelManager._instance = None
-    ModelManager._initialized = False
-    with patch("services.settings_helpers._get_settings_service", return_value=None):
-        manager = ModelManager()
-        assert manager.get_model_config("full").model_id == "jarvis-text-8b"
-        assert manager.get_model_config("lightweight").model_id == "jarvis-text-8b"
-        assert manager.get_model_config("cloud").model_id == "jarvis-text-8b"
-        assert manager.get_model_config("vision").model_id == "jarvis-text-8b"
-    ModelManager._instance = None
-    ModelManager._initialized = False
-
-
 def test_separate_background_model(set_mock_env_separate_bg):
     """Verify separate background model creates a distinct instance."""
     ModelManager._instance = None
@@ -98,10 +80,6 @@ def test_separate_background_model(set_mock_env_separate_bg):
         assert manager.get_model_config("background").model_id == "jarvis-bg-model"
         # They should be different instances
         assert manager.live_model is not manager.background_model
-        # Deprecated aliases
-        assert manager.get_model_config("full").model_id == "jarvis-text-8b"
-        assert manager.get_model_config("cloud").model_id == "jarvis-bg-model"
-        assert manager.get_model_config("vision").model_id == "jarvis-bg-model"
     ModelManager._instance = None
     ModelManager._initialized = False
 

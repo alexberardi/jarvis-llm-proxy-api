@@ -27,10 +27,10 @@ class RestClient(LLMBackendBase):
         self.model_type = model_type
         
         # Allow environment variable override of model name based on model type
-        if model_type in ("lightweight", "background"):
+        if model_type == "background":
             env_model_name = get_setting(
-                "model.lightweight.rest_model_name",
-                "JARVIS_REST_LIGHTWEIGHT_MODEL_NAME",
+                "model.background.rest_model_name",
+                "JARVIS_REST_BACKGROUND_MODEL_NAME",
                 "",
             )
         else:
