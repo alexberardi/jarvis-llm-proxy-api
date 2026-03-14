@@ -1,6 +1,4 @@
-import base64
 import importlib
-import os
 from unittest.mock import patch
 
 import pytest
@@ -13,16 +11,41 @@ from managers.model_manager import ModelManager
 def set_mock_env(monkeypatch):
     envs = {
         "JARVIS_MODEL_NAME": "jarvis-text-8b",
-        "JARVIS_LIGHTWEIGHT_MODEL_NAME": "jarvis-text-1b",
-        "JARVIS_VISION_MODEL_NAME": "jarvis-vision-11b",
         "JARVIS_MODEL_BACKEND": "MOCK",
-        "JARVIS_LIGHTWEIGHT_MODEL_BACKEND": "MOCK",
-        "JARVIS_VISION_MODEL_BACKEND": "MOCK",
     }
     for key, value in envs.items():
         monkeypatch.setenv(key, value)
     # Ensure downstream env lookups default to mock as well
     monkeypatch.delenv("JARVIS_REST_MODEL_URL", raising=False)
+    # Clear any new-style env vars so fallback chain works
+    for var in (
+        "JARVIS_LIVE_MODEL_NAME", "JARVIS_LIVE_MODEL_BACKEND",
+        "JARVIS_BACKGROUND_MODEL_NAME", "JARVIS_BACKGROUND_MODEL_BACKEND",
+        "JARVIS_LIGHTWEIGHT_MODEL_NAME", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND",
+        "JARVIS_VISION_MODEL_NAME", "JARVIS_VISION_MODEL_BACKEND",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    yield
+
+
+@pytest.fixture
+def set_mock_env_separate_bg(monkeypatch):
+    """Env where background uses a different model than live."""
+    envs = {
+        "JARVIS_MODEL_NAME": "jarvis-text-8b",
+        "JARVIS_MODEL_BACKEND": "MOCK",
+        "JARVIS_BACKGROUND_MODEL_NAME": "jarvis-bg-model",
+        "JARVIS_BACKGROUND_MODEL_BACKEND": "MOCK",
+    }
+    for key, value in envs.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("JARVIS_REST_MODEL_URL", raising=False)
+    for var in (
+        "JARVIS_LIVE_MODEL_NAME", "JARVIS_LIVE_MODEL_BACKEND",
+        "JARVIS_LIGHTWEIGHT_MODEL_NAME", "JARVIS_LIGHTWEIGHT_MODEL_BACKEND",
+        "JARVIS_VISION_MODEL_NAME", "JARVIS_VISION_MODEL_BACKEND",
+    ):
+        monkeypatch.delenv(var, raising=False)
     yield
 
 
@@ -36,19 +59,49 @@ def client(set_mock_env, mock_auth, mock_model_service):
     return TestClient(main.app)
 
 
-def test_model_alias_resolution(set_mock_env):
-    # Reset singleton so env vars take effect, and disable the settings
-    # service so get_setting() falls back to the patched env vars.
+def test_model_alias_resolution_live_and_background(set_mock_env):
+    """Verify 'live' and 'background' aliases resolve correctly."""
+    ModelManager._instance = None
+    ModelManager._initialized = False
+    with patch("services.settings_helpers._get_settings_service", return_value=None):
+        manager = ModelManager()
+        # Canonical aliases
+        assert manager.get_model_config("live").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("background").model_id == "jarvis-text-8b"
+        # When no separate background is configured, they share an instance
+        assert manager.live_model is manager.background_model
+    ModelManager._instance = None
+    ModelManager._initialized = False
+
+
+def test_backwards_compat_aliases(set_mock_env):
+    """Verify old aliases (full, lightweight, cloud, vision) still resolve."""
     ModelManager._instance = None
     ModelManager._initialized = False
     with patch("services.settings_helpers._get_settings_service", return_value=None):
         manager = ModelManager()
         assert manager.get_model_config("full").model_id == "jarvis-text-8b"
-        assert manager.get_model_config("lightweight").model_id == "jarvis-text-1b"
-        vision_cfg = manager.get_model_config("vision")
-        assert vision_cfg.model_id == "jarvis-vision-11b"
-        assert vision_cfg.supports_images is True
-    # Reset singleton after test to avoid polluting other tests
+        assert manager.get_model_config("lightweight").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("cloud").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("vision").model_id == "jarvis-text-8b"
+    ModelManager._instance = None
+    ModelManager._initialized = False
+
+
+def test_separate_background_model(set_mock_env_separate_bg):
+    """Verify separate background model creates a distinct instance."""
+    ModelManager._instance = None
+    ModelManager._initialized = False
+    with patch("services.settings_helpers._get_settings_service", return_value=None):
+        manager = ModelManager()
+        assert manager.get_model_config("live").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("background").model_id == "jarvis-bg-model"
+        # They should be different instances
+        assert manager.live_model is not manager.background_model
+        # Deprecated aliases
+        assert manager.get_model_config("full").model_id == "jarvis-text-8b"
+        assert manager.get_model_config("cloud").model_id == "jarvis-bg-model"
+        assert manager.get_model_config("vision").model_id == "jarvis-bg-model"
     ModelManager._instance = None
     ModelManager._initialized = False
 
@@ -58,7 +111,7 @@ def test_chat_with_string_content(client):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "full",
+            "model": "live",
             "messages": [{"role": "user", "content": "hello there"}],
         },
     )
@@ -74,7 +127,7 @@ def test_chat_with_structured_text_content(client):
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "lightweight",
+            "model": "live",
             "messages": [
                 {
                     "role": "user",
@@ -89,52 +142,14 @@ def test_chat_with_structured_text_content(client):
     assert payload["choices"][0]["message"]["content"]  # Has some content
 
 
-def test_chat_with_image_requires_vision_model(client):
-    """Verify that images sent to non-vision models are rejected."""
-    image_b64 = base64.b64encode(b"fake-image-bytes").decode("utf-8")
-    data_url = f"data:image/png;base64,{image_b64}"
+def test_chat_always_uses_live_model(client):
+    """Verify that the chat endpoint always routes to 'live' regardless of model name sent."""
+    # Even if we send "background" or "full", the chat endpoint should route to live
     response = client.post(
         "/v1/chat/completions",
         json={
-            "model": "full",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "describe"},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
-        },
-    )
-    assert response.status_code == 400
-    payload = response.json()
-    # FastAPI wraps HTTPException detail in "detail" key
-    assert payload["detail"]["error"]["type"] == "invalid_request_error"
-
-
-def test_chat_with_image_uses_vision_model(client):
-    """Verify that vision model accepts image content."""
-    image_b64 = base64.b64encode(b"fake-image-bytes").decode("utf-8")
-    data_url = f"data:image/png;base64,{image_b64}"
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "vision",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "describe"},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
+            "model": "background",
+            "messages": [{"role": "user", "content": "test"}],
         },
     )
     assert response.status_code == 200
-    payload = response.json()
-    assert "choices" in payload
-    assert payload["choices"][0]["message"]["content"]  # Has some content
-

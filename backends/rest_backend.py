@@ -21,13 +21,13 @@ class RestClient(LLMBackendBase):
         Args:
             base_url: Base URL for the API (e.g., http://localhost:11434, https://api.openai.com)
             model_name: Model name to use for requests
-            model_type: Type of model ("main" or "lightweight")
+            model_type: Type of model ("live" or "background")
         """
         self.base_url = base_url.rstrip('/')
         self.model_type = model_type
         
         # Allow environment variable override of model name based on model type
-        if model_type == "lightweight":
+        if model_type in ("lightweight", "background"):
             env_model_name = get_setting(
                 "model.lightweight.rest_model_name",
                 "JARVIS_REST_LIGHTWEIGHT_MODEL_NAME",
