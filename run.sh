@@ -89,34 +89,22 @@ echo -e "${BLUE}📜 Aggregated logs: [api] for server, [worker] for queue worke
 # Ensure fork-safety env for macOS workers (Objective-C libs)
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=${OBJC_DISABLE_INITIALIZE_FORK_SAFETY:-YES}
 
-# Start model service if configured
-# Auto-disable on macOS: model service requires vLLM which is Linux-only
+# Model service config
 MODEL_SERVICE_PORT="${MODEL_SERVICE_PORT:-7705}"
-if [[ "$(uname)" == "Darwin" ]]; then
-    RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-false}"
-else
-    RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
-fi
 MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
 MODEL_SERVICE_TOKEN_EXPORT="${MODEL_SERVICE_TOKEN:-${LLM_PROXY_INTERNAL_TOKEN:-}}"
 
 # Start API server in background
-# NOTE: Do NOT pipe output through sed - vLLM's logging causes BrokenPipeError (SIGPIPE)
-# when the pipe breaks during model initialization
 echo -e "${BLUE}[api] Starting API server${NC}"
 start_server "false" &
 API_PID=$!
 echo -e "${BLUE}🔢 API_PID=${API_PID}${NC}"
 
 # Start model service in background
-# NOTE: Same SIGPIPE issue applies here - no sed piping
-MODEL_PID=""
-if [[ "$RUN_MODEL_SERVICE" == "true" ]]; then
-  echo -e "${BLUE}[model] Starting model service on port $MODEL_SERVICE_PORT${NC}"
-  MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" &
-  MODEL_PID=$!
-  echo -e "${BLUE}🔢 MODEL_PID=${MODEL_PID}${NC}"
-fi
+echo -e "${BLUE}[model] Starting model service on port $MODEL_SERVICE_PORT${NC}"
+MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" &
+MODEL_PID=$!
+echo -e "${BLUE}🔢 MODEL_PID=${MODEL_PID}${NC}"
 
 # Optionally start queue worker
 # NOTE: Do NOT pipe worker output through sed - RQ forks work horses that inherit
@@ -129,13 +117,10 @@ if [[ "$RUN_QUEUE_WORKER" == "true" ]]; then
     echo -e "${BLUE}🔢 WORKER_PID=${WORKER_PID}${NC}"
 fi
 
-# Wait for either process to exit (portable wait-any loop)
-PIDS=("$API_PID")
+# Wait for any process to exit (portable wait-any loop)
+PIDS=("$API_PID" "$MODEL_PID")
 if [[ -n "$WORKER_PID" ]]; then
   PIDS+=("$WORKER_PID")
-fi
-if [[ -n "$MODEL_PID" ]]; then
-  PIDS+=("$MODEL_PID")
 fi
 
 DEAD_PID=""
@@ -171,6 +156,6 @@ fi
 if [[ -n "$WORKER_PID" ]] && ps -p $WORKER_PID >/dev/null 2>&1; then
   kill $WORKER_PID 2>/dev/null || true
 fi
-if [[ -n "$MODEL_PID" ]] && ps -p $MODEL_PID >/dev/null 2>&1; then
+if ps -p $MODEL_PID >/dev/null 2>&1; then
   kill $MODEL_PID 2>/dev/null || true
 fi
