@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from config.service_config import get_auth_url
 from jarvis_settings_client import create_combined_auth
+from jarvis_settings_client.routes import SettingResponse, SettingsListResponse, CategoriesResponse, SyncResponse, CacheInvalidateResponse
 from services.settings_service import get_settings_service
 
 require_app_auth = create_combined_auth(get_auth_url())
@@ -45,41 +46,6 @@ class BulkSettingUpdate(BaseModel):
     settings: dict[str, Any]
 
 
-class SettingResponse(BaseModel):
-    """Response for a single setting."""
-
-    key: str
-    value: Any
-    value_type: str
-    category: str
-    description: str | None
-    requires_reload: bool
-    is_secret: bool
-    env_fallback: str | None
-    from_db: bool
-
-
-class SettingsListResponse(BaseModel):
-    """Response for listing settings."""
-
-    settings: list[SettingResponse]
-    total: int
-
-
-class CategoriesResponse(BaseModel):
-    """Response for listing categories."""
-
-    categories: list[str]
-
-
-class SyncResponse(BaseModel):
-    """Response for sync operation."""
-
-    synced: dict[str, bool]
-    total_synced: int
-    total_skipped: int
-
-
 class UpdateResponse(BaseModel):
     """Response for update operation."""
 
@@ -96,13 +62,6 @@ class BulkUpdateResponse(BaseModel):
     total_updated: int
     total_failed: int
     requires_reload: bool
-
-
-class CacheInvalidateResponse(BaseModel):
-    """Response for cache invalidation."""
-
-    status: str
-    invalidated: str
 
 
 # ===========================================================================

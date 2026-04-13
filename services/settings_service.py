@@ -32,6 +32,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Live model backend (falls back to model.main.backend)",
         env_fallback="JARVIS_LIVE_MODEL_BACKEND",
         requires_reload=True,
+        options=["GGUF", "MLX", "VLLM", "TRANSFORMERS", "REST"],
     ),
     SettingDefinition(
         key="model.live.chat_format",
@@ -87,6 +88,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Background model backend (falls back to live backend)",
         env_fallback="JARVIS_BACKGROUND_MODEL_BACKEND",
         requires_reload=True,
+        options=["GGUF", "MLX", "VLLM", "TRANSFORMERS", "REST"],
     ),
     SettingDefinition(
         key="model.background.chat_format",
@@ -142,6 +144,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Main model backend (legacy, fallback for model.live)",
         env_fallback="JARVIS_MODEL_BACKEND",
         requires_reload=True,
+        options=["GGUF", "MLX", "VLLM", "TRANSFORMERS", "REST"],
     ),
     SettingDefinition(
         key="model.main.chat_format",
@@ -212,9 +215,10 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="inference.vllm",
         value_type="string",
         default="",
-        description="vLLM quantization: awq, gptq, fp8, or empty",
+        description="vLLM quantization method",
         env_fallback="JARVIS_VLLM_QUANTIZATION",
         requires_reload=True,
+        options=["", "awq", "gptq", "fp8"],
     ),
     SettingDefinition(
         key="inference.vllm.max_lora_rank",
@@ -304,18 +308,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="inference.transformers",
         value_type="string",
         default="auto",
-        description="Device: auto, cuda, mps, cpu",
+        description="Compute device",
         env_fallback="JARVIS_DEVICE",
         requires_reload=True,
+        options=["auto", "cuda", "mps", "cpu"],
     ),
     SettingDefinition(
         key="inference.transformers.torch_dtype",
         category="inference.transformers",
         value_type="string",
         default="auto",
-        description="Torch dtype: auto, float16, float32, bfloat16",
+        description="Torch dtype",
         env_fallback="JARVIS_TORCH_DTYPE",
         requires_reload=True,
+        options=["auto", "float16", "float32", "bfloat16"],
     ),
     SettingDefinition(
         key="inference.transformers.use_quantization",
@@ -331,18 +337,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="inference.transformers",
         value_type="string",
         default="4bit",
-        description="Quantization type: 4bit, 8bit",
+        description="Quantization type",
         env_fallback="JARVIS_QUANTIZATION_TYPE",
         requires_reload=True,
+        options=["4bit", "8bit"],
     ),
     SettingDefinition(
         key="inference.transformers.device_map",
         category="inference.transformers",
         value_type="string",
         default="auto",
-        description="Device map for transformers: auto, none",
+        description="Device map for transformers",
         env_fallback="JARVIS_TRANSFORMERS_DEVICE_MAP",
         requires_reload=True,
+        options=["auto", "none"],
     ),
     # ==================== inference.general ====================
     SettingDefinition(
@@ -350,9 +358,10 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="inference.general",
         value_type="string",
         default="llama_cpp",
-        description="Default inference engine: llama_cpp, vllm, transformers",
+        description="Default inference engine",
         env_fallback="JARVIS_INFERENCE_ENGINE",
         requires_reload=True,
+        options=["llama_cpp", "vllm", "transformers"],
     ),
     SettingDefinition(
         key="inference.general.max_tokens",
@@ -508,6 +517,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default="WARNING",
         description="Console log level",
         env_fallback="JARVIS_LOG_CONSOLE_LEVEL",
+        options=["DEBUG", "INFO", "WARNING", "ERROR"],
     ),
     SettingDefinition(
         key="logging.remote_level",
@@ -516,6 +526,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         default="DEBUG",
         description="Remote (jarvis-logs) log level",
         env_fallback="JARVIS_LOG_REMOTE_LEVEL",
+        options=["DEBUG", "INFO", "WARNING", "ERROR"],
     ),
     # ==================== model REST URLs ====================
     SettingDefinition(
@@ -542,8 +553,9 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="cache",
         value_type="string",
         default="local",
-        description="Cache type: local or redis",
+        description="Cache type",
         env_fallback="JARVIS_CACHE_TYPE",
+        options=["local", "redis"],
     ),
     SettingDefinition(
         key="cache.session_ttl_seconds",
@@ -740,8 +752,9 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="rest",
         value_type="string",
         default="none",
-        description="REST auth type (none, bearer, api_key, custom)",
+        description="REST auth type",
         env_fallback="JARVIS_REST_AUTH_TYPE",
+        options=["none", "bearer", "api_key", "custom"],
     ),
     SettingDefinition(
         key="rest.auth_header_name",
@@ -757,8 +770,9 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="training",
         value_type="string",
         default="auto",
-        description="Training backend: auto (MLX on Apple Silicon, Transformers elsewhere), mlx, or transformers",
+        description="Training backend (auto detects platform)",
         env_fallback="JARVIS_ADAPTER_TRAIN_BACKEND",
+        options=["auto", "mlx", "transformers"],
     ),
     SettingDefinition(
         key="training.train_cmd",
