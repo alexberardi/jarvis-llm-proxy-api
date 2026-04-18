@@ -41,7 +41,7 @@ fasttext-wheel>=0.9.2
 jarvis-config-client @ git+https://github.com/alexberardi/jarvis-config-client.git@ea1c63a
 
 # jarvis-settings-client for settings management
-jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@main
+jarvis-settings-client @ git+https://github.com/alexberardi/jarvis-settings-client.git@9902feb
 
 # Required for GGUF conversion (vendored llama.cpp convert_hf_to_gguf.py / convert_lora_to_gguf.py)
 gguf>=0.10.0
