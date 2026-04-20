@@ -284,17 +284,24 @@ def _run_training_command(env: Dict[str, str], timeout_s: int) -> None:
     except subprocess.TimeoutExpired as exc:
         raise AdapterTrainingError(f"Training timed out after {timeout_s}s") from exc
     except subprocess.CalledProcessError as exc:
+        log_tail = ""
         if log_path and Path(log_path).exists():
             try:
-                log_text = Path(log_path).read_text(encoding="utf-8")[-8000:]
+                log_text = Path(log_path).read_text(encoding="utf-8")
+                log_tail = log_text[-2000:]
                 if log_text.strip():
                     logger.info("📄 Adapter training output (tail):")
-                    logger.info(log_text)
+                    logger.info(log_text[-8000:])
                 else:
                     logger.info("📄 Adapter training output is empty.")
             except Exception as log_exc:
                 logger.warning(f"⚠️  Failed to read training log: {log_exc}")
-        raise AdapterTrainingError(f"Training command failed with exit code {exc.returncode}") from exc
+        # Surface the log tail in the exception so callers (DB error_message, callback
+        # payload) have actionable context without needing to SSH to the worker host.
+        msg = f"Training command failed with exit code {exc.returncode}"
+        if log_tail.strip():
+            msg += f"\n--- train.log tail (last 2KB) ---\n{log_tail.strip()}"
+        raise AdapterTrainingError(msg) from exc
 
 
 def _wait_for_gpu_memory(min_free_gb: float = 6.0, timeout_s: int = 30) -> bool:
@@ -332,11 +339,17 @@ def _wait_for_gpu_memory(min_free_gb: float = 6.0, timeout_s: int = 30) -> bool:
         return True
 
 
-def _debug_pause_model_service() -> None:
-    debug_enabled = get_bool_setting("debug.enabled", "DEBUG", False)
+def _pause_model_service_for_training() -> None:
+    pause_enabled = get_bool_setting(
+        "adapter.pause_serving_during_training",
+        "ADAPTER_PAUSE_SERVING_DURING_TRAINING",
+        True,
+    )
     model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
-    if not debug_enabled or not model_service_url:
-        logger.debug("⏭️  Debug pause skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
+    if not pause_enabled or not model_service_url:
+        logger.debug(
+            "⏭️  Serving pause skipped (adapter.pause_serving_during_training=false or model_service.url unset)"
+        )
         return
 
     token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
@@ -350,20 +363,26 @@ def _debug_pause_model_service() -> None:
         with httpx.Client(timeout=60.0) as client:  # Longer timeout for vLLM cleanup
             resp = client.post(unload_url, headers=headers)
             if resp.status_code != 200:
-                logger.warning(f"⚠️  Debug pause: unload failed {resp.status_code}: {resp.text}")
+                logger.warning(f"⚠️  Serving pause: unload failed {resp.status_code}: {resp.text}")
             else:
-                logger.info("🧊 Debug pause: model service unloaded successfully")
+                logger.info("🧊 Serving paused for training")
                 # Wait for GPU memory to actually be freed
                 _wait_for_gpu_memory(min_free_gb=6.0, timeout_s=30)
     except Exception as exc:
-        logger.warning(f"⚠️  Debug pause: unload request failed: {exc}")
+        logger.warning(f"⚠️  Serving pause: unload request failed: {exc}")
 
 
-def _debug_resume_model_service() -> None:
-    debug_enabled = get_bool_setting("debug.enabled", "DEBUG", False)
+def _resume_model_service_after_training() -> None:
+    pause_enabled = get_bool_setting(
+        "adapter.pause_serving_during_training",
+        "ADAPTER_PAUSE_SERVING_DURING_TRAINING",
+        True,
+    )
     model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
-    if not debug_enabled or not model_service_url:
-        logger.debug("⏭️  Debug resume skipped (DEBUG not enabled or MODEL_SERVICE_URL not set)")
+    if not pause_enabled or not model_service_url:
+        logger.debug(
+            "⏭️  Serving resume skipped (adapter.pause_serving_during_training=false or model_service.url unset)"
+        )
         return
 
     # Force garbage collection to release training memory
@@ -397,11 +416,11 @@ def _debug_resume_model_service() -> None:
         with httpx.Client(timeout=120.0) as client:  # Longer timeout for model loading
             resp = client.post(reload_url, headers=headers)
             if resp.status_code != 200:
-                logger.warning(f"⚠️  Debug resume: reload failed {resp.status_code}: {resp.text}")
+                logger.warning(f"⚠️  Serving resume: reload failed {resp.status_code}: {resp.text}")
             else:
-                logger.info("🔥 Debug resume: model service reloaded successfully")
+                logger.info("✅ Serving resumed, model reloaded")
     except Exception as exc:
-        logger.warning(f"⚠️  Debug resume: reload request failed: {exc}")
+        logger.warning(f"⚠️  Serving resume: reload request failed: {exc}")
 
 
 def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int) -> Dict[str, Any]:
@@ -549,7 +568,7 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
         _create_training_job(db, job_id, dataset_hash, node_id, base_model_id)
 
     started = time.time()
-    _debug_pause_model_service()
+    _pause_model_service_for_training()
     try:
         # Update status to RUNNING
         if db:
@@ -568,7 +587,7 @@ def run_adapter_training(request: Dict[str, Any], job_id: str, ttl_seconds: int)
         raise
     finally:
         # Always resume model service (finally runs whether success or exception)
-        _debug_resume_model_service()
+        _resume_model_service_after_training()
 
     if not output_dir.exists() or not any(output_dir.iterdir()):
         error_msg = "Training completed but output directory is empty"
