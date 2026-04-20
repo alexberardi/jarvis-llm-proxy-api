@@ -306,7 +306,22 @@ def main() -> int:
                 flush=True,
             )
             return 2
-        mlx_model_id = hf_base_model_id
+        # If hf_base_model_id is a local path (relative or ~), resolve to absolute.
+        # Otherwise treat as an HF repo ID and pass through.
+        if hf_base_model_id.startswith(("/", ".", "~")):
+            expanded = os.path.expanduser(hf_base_model_id)
+            resolved = os.path.abspath(expanded)
+            if os.path.isdir(resolved):
+                mlx_model_id = resolved
+                hf_base_model_id = resolved
+            else:
+                print(
+                    f"hf_base_model_id looks like a local path but directory not found: {resolved}",
+                    flush=True,
+                )
+                return 2
+        else:
+            mlx_model_id = hf_base_model_id
 
     # Read training hyperparameters (same env vars as train_adapter.py)
     max_seq_len = int(_get_param(params, "max_seq_len", os.getenv("JARVIS_ADAPTER_MAX_SEQ_LEN", "2048")))
