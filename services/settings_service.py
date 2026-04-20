@@ -886,6 +886,22 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="Training base model ID override",
         env_fallback="JARVIS_TRAIN_BASE_MODEL_ID",
     ),
+    # ==================== adapter deployment ====================
+    SettingDefinition(
+        key="adapter.pause_serving_during_training",
+        category="adapter",
+        value_type="bool",
+        default=True,
+        description=(
+            "Unload the live model before adapter training and reload after. "
+            "Required on single-GPU hosts where serving + training can't coexist "
+            "(e.g. 12GB Ubuntu boxes). Voice commands will 5xx briefly during the "
+            "pause window. Safe to disable on hosts with enough headroom or on "
+            "MLX (Apple) setups where training is lightweight and model_service.url "
+            "is typically unset."
+        ),
+        env_fallback="ADAPTER_PAUSE_SERVING_DURING_TRAINING",
+    ),
     # ==================== date keys ====================
     SettingDefinition(
         key="date_keys.disable_llm",
