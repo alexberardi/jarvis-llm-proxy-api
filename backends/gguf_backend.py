@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import threading
 import time
 from typing import Any, Dict, Generator, List, Optional
@@ -692,6 +693,12 @@ class GGUFClient(LLMBackendBase):
             else:
                 # Use llama.cpp backend
                 # Note: llama.cpp's create_chat_completion automatically detects chat format from the model
+                #
+                # `seed`: llama-cpp-python otherwise reuses the seed set at
+                # Llama() init, which makes temperature sampling produce the
+                # same output for identical prompts (wake-response, chat, etc.).
+                # Pass a fresh random seed per request so temperature>0 actually
+                # varies. No-op for temperature=0 (greedy).
                 completion_kwargs = {
                     "messages": legacy_messages,  # type: ignore
                     "temperature": params.temperature,
@@ -700,6 +707,7 @@ class GGUFClient(LLMBackendBase):
                     "top_k": self.top_k,
                     "repeat_penalty": self.repeat_penalty,
                     "stream": False,
+                    "seed": random.randint(0, 2**32 - 1),
                     "mirostat_mode": self.mirostat_mode,
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
@@ -774,6 +782,8 @@ class GGUFClient(LLMBackendBase):
                 "top_k": self.top_k,
                 "repeat_penalty": self.repeat_penalty,
                 "stream": True,
+                # Fresh per-request seed — see non-streaming path above.
+                "seed": random.randint(0, 2**32 - 1),
                 "mirostat_mode": self.mirostat_mode,
                 "mirostat_tau": self.mirostat_tau,
                 "mirostat_eta": self.mirostat_eta,
