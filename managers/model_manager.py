@@ -254,6 +254,26 @@ class ModelManager:
         # Populate model registry
         self._populate_registry()
 
+        # Auto-load date key adapter for the live model
+        self._load_date_key_adapter(self.live_model, live_model_path, "live")
+        if not should_share and self.background_model:
+            self._load_date_key_adapter(self.background_model, bg_model_path, "background")
+
+    # ------------------------------------------------------------------ #
+    #  Date key adapter                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _load_date_key_adapter(self, backend: Any, model_path: str, model_type: str) -> None:
+        """Try to auto-load a date key adapter for the given backend."""
+        try:
+            from services.date_key_adapter import try_load_adapter
+            if try_load_adapter(backend, model_path):
+                logger.info(f"📅 Date key adapter active for {model_type} model")
+            else:
+                logger.debug(f"No date key adapter loaded for {model_type} model")
+        except Exception as e:
+            logger.warning(f"Date key adapter load failed for {model_type}: {e}")
+
     # ------------------------------------------------------------------ #
     #  Swap methods                                                        #
     # ------------------------------------------------------------------ #
