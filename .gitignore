@@ -252,6 +252,7 @@ $RECYCLE.BIN/
 *.pth
 *.onnx
 data/
+!data/jarvis_training.jsonl
 
 # Ignore .models folder contents but keep the folder structure
 .models/*
