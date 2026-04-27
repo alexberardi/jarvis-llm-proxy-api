@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     cmake \
     build-essential \
+    pkg-config \
     libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
