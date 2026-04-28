@@ -14,6 +14,7 @@ from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest, Message
 from services.chat_runner import run_chat_completion, normalize_messages
 from services.date_keys import extract_date_keys_fast, build_date_hint_message
+from services.date_key_matcher import extract_date_keys as extract_date_keys_regex
 from api.settings_routes import router as settings_router
 from services.settings_helpers import get_setting
 
@@ -217,29 +218,26 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     require_internal_token(x_internal_token)
     logger.info(f"▶️  /internal/model/chat model={req.model} messages={len(req.messages)}")
 
-    # Extract date keys using FastText only (~1ms).
-    # If confidence is high, we return keys directly.
-    # If confidence is medium/low, we inject a hint into the messages
-    # so the main GGUF model can validate/correct during its normal
-    # inference pass — no separate CPU-bound Transformers model needed.
+    # Extract date keys using deterministic regex matcher (~0ms).
+    # Returns keys directly — no confidence thresholds or model hints needed.
+    # Falls back to FastText if regex returns empty (belt-and-suspenders).
     date_keys: Optional[List[str]] = None
     if req.include_date_context:
         user_text = _get_user_text(req)
         if user_text:
-            logger.debug(f"🗓️  Extracting date keys (fast) from: {user_text!r}")
-            ft_result = extract_date_keys_fast(user_text)
-            date_keys = ft_result.keys
-            logger.debug(
-                f"🗓️  FastText result: keys={ft_result.keys}, "
-                f"confidence={ft_result.confidence:.2f}, "
-                f"needs_hint={ft_result.needs_llm_hint}"
-            )
+            logger.debug(f"🗓️  Extracting date keys from: {user_text!r}")
+            date_keys = extract_date_keys_regex(user_text)
+            logger.debug(f"🗓️  Regex matcher result: keys={date_keys}")
 
-            # Inject hint into the main model's messages for validation
-            hint_msg = build_date_hint_message(ft_result)
-            if hint_msg:
-                logger.debug(f"🗓️  Injecting date hint into messages for main model")
-                req.messages.append(Message(**hint_msg))
+            # Fallback: if regex found nothing, try FastText + hint
+            if not date_keys:
+                ft_result = extract_date_keys_fast(user_text)
+                if ft_result.keys:
+                    date_keys = ft_result.keys
+                    logger.debug(f"🗓️  FastText fallback: keys={ft_result.keys}")
+                    hint_msg = build_date_hint_message(ft_result)
+                    if hint_msg:
+                        req.messages.append(Message(**hint_msg))
 
     result = await run_chat_completion(model_manager, req, allow_images=True)
     preview = (result.content or "")[:1000]
@@ -274,11 +272,14 @@ async def model_chat_stream(
     if req.include_date_context:
         user_text = _get_user_text(req)
         if user_text:
-            ft_result = extract_date_keys_fast(user_text)
-            date_keys = ft_result.keys
-            hint_msg = build_date_hint_message(ft_result)
-            if hint_msg:
-                req.messages.append(Message(**hint_msg))
+            date_keys = extract_date_keys_regex(user_text)
+            if not date_keys:
+                ft_result = extract_date_keys_fast(user_text)
+                if ft_result.keys:
+                    date_keys = ft_result.keys
+                    hint_msg = build_date_hint_message(ft_result)
+                    if hint_msg:
+                        req.messages.append(Message(**hint_msg))
 
     model_config = model_manager.get_model_config(req.model)
     if not model_config:
