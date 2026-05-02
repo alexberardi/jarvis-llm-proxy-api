@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, Generator, List, Optional
 
 from .power_metrics import PowerMetrics
+import backends.chat_formats  # noqa: F401 — registers custom chat format handlers
 from managers.chat_types import NormalizedMessage, TextPart, GenerationParams, ChatResult
 from backends.base import LLMBackendBase
 from services.settings_helpers import (
