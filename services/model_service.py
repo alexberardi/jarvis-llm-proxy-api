@@ -364,9 +364,9 @@ async def get_engine_info(x_internal_token: str | None = Header(default=None)):
         "model.main.backend", "JARVIS_MODEL_BACKEND", "GGUF"
     ).upper()
 
-    # Check if main_model backend instance has inference_engine attribute (more accurate)
-    if model_manager.main_model and hasattr(model_manager.main_model, "inference_engine"):
-        inference_engine = model_manager.main_model.inference_engine
+    # Check if live_model backend instance has inference_engine attribute (more accurate)
+    if model_manager.live_model and hasattr(model_manager.live_model, "inference_engine"):
+        inference_engine = model_manager.live_model.inference_engine
 
     # llama.cpp and MLX benefit from warmup messages (prefix caching reuses KV cache for matching prefixes)
     # vLLM has automatic prefix caching but doesn't benefit from explicit warmup messages
