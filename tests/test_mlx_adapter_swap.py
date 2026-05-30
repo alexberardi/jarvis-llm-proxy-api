@@ -42,6 +42,8 @@ def _mock_mlx_modules():
     with patch.dict(sys.modules, {
         "mlx_lm": _mock_mlx_lm,
         "mlx_lm.generate": _mock_generate_mod,
+        "mlx_lm.models": MagicMock(),
+        "mlx_lm.models.cache": MagicMock(),
         "mlx_lm.sample_utils": _mock_sample_utils,
         "mlx_lm.utils": _mock_utils,
         "mlx_lm.tuner": MagicMock(),

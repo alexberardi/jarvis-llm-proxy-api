@@ -27,16 +27,30 @@ from services.adapter_training import _detect_adapter_format
 # ---------------------------------------------------------------------------
 # Mock llama_cpp module so we can import backends.gguf_backend without it
 # ---------------------------------------------------------------------------
+# backends.chat_formats does `from llama_cpp.llama_chat_format import ...`
+# at module load, so we also need to stub the submodules — patching only
+# sys.modules["llama_cpp"] with a MagicMock leaves it not-a-package and the
+# submodule import fails.
 
 _mock_llama_module = MagicMock()
 _mock_llama_class = MagicMock()
 _mock_llama_module.Llama = _mock_llama_class
 
+_mock_llama_chat_format = MagicMock()
+_mock_llama_types = MagicMock()
+
 
 @pytest.fixture(autouse=True)
 def _mock_llama_cpp():
-    """Inject a mock llama_cpp module into sys.modules for all tests."""
-    with patch.dict(sys.modules, {"llama_cpp": _mock_llama_module}):
+    """Inject mock llama_cpp + submodules into sys.modules for all tests."""
+    with patch.dict(
+        sys.modules,
+        {
+            "llama_cpp": _mock_llama_module,
+            "llama_cpp.llama_chat_format": _mock_llama_chat_format,
+            "llama_cpp.llama_types": _mock_llama_types,
+        },
+    ):
         yield
 
 
