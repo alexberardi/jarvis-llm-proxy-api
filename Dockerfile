@@ -11,7 +11,14 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — install precompiled wheels
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+# Base image pinned by digest. NVIDIA pushes silent updates to the
+# 12.4.1-runtime-ubuntu22.04 tag; in jarvis-whisper-api a newer rev's
+# cuBLAS/cuDNN SIGILL'd whisper.cpp on prod's RTX 3090s during model
+# load. Pin to the digest the currently-deployed prod image was built
+# against to keep rebuilds reproducible. Bump deliberately, not via
+# tag drift. To refresh:
+#   docker buildx imagetools inspect nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -50,7 +57,8 @@ RUN pip install --no-cache-dir llama-cpp-python \
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — slim image with only what we need
 # ---------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+# Same pinned digest as the builder stage above.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
