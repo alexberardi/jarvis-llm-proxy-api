@@ -11,7 +11,9 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder
 # ---------------------------------------------------------------------------
-FROM rocm/dev-ubuntu-22.04:6.3 AS builder
+# Pinned by digest (see Dockerfile for rationale). Refresh deliberately:
+#   docker buildx imagetools inspect rocm/dev-ubuntu-22.04:6.3
+FROM rocm/dev-ubuntu-22.04:6.3@sha256:56760e749a6e1ed5dcbb53f05c27d1325712d65cbd09ff0146061994aee3d61a AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -47,7 +49,8 @@ RUN pip install --no-cache-dir llama-cpp-python --no-binary llama-cpp-python
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
 # ---------------------------------------------------------------------------
-FROM rocm/dev-ubuntu-22.04:6.3 AS runtime
+# Same pinned digest as the builder stage.
+FROM rocm/dev-ubuntu-22.04:6.3@sha256:56760e749a6e1ed5dcbb53f05c27d1325712d65cbd09ff0146061994aee3d61a AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
