@@ -1,4 +1,5 @@
 import atexit
+import hmac
 import json
 import logging
 import os
@@ -75,7 +76,14 @@ _setup_remote_logging()
 
 def require_internal_token(x_internal_token: str | None):
     expected = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv("LLM_PROXY_INTERNAL_TOKEN")
-    if expected and x_internal_token != expected:
+    # Fail closed: if no token is configured, reject every request rather than
+    # allowing unauthenticated access to the model service.
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"type": "service_unavailable", "message": "Model service token not configured", "code": "token_not_configured"}},
+        )
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, expected):
         raise HTTPException(
             status_code=401,
             detail={"error": {"type": "unauthorized", "message": "Invalid internal token", "code": "unauthorized"}},

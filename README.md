@@ -6,8 +6,7 @@ A flexible, high-performance proxy API for Large Language Models (LLMs) that sup
 
 - **Multiple Backend Support**: MLX, GGUF, Transformers, REST (OpenAI, Anthropic, Ollama, LM Studio, custom APIs)
 - **OpenAI-Compatible API**: Drop-in replacement for OpenAI API
-- **Conversation Caching**: Session-based conversation memory with warm-up support
-- **Dual Model Support**: Main model + lightweight model for different use cases
+- **Two-Model Roles**: A `live` model (latency-optimized, default) and a `background` model (accuracy-optimized) — both selectable per request
 - **Async Processing**: High-performance async request handling
 - **Flexible Authentication**: Support for various authentication methods
 - **Health Monitoring**: Built-in health checks and metrics
@@ -252,19 +251,42 @@ For detailed configuration options, see [REST_BACKEND_CONFIG.md](docs/REST_BACKE
 
 ## API Endpoints
 
-### Chat Completion
+### Chat Completion (OpenAI-compatible)
 ```bash
-POST /api/v1/chat
+POST /v1/chat/completions
 ```
 
-### Lightweight Chat
+Body field `model` selects the model role:
+
+- `"live"` (default) — latency-optimized, used for synchronous chat.
+- `"background"` — accuracy-optimized, used for heavier work.
+
+Any other / missing value is coerced to `"live"`. Set `"stream": true` for an SSE stream.
+
 ```bash
-POST /api/v1/lightweight/chat
+curl -X POST http://localhost:7704/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Jarvis-App-Id: <app-id>" \
+  -H "X-Jarvis-App-Key: <app-key>" \
+  -d '{
+        "model": "live",
+        "messages": [{"role": "user", "content": "Hello"}]
+      }'
 ```
 
-### Session Warm-up
+### Embeddings (OpenAI-compatible)
 ```bash
-POST /api/v1/chat/conversation/{conversation_id}/warmup
+POST /v1/embeddings
+```
+
+Accepts a string or list of strings as `input`. Default model `all-MiniLM-L6-v2`.
+
+```bash
+curl -X POST http://localhost:7704/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -H "X-Jarvis-App-Id: <app-id>" \
+  -H "X-Jarvis-App-Key: <app-key>" \
+  -d '{"input": "text to embed"}'
 ```
 
 ### Model Swap
