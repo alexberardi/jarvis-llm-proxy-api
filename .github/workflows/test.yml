@@ -40,6 +40,10 @@ jobs:
     - name: Run tests
       env:
         DATABASE_URL: "sqlite:///test.db"
+        # Placeholder so module-level get_auth_url() in settings_routes/pipeline_routes
+        # resolves at import (full-app tests reload `main`). Auth is mocked in tests, so
+        # this URL is never actually called.
+        JARVIS_AUTH_BASE_URL: "http://localhost:7701"
       run: |
         pytest -v --tb=short \
           --ignore=tests/manual \
