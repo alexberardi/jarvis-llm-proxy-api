@@ -1,0 +1,83 @@
+name: Behavior lane (nightly)
+
+# The "does it actually work" signal: a real cheap cloud model (pinned
+# gpt-4.1-nano snapshot) must route a voice-command corpus to the correct tools
+# with sensible arguments. This is the one continuous behavior check — the PR
+# fast lane only proves wiring against fakes; this proves routing against a real
+# model. See prds/testing-infrastructure.md (T8 / behavior lane).
+#
+# Runs nightly and on demand. NOT on pull_request: on a public repo, secrets are
+# not exposed to fork PRs, and schedule/workflow_dispatch only ever run in the
+# base-repo context — so the (usage-capped) OPENAI_API_KEY is bounded to people
+# with write access. Costs pennies per run.
+
+on:
+  schedule:
+    # 08:17 UTC nightly (~03:17 US-Eastern). Off the top-of-hour to dodge the
+    # GitHub Actions scheduled-job congestion window.
+    - cron: '17 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  behavior:
+    runs-on: ubuntu-latest
+    env:
+      # The OpenAI key, mapped into the var the REST backend + test both read.
+      # Until the secret is set, this is empty and the guard below no-ops.
+      JARVIS_REST_AUTH_TOKEN: ${{ secrets.OPENAI_API_KEY }}
+      JARVIS_REST_PROVIDER: openai
+      JARVIS_REST_AUTH_TYPE: bearer
+      # Placeholders so the settings/import chain resolves at import time, matching
+      # the Tests workflow. Auth is never actually called by the behavior test.
+      DATABASE_URL: "sqlite:///test.db"
+      JARVIS_AUTH_BASE_URL: "http://localhost:7701"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — require the OpenAI key
+        # If the secret isn't configured yet, warn and pass (rather than spam
+        # nightly red). Once OPENAI_API_KEY is set, the lane runs for real and a
+        # routing regression turns this job red.
+        run: |
+          if [ -z "$JARVIS_REST_AUTH_TOKEN" ]; then
+            echo "::warning title=Behavior lane idle::OPENAI_API_KEY secret is not set on this repo; the behavior corpus cannot run. Add a usage-capped key:  gh secret set OPENAI_API_KEY --repo $GITHUB_REPOSITORY"
+            echo "HAS_KEY=false" >> "$GITHUB_ENV"
+          else
+            echo "HAS_KEY=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Python
+        if: env.HAS_KEY == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        if: env.HAS_KEY == 'true'
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-behavior-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-behavior-
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        if: env.HAS_KEY == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio pyyaml
+          # Same lightweight runtime deps the Tests workflow uses to import the
+          # rest_backend chat chain (rest_backend -> chat_types -> settings_helpers).
+          pip install fastapi uvicorn httpx python-dotenv sqlalchemy psycopg2-binary pydantic-settings
+          pip install numpy redis rq boto3
+          pip install git+https://github.com/alexberardi/jarvis-settings-client.git@main
+
+      - name: Run behavior corpus (live, pinned gpt-4.1-nano snapshot)
+        if: env.HAS_KEY == 'true'
+        run: |
+          pytest -v --tb=short tests/manual/test_behavior_tool_routing.py
