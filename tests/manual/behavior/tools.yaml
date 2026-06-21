@@ -1,0 +1,112 @@
+# Stand-in tool schemas for the behavior lane (OpenAI function-calling shape).
+#
+# These approximate Jarvis's real voice-command surface closely enough to make
+# tool ROUTING a meaningful signal. They are deliberately a superset with a few
+# near-neighbours (set_timer vs set_alarm, get_time vs get_weather) so the
+# corpus can prove the model disambiguates, not just that it calls *a* tool.
+#
+# T6 will replace this file with command-center's REAL tool definitions built by
+# the ChatGPTOpenAI provider; the corpus (corpus.yaml) is provider-agnostic and
+# carries over unchanged.
+
+- type: function
+  function:
+    name: set_timer
+    description: Start a countdown timer that fires after a number of minutes.
+    parameters:
+      type: object
+      properties:
+        duration_minutes:
+          type: integer
+          description: Length of the countdown in minutes.
+      required: [duration_minutes]
+
+- type: function
+  function:
+    name: set_alarm
+    description: Set an alarm that fires at a specific clock time (e.g. 7am).
+    parameters:
+      type: object
+      properties:
+        time:
+          type: string
+          description: The clock time for the alarm, e.g. "7:00 AM" or "18:30".
+      required: [time]
+
+- type: function
+  function:
+    name: get_weather
+    description: Get the current weather or forecast for a place.
+    parameters:
+      type: object
+      properties:
+        location:
+          type: string
+          description: City or place. Optional; defaults to the user's location.
+      required: []
+
+- type: function
+  function:
+    name: get_time
+    description: Get the current clock time, optionally for another location.
+    parameters:
+      type: object
+      properties:
+        location:
+          type: string
+          description: City or place. Optional; defaults to the user's location.
+      required: []
+
+- type: function
+  function:
+    name: control_device
+    description: Control a smart-home device such as lights, plugs, or a thermostat.
+    parameters:
+      type: object
+      properties:
+        device:
+          type: string
+          description: The device or room, e.g. "kitchen lights" or "bedroom lamp".
+        action:
+          type: string
+          description: What to do, e.g. on, off, dim, or set brightness to N percent.
+      required: [device, action]
+
+- type: function
+  function:
+    name: play_music
+    description: Play music or audio.
+    parameters:
+      type: object
+      properties:
+        query:
+          type: string
+          description: An artist, genre, song, album, or playlist.
+      required: [query]
+
+- type: function
+  function:
+    name: get_news
+    description: Read the latest news headlines.
+    parameters:
+      type: object
+      properties:
+        topic:
+          type: string
+          description: A subject to filter headlines by. Optional.
+      required: []
+
+- type: function
+  function:
+    name: add_to_list
+    description: Add an item to a list such as a shopping list or to-do list.
+    parameters:
+      type: object
+      properties:
+        item:
+          type: string
+          description: The thing to add.
+        list_name:
+          type: string
+          description: Which list to add to, e.g. "shopping" or "todo". Optional.
+      required: [item]
