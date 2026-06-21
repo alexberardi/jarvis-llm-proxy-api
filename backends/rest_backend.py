@@ -212,7 +212,55 @@ class RestClient(LLMBackendBase):
         response = await self.client.post(url, json=payload, headers=self.headers)
         response.raise_for_status()
         return response.json()
-    
+
+    async def _chat_completion_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """OpenAI-compatible chat completion that forwards tools/tool_choice and
+        returns STRUCTURED tool_calls + the real finish_reason.
+
+        This is the native tool-calling path: the model is given the tool
+        schemas via the ``tools`` param and decides which to call, returning
+        ``finish_reason="tool_calls"`` with a structured ``tool_calls`` array.
+        Assumes an OpenAI-style ``/v1/chat/completions`` endpoint
+        (provider=openai/lmstudio/generic).
+        """
+        payload: Dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": params.temperature if params.temperature is not None else 0.7,
+            "stream": False,
+            "tools": params.tools,
+        }
+        if params.tool_choice is not None:
+            payload["tool_choice"] = params.tool_choice
+        if params.max_tokens is not None:
+            payload["max_tokens"] = params.max_tokens
+
+        endpoint = self._get_endpoint_for_provider()
+        url = urljoin(self.base_url, endpoint)
+        response = await self.client.post(url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        data = response.json()
+
+        choices = data.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        content = message.get("content") or ""
+        # OpenAI shape: [{"id","type":"function","function":{"name","arguments"}}]
+        tool_calls = message.get("tool_calls")
+        finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
+        if "usage" in data:
+            self.last_usage = data["usage"]
+
+        return ChatResult(
+            content=content,
+            usage=self.last_usage,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+        )
+
     def _estimate_usage(self, content: str):
         """Estimate token usage when provider doesn't provide it"""
         # Rough estimation: 1 token ≈ 4 characters
@@ -344,23 +392,27 @@ class RestClient(LLMBackendBase):
                 "content": " ".join(text_parts)
             })
 
-        # Run the async method
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create a new task if we're already in an async context
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run,
-                    self.chat_with_temperature(dict_messages, params.temperature)
-                )
-                content = future.result()
-        else:
-            content = loop.run_until_complete(
-                self.chat_with_temperature(dict_messages, params.temperature)
+        # When native tools are requested, use the tool-aware completion so
+        # structured tool_calls + finish_reason flow back (the native path);
+        # otherwise keep the content-only path (backward compatible).
+        async def _run() -> ChatResult:
+            if params.tools:
+                return await self._chat_completion_with_tools(dict_messages, params)
+            content = await self.chat_with_temperature(dict_messages, params.temperature)
+            return ChatResult(
+                content=content,
+                usage=self.last_usage,
+                tool_calls=None,
+                finish_reason="stop",
             )
 
-        return ChatResult(content=content, usage=self.last_usage, tool_calls=None, finish_reason="stop")
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already in an async context — run on a worker thread.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                return executor.submit(asyncio.run, _run()).result()
+        return loop.run_until_complete(_run())
 
     async def generate_vision_chat(
         self,
