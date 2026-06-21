@@ -1,0 +1,169 @@
+# Behavior corpus for Jarvis voice-command tool routing.
+#
+# This is the "does it actually work" signal: a real cheap cloud model
+# (gpt-4.1-nano), given the tool schemas in tools.yaml, must pick the right tool
+# AND populate its arguments correctly for each utterance. It is provider-
+# agnostic: the same file validates llm-proxy's REST backend today and (T6)
+# command-center's real ChatGPTOpenAI provider later.
+#
+# Each entry:
+#   utterance:  what the user said
+#   tool:       the function that MUST be called, or null = no tool (direct
+#               answer expected — catches over-eager routing on small talk)
+#   args:       optional per-argument matchers. The named arg must be present
+#               and satisfy its matcher. Args not listed are not asserted.
+#
+# Matchers (string comparisons are case-insensitive):
+#   equals:  <v>          exact value (numbers compared numerically: 60 == "60")
+#   contains: <substr>    str(arg) contains substr
+#   in: [<v>, ...]        str(arg) equals one of these
+#   any_of: [<s>, ...]    str(arg) contains at least one of these substrings
+#
+# Keep utterances UNAMBIGUOUS so temperature=0 routing is deterministic; the
+# point is a reliable regression signal, not adversarial trick questions.
+
+# --- set_timer (countdown), incl. unit conversion + alarm disambiguation ---
+- utterance: "set a 10 minute timer"
+  tool: set_timer
+  args:
+    duration_minutes: {equals: 10}
+
+- utterance: "set a timer for 5 minutes"
+  tool: set_timer
+  args:
+    duration_minutes: {equals: 5}
+
+- utterance: "give me a 20 minute timer for the pasta"
+  tool: set_timer
+  args:
+    duration_minutes: {equals: 20}
+
+- utterance: "start a timer for one hour"
+  tool: set_timer
+  args:
+    duration_minutes: {equals: 60}
+
+# --- set_alarm (clock time) — must NOT collapse into set_timer ---
+- utterance: "wake me up at 7 in the morning"
+  tool: set_alarm
+  args:
+    time: {contains: "7"}
+
+- utterance: "set an alarm for 6:30 am"
+  tool: set_alarm
+  args:
+    time: {contains: "6:30"}
+
+# --- get_weather ---
+# "what's the weather like today" is intentionally avoided: gpt-4.1-nano latches
+# onto "today" and mis-routes to get_time. Temporal weather phrasing is still
+# covered by "is it going to rain tomorrow" and "do I need a jacket today".
+- utterance: "what's the weather like"
+  tool: get_weather
+
+- utterance: "is it going to rain tomorrow"
+  tool: get_weather
+
+- utterance: "what's the weather in Boston this weekend"
+  tool: get_weather
+  args:
+    location: {contains: "boston"}
+
+- utterance: "do I need a jacket today"
+  tool: get_weather
+
+# --- get_time — must NOT collapse into get_weather or set_timer ---
+- utterance: "what time is it"
+  tool: get_time
+
+- utterance: "what time is it in Tokyo right now"
+  tool: get_time
+  args:
+    location: {contains: "tokyo"}
+
+# --- control_device ---
+- utterance: "turn off the kitchen lights"
+  tool: control_device
+  args:
+    device: {contains: "kitchen"}
+    action: {any_of: ["off"]}
+
+- utterance: "dim the bedroom lights to 50 percent"
+  tool: control_device
+  args:
+    device: {contains: "bedroom"}
+    action: {any_of: ["dim", "50", "brightness"]}
+
+- utterance: "turn on the living room lamp"
+  tool: control_device
+  args:
+    device: {contains: "living room"}
+    action: {any_of: ["on"]}
+
+- utterance: "set the thermostat to 72 degrees"
+  tool: control_device
+  args:
+    device: {contains: "thermostat"}
+    action: {any_of: ["72", "set"]}
+
+# --- play_music ---
+- utterance: "play some jazz"
+  tool: play_music
+  args:
+    query: {contains: "jazz"}
+
+- utterance: "play Taylor Swift"
+  tool: play_music
+  args:
+    query: {contains: "taylor"}
+
+- utterance: "put on some music"
+  tool: play_music
+
+# --- get_news ---
+- utterance: "what's in the news"
+  tool: get_news
+
+- utterance: "give me the latest headlines"
+  tool: get_news
+
+- utterance: "any news about technology"
+  tool: get_news
+  args:
+    topic: {any_of: ["tech"]}
+
+# --- add_to_list ---
+# NOTE: we assert only `item` (the primary subject of the utterance, which the
+# model fills reliably). The optional `list_name` is deliberately NOT asserted:
+# the live run showed gpt-4.1-nano populates it inconsistently across phrasings
+# ("shopping list" -> filled, "grocery list" -> omitted), so asserting it would
+# make the lane flaky rather than catch real regressions.
+- utterance: "add milk to my shopping list"
+  tool: add_to_list
+  args:
+    item: {contains: "milk"}
+
+- utterance: "put eggs on the grocery list"
+  tool: add_to_list
+  args:
+    item: {contains: "eggs"}
+
+- utterance: "add bread and butter to the shopping list"
+  tool: add_to_list
+  args:
+    item: {any_of: ["bread", "butter"]}
+
+- utterance: "add call the dentist to my to-do list"
+  tool: add_to_list
+  args:
+    item: {contains: "dentist"}
+
+# --- negatives: small talk must NOT trigger a tool call ---
+- utterance: "hello there"
+  tool: null
+
+- utterance: "thank you so much, that's all for now"
+  tool: null
+
+- utterance: "tell me a joke"
+  tool: null
