@@ -1,7 +1,9 @@
+import asyncio
 import httpx
 import json
 import logging
 import os
+import threading
 import time
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
@@ -79,7 +81,13 @@ class RestClient(LLMBackendBase):
         
         # Initialize HTTP client
         self.client = httpx.AsyncClient(timeout=self.timeout)
-        
+
+        # Dedicated background event loop for the sync->async bridge (see
+        # generate_text_chat). Lazily started; keeps self.client bound to one
+        # stable loop across requests.
+        self._bg_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._bg_loop_lock = threading.Lock()
+
         # Set up headers
         self.headers = self._setup_headers()
     
@@ -378,7 +386,6 @@ class RestClient(LLMBackendBase):
         Converts NormalizedMessage to dict format and calls chat_with_temperature.
         Note: This is sync but internally calls async methods via asyncio.
         """
-        import asyncio
 
         # Convert NormalizedMessage to simple dict format
         dict_messages = []
@@ -406,13 +413,48 @@ class RestClient(LLMBackendBase):
                 finish_reason="stop",
             )
 
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Already in an async context — run on a worker thread.
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                return executor.submit(asyncio.run, _run()).result()
-        return loop.run_until_complete(_run())
+        # Sync bridge. The persistent ``self.client`` (and its connection pool)
+        # binds to the event loop it is first used on, so it MUST always run on
+        # one stable loop. The old code ran each call on a throwaway loop via
+        # ``asyncio.run`` on a fresh worker thread whenever the caller was already
+        # in an async context (the model service's async /internal/model/chat
+        # endpoint) — reusing the persistent client across those per-call loops
+        # raised intermittent "RuntimeError: Event loop is closed" on connection
+        # cleanup. Route all async-context calls onto a single dedicated
+        # background loop so the client stays valid across requests.
+        try:
+            asyncio.get_running_loop()
+            in_async_context = True
+        except RuntimeError:
+            in_async_context = False
+
+        if in_async_context:
+            bg_loop = self._get_background_loop()
+            return asyncio.run_coroutine_threadsafe(_run(), bg_loop).result()
+        # No running loop (sync caller / tests, which create a fresh client per
+        # call): run inline on a throwaway loop — no cross-loop reuse occurs.
+        return asyncio.run(_run())
+
+    def _get_background_loop(self) -> asyncio.AbstractEventLoop:
+        """Lazily start (once) a dedicated background event loop on a daemon
+        thread. All async REST work from a sync-bridge-in-async-context call runs
+        here, so the persistent ``self.client`` stays bound to one stable loop
+        for the lifetime of this backend (fixes "Event loop is closed")."""
+        loop = self._bg_loop
+        if loop is not None and not loop.is_closed():
+            return loop
+        with self._bg_loop_lock:
+            loop = self._bg_loop
+            if loop is None or loop.is_closed():
+                loop = asyncio.new_event_loop()
+                thread = threading.Thread(
+                    target=loop.run_forever,
+                    name=f"rest-backend-{self.model_type}-loop",
+                    daemon=True,
+                )
+                thread.start()
+                self._bg_loop = loop
+            return loop
 
     async def generate_vision_chat(
         self,
