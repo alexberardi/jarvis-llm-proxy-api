@@ -5,9 +5,14 @@
 # near-neighbours (set_timer vs set_alarm, get_time vs get_weather) so the
 # corpus can prove the model disambiguates, not just that it calls *a* tool.
 #
-# T6 will replace this file with command-center's REAL tool definitions built by
-# the ChatGPTOpenAI provider; the corpus (corpus.yaml) is provider-agnostic and
-# carries over unchanged.
+# NOTE: this is a STAND-IN toolset, NOT command-center's real tools. T6b routes a
+# corpus through CC's real ChatGPTOpenAI provider, but CC's real tools differ in
+# both NAME and ARGUMENT SHAPE (set_alarm->reminder, get_time->get_current_time,
+# play_music->music, add_to_list->shopping_list/todo_list; duration_minutes->
+# duration_seconds, device->device_name, location->city, topic->category). So T6b
+# did NOT reuse this file — it re-authored CC-targeted fixtures from the real
+# command sources at jarvis-integration-tests/tests/behavior/{tools,corpus}.cc.yaml.
+# This file stays as llm-proxy's own provider-agnostic REST-backend behavior check.
 
 - type: function
   function:
