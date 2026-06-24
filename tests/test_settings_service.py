@@ -390,3 +390,37 @@ class TestSingleton:
                     service2 = get_settings_service()
 
                     assert service1 is service2
+
+
+class TestRestAuthTokenDefinition:
+    """Tests for the DB-backed `rest.auth_token` secret setting (#50)."""
+
+    @pytest.fixture
+    def service(self):
+        """Create a service instance for testing."""
+        return SettingsService(
+            definitions=SETTINGS_DEFINITIONS,
+            get_db_session=lambda: None,
+            setting_model=None,
+        )
+
+    def test_rest_auth_token_definition_is_registered_as_secret(self):
+        """The new rest.auth_token setting is registered so admin surfaces + masks it."""
+        definition = next(
+            (d for d in SETTINGS_DEFINITIONS if d.key == "rest.auth_token"), None
+        )
+
+        assert definition is not None, "rest.auth_token definition is missing"
+        assert definition.category == "rest"
+        assert definition.value_type == "string"
+        assert definition.is_secret is True
+        assert definition.env_fallback == "JARVIS_REST_AUTH_TOKEN"
+        assert definition.default == ""
+
+    def test_rest_auth_token_listed_and_masked_in_rest_category(self, service):
+        """list_all exposes rest.auth_token under the rest category, flagged secret."""
+        settings = service.list_all(category="rest")
+
+        entry = next((s for s in settings if s["key"] == "rest.auth_token"), None)
+        assert entry is not None, "rest.auth_token not surfaced by list_all"
+        assert entry["is_secret"]
