@@ -50,11 +50,13 @@ class RestClient(LLMBackendBase):
         self.last_usage = None
         self.inference_engine = "rest"  # Remote API backend
         
-        # Get authentication configuration from environment
+        # Get authentication configuration (DB setting first, env fallback)
         self.auth_type = get_setting(
             "rest.auth_type", "JARVIS_REST_AUTH_TYPE", "none"
         ).lower()
-        self.auth_token = os.getenv("JARVIS_REST_AUTH_TOKEN", "")
+        self.auth_token = get_setting(
+            "rest.auth_token", "JARVIS_REST_AUTH_TOKEN", ""
+        )
         self.auth_header_name = get_setting(
             "rest.auth_header_name", "JARVIS_REST_AUTH_HEADER", "Authorization"
         )
