@@ -764,6 +764,16 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         description="REST auth header name",
         env_fallback="JARVIS_REST_AUTH_HEADER",
     ),
+    SettingDefinition(
+        key="rest.auth_token",
+        category="rest",
+        value_type="string",
+        default="",
+        description="Auth token / API key for the REST backend (e.g. OpenAI API key)",
+        env_fallback="JARVIS_REST_AUTH_TOKEN",
+        requires_reload=True,
+        is_secret=True,
+    ),
     # ==================== training extras ====================
     SettingDefinition(
         key="training.backend",
