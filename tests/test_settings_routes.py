@@ -92,6 +92,37 @@ class TestListSettings:
         assert all(s["category"] == "model.main" for s in data["settings"])
 
 
+class TestModelPathOptions:
+    """Tests for installed-model dropdown options on the model.*.name settings."""
+
+    def test_model_path_settings_get_installed_options(self, client):
+        fake = [".models/qwen2.5-3b.gguf", ".models/hermes-3-8b.gguf"]
+        with patch("api.settings_routes.discover_installed_model_paths", return_value=fake):
+            response = client.get("/settings/")
+            assert response.status_code == 200
+            settings = {s["key"]: s for s in response.json()["settings"]}
+            for key in ("model.live.name", "model.background.name", "model.main.name"):
+                assert settings[key]["options"] == fake
+
+    def test_injection_does_not_clobber_static_options(self, client):
+        # model.main.backend declares its own static options — injection must skip it,
+        # and an unrelated plain-string setting must stay without options.
+        fake = [".models/qwen2.5-3b.gguf"]
+        with patch("api.settings_routes.discover_installed_model_paths", return_value=fake):
+            response = client.get("/settings/")
+            settings = {s["key"]: s for s in response.json()["settings"]}
+            assert settings["model.main.backend"]["options"] == [
+                "GGUF", "MLX", "VLLM", "TRANSFORMERS", "REST",
+            ]
+            assert settings["model.live.chat_format"]["options"] is None
+
+    def test_no_installed_models_leaves_options_null(self, client):
+        with patch("api.settings_routes.discover_installed_model_paths", return_value=[]):
+            response = client.get("/settings/")
+            settings = {s["key"]: s for s in response.json()["settings"]}
+            assert settings["model.main.name"]["options"] is None
+
+
 class TestListCategories:
     """Tests for listing categories."""
 

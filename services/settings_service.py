@@ -6,10 +6,48 @@ model and inference configurations.
 """
 
 import logging
+from pathlib import Path
 
 from jarvis_settings_client import SettingDefinition, SettingsService
 
 logger = logging.getLogger("uvicorn")
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Settings whose dropdown options are the models installed on disk. These hold a
+# model path (or HuggingFace ID); the options are a convenience that mirrors the
+# PromptProvider (llm.interface) dynamic-options pattern. The settings editor always
+# allows a free-text "Other..." value, so HF IDs and not-yet-downloaded paths remain
+# usable even when a setting carries options.
+MODEL_PATH_SETTING_KEYS: frozenset[str] = frozenset(
+    {"model.live.name", "model.background.name", "model.main.name"}
+)
+
+
+def discover_installed_model_paths() -> list[str]:
+    """Scan the .models/ directory and return relative ``.models/<name>`` paths for
+    installed models — GGUF files and model directories (MLX / merged / base HF).
+
+    These populate the dropdown options for the ``model.*.name`` settings. Returns an
+    empty list if the directory is missing or unreadable, in which case those settings
+    fall back to a plain free-text input.
+    """
+    models_dir = _PROJECT_ROOT / ".models"
+    paths: list[str] = []
+    try:
+        if not models_dir.is_dir():
+            return []
+        for item in sorted(models_dir.iterdir()):
+            if item.name.startswith("."):
+                continue
+            if item.is_file() and item.suffix == ".gguf":
+                paths.append(f".models/{item.name}")
+            elif item.is_dir():
+                paths.append(f".models/{item.name}")
+    except OSError:
+        logger.warning("Could not scan .models for model-path options", exc_info=True)
+        return []
+    return paths
 
 
 # All settings definitions with their categories, types, and env fallbacks

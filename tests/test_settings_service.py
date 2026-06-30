@@ -21,7 +21,9 @@ from jarvis_settings_client.types import SettingValue
 
 # Import from local module for definitions and service accessor
 from services.settings_service import (
+    MODEL_PATH_SETTING_KEYS,
     SETTINGS_DEFINITIONS,
+    discover_installed_model_paths,
     get_settings_service,
 )
 
@@ -424,3 +426,45 @@ class TestRestAuthTokenDefinition:
         entry = next((s for s in settings if s["key"] == "rest.auth_token"), None)
         assert entry is not None, "rest.auth_token not surfaced by list_all"
         assert entry["is_secret"]
+
+
+class TestDiscoverInstalledModelPaths:
+    """Tests for scanning .models/ to build model-path dropdown options."""
+
+    def _patch_root(self, root):
+        """Point discover_installed_model_paths at a temp project root."""
+        return patch("services.settings_service._PROJECT_ROOT", root)
+
+    def test_missing_models_dir_returns_empty(self, tmp_path):
+        with self._patch_root(tmp_path):
+            assert discover_installed_model_paths() == []
+
+    def test_lists_gguf_files_and_model_dirs(self, tmp_path):
+        models = tmp_path / ".models"
+        models.mkdir()
+        (models / "qwen2.5-3b-instruct-q4_k_m.gguf").write_text("x")
+        (models / "hermes-3-8b.gguf").write_text("x")
+        (models / "qwen3-4b-jarvis-mlx-q4").mkdir()  # MLX model directory
+        # Non-model noise that must be ignored:
+        (models / "notes.txt").write_text("x")  # non-gguf file
+        (models / ".cache").mkdir()  # hidden dir
+
+        with self._patch_root(tmp_path):
+            result = discover_installed_model_paths()
+
+        assert result == [
+            ".models/hermes-3-8b.gguf",
+            ".models/qwen2.5-3b-instruct-q4_k_m.gguf",
+            ".models/qwen3-4b-jarvis-mlx-q4",
+        ]
+        assert all(p.startswith(".models/") for p in result)
+
+    def test_empty_models_dir_returns_empty(self, tmp_path):
+        (tmp_path / ".models").mkdir()
+        with self._patch_root(tmp_path):
+            assert discover_installed_model_paths() == []
+
+    def test_model_path_keys_cover_all_tiers(self):
+        assert MODEL_PATH_SETTING_KEYS == frozenset(
+            {"model.live.name", "model.background.name", "model.main.name"}
+        )
