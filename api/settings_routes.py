@@ -20,7 +20,11 @@ from pydantic import BaseModel
 from config.service_config import get_auth_url
 from jarvis_settings_client import create_combined_auth
 from jarvis_settings_client.routes import SettingResponse, SettingsListResponse, CategoriesResponse, SyncResponse, CacheInvalidateResponse
-from services.settings_service import get_settings_service
+from services.settings_service import (
+    MODEL_PATH_SETTING_KEYS,
+    discover_installed_model_paths,
+    get_settings_service,
+)
 
 require_app_auth = create_combined_auth(get_auth_url())
 
@@ -88,6 +92,15 @@ async def list_settings(
 
     service = get_settings_service()
     settings = service.list_all(category=category)
+
+    # Surface installed models as dropdown options for the model-path settings
+    # (mirrors the PromptProvider dropdown). Scanned per-request so freshly
+    # downloaded models appear without a restart.
+    model_options = discover_installed_model_paths()
+    if model_options:
+        for setting in settings:
+            if setting["key"] in MODEL_PATH_SETTING_KEYS:
+                setting["options"] = model_options
 
     return SettingsListResponse(
         settings=[SettingResponse(**s) for s in settings],
