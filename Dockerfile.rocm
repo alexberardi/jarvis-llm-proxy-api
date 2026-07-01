@@ -69,13 +69,21 @@ FROM rocm/dev-ubuntu-22.04:7.2.4@sha256:a50a8547101ac9e7c35848ff609a56335214b789
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    LD_LIBRARY_PATH=/opt/rocm/lib
 
+# hipblas + rocblas are the ROCm math RUNTIME libs libllama.so links against
+# (GGML_HIP). The builder installs the -dev variants to compile; the runtime
+# needs the runtime libs (libhipblas.so / librocblas.so + its Tensile kernels) —
+# the non-complete rocm/dev base does NOT include them, so without this the image
+# fails to load with "libhipblas.so.N: cannot open shared object file".
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
     libgomp1 \
     curl \
+    hipblas \
+    rocblas \
     && rm -rf /var/lib/apt/lists/*
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
