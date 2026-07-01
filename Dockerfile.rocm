@@ -67,10 +67,15 @@ RUN HIPCXX=/opt/rocm/llvm/bin/clang HIP_PATH=/opt/rocm \
 # Same pinned digest as the builder stage.
 FROM rocm/dev-ubuntu-22.04:7.2.4@sha256:a50a8547101ac9e7c35848ff609a56335214b789b468c9eb05dcd006a4a38c25 AS runtime
 
+# Flash attention's stock HIP kernel faults natively on RDNA4/gfx1201 (RX 9070/XT)
+# during inference and takes down the model service (uncatchable native crash).
+# Ship the ROCm image with FA OFF — it's also FASTER on RDNA4. Scoped to this
+# image only (CUDA/Metal keep FA on). Override with JARVIS_FLASH_ATTN=true.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    LD_LIBRARY_PATH=/opt/rocm/lib
+    LD_LIBRARY_PATH=/opt/rocm/lib \
+    JARVIS_FLASH_ATTN=false
 
 # hipblas + rocblas are the ROCm math RUNTIME libs libllama.so links against
 # (GGML_HIP). The builder installs the -dev variants to compile; the runtime
