@@ -64,8 +64,12 @@ class GGUFClient(LLMBackendBase):
 
         # Multi-GPU configuration
         # split_mode: 0=NONE (single GPU), 1=LAYER (split layers across GPUs), 2=ROW (split rows across GPUs)
+        # Default 0 (NONE) = use only main_gpu. Auto-splitting across EVERY visible
+        # HIP/CUDA device is a footgun on mixed boxes: e.g. a dGPU + a CPU iGPU with
+        # no compiled kernels (gfx1036) makes llama.cpp fault during warmup. Multi-GPU
+        # is opt-in — set JARVIS_GGUF_SPLIT_MODE=1 + JARVIS_GGUF_TENSOR_SPLIT (prod does).
         split_mode = get_int_setting(
-            "inference.gguf.split_mode", "JARVIS_GGUF_SPLIT_MODE", 1
+            "inference.gguf.split_mode", "JARVIS_GGUF_SPLIT_MODE", 0
         )
         # main_gpu: index of the GPU to use for scratch buffers and small tensors
         main_gpu = get_int_setting(
