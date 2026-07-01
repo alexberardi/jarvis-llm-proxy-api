@@ -197,6 +197,8 @@ try:
             print('metal')
         elif hasattr(llama_cpp.llama_cpp, 'GGML_USE_HIP') or hasattr(llama_cpp.llama_cpp, 'GGML_USE_HIPBLAS'):
             print('rocm')
+        elif hasattr(llama_cpp.llama_cpp, 'GGML_USE_VULKAN'):
+            print('vulkan')
         else:
             print('cpu')
     except:
@@ -232,6 +234,9 @@ install_llama_cpp() {
             cmake_args="-DGGML_HIP=on"
             export HIPCXX="${ROCM_PATH:-/opt/rocm}/llvm/bin/clang"
             export HIP_PATH="${ROCM_PATH:-/opt/rocm}"
+            ;;
+        "vulkan")
+            cmake_args="-DGGML_VULKAN=on"
             ;;
         "cpu"|*)
             cmake_args=""
