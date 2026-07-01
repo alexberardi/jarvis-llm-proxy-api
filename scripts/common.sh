@@ -195,7 +195,7 @@ try:
             print('cuda')
         elif hasattr(llama_cpp.llama_cpp, 'GGML_USE_METAL'):
             print('metal')
-        elif hasattr(llama_cpp.llama_cpp, 'GGML_USE_HIPBLAS'):
+        elif hasattr(llama_cpp.llama_cpp, 'GGML_USE_HIP') or hasattr(llama_cpp.llama_cpp, 'GGML_USE_HIPBLAS'):
             print('rocm')
         else:
             print('cpu')
@@ -227,7 +227,11 @@ install_llama_cpp() {
             cmake_args="-DGGML_METAL=on"
             ;;
         "rocm")
-            cmake_args="-DGGML_HIPBLAS=on"
+            # GGML_HIP is the current flag; the old GGML_HIPBLAS is silently
+            # ignored by CMake -> CPU-only build. Point CMake at the HIP compiler.
+            cmake_args="-DGGML_HIP=on"
+            export HIPCXX="${ROCM_PATH:-/opt/rocm}/llvm/bin/clang"
+            export HIP_PATH="${ROCM_PATH:-/opt/rocm}"
             ;;
         "cpu"|*)
             cmake_args=""
