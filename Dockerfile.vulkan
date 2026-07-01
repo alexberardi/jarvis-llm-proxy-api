@@ -1,7 +1,9 @@
 # ============================================================================
 # Jarvis LLM Proxy API - Dockerfile.vulkan (AMD GPU via Vulkan)
 # ============================================================================
-# For AMD GPUs (RDNA2+). Uses llama-cpp-python compiled with Vulkan backend.
+# For AMD GPUs (RDNA2 through RDNA4). Uses llama-cpp-python compiled with the
+# Vulkan backend. Runtime ships Mesa 25.x (kisak PPA) so RADV supports RDNA4 /
+# gfx1201 (RX 9070/9070 XT); stock Ubuntu Mesa predates RDNA4.
 # Requires --device /dev/dri passthrough in docker-compose.
 #
 # Build:  docker build -f Dockerfile.vulkan -t jarvis-llm-proxy-api:vulkan .
@@ -50,27 +52,35 @@ WORKDIR /build
 COPY requirements-base.txt .
 RUN pip install --no-cache-dir -r requirements-base.txt
 
-# Build llama-cpp-python with Vulkan backend
+# Build llama-cpp-python with the Vulkan backend (GGML_VULKAN is the current flag)
 ENV CMAKE_ARGS="-DGGML_VULKAN=on"
-RUN pip install --no-cache-dir llama-cpp-python --no-binary llama-cpp-python
+RUN pip install --no-cache-dir "llama-cpp-python==0.3.16" --no-binary llama-cpp-python
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
 # ---------------------------------------------------------------------------
-# Same pinned digest as the builder stage.
-FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS runtime
+# Runtime is Ubuntu 24.04 (noble), NOT 22.04: RADV RDNA4/gfx1201 support needs
+# Mesa 25.x and the kisak-mesa fresh PPA dropped 22.04. Refresh deliberately:
+#   docker buildx imagetools inspect ubuntu:24.04
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# python3.11 via deadsnakes (noble ships 3.12; the builder produces cp311 wheels)
+# + Mesa 25.x via kisak-mesa for RADV RDNA4/gfx1201 (stock noble Mesa predates it).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    libgomp1 \
-    curl \
-    mesa-vulkan-drivers \
-    libvulkan1 \
+        ca-certificates gnupg software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && add-apt-repository -y ppa:kisak/kisak-mesa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-venv \
+        libgomp1 \
+        curl \
+        mesa-vulkan-drivers \
+        libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
