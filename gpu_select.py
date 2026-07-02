@@ -51,14 +51,6 @@ _APU_ARCHS = (
 )
 
 
-def _can_load(lib: str) -> bool:
-    try:
-        ctypes.CDLL(lib)
-        return True
-    except OSError:
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Vulkan
 # ---------------------------------------------------------------------------
@@ -251,11 +243,18 @@ def select_discrete_rocm_index() -> int | None:
 # ---------------------------------------------------------------------------
 def _detect_backend() -> str | None:
     hint = (os.getenv("JARVIS_GPU_BACKEND") or "").strip().lower()
+    if hint in ("none", "cpu"):
+        return None
     if hint in ("rocm", "vulkan"):
         return hint
-    if os.path.isdir("/opt/rocm") or shutil.which("rocminfo") or _can_load("libamdhip64.so"):
+    # Gate on GPU TOOLING / paths, NEVER on a merely-loadable lib. CPU images ship
+    # Mesa's llvmpipe libvulkan.so.1 (software Vulkan) — probing it via ctypes
+    # SIGSEGVs, and a native crash bypasses select_discrete_gpu()'s try/except.
+    # vulkaninfo (vulkan-tools) / rocminfo / /opt/rocm exist ONLY on the real GPU
+    # image variants, so they are the safe "this is actually a GPU image" signal.
+    if os.path.isdir("/opt/rocm") or shutil.which("rocminfo"):
         return "rocm"
-    if shutil.which("vulkaninfo") or _can_load("libvulkan.so.1"):
+    if shutil.which("vulkaninfo"):
         return "vulkan"
     return None
 
