@@ -57,7 +57,13 @@ ARG GPU_TARGETS="gfx906;gfx908;gfx90a;gfx1030;gfx1100;gfx1101;gfx1102;gfx1200;gf
 # IMPORTANT: the CMake option is GGML_HIP. The old name GGML_HIPBLAS was removed
 # upstream (llama.cpp #10238) and is SILENTLY IGNORED by CMake — it produces a
 # CPU-only build with no error. HIPCXX/HIP_PATH point CMake at the ROCm compiler.
-ENV CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=${GPU_TARGETS}"
+# GGML_CUDA_FORCE_MMQ=ON: RDNA4/gfx1201 has no working hipBLASLt/rocBLAS Tensile
+# GEMM kernels in stable ROCm 7.2.x — the FP16 cuBLAS path faults inside
+# libamdhip64 on the first prompt matmul. Forcing MMQ makes llama.cpp use its OWN
+# quantized matmul kernels (compiled for gfx1201) and never call the broken vendor
+# GEMM for quantized weights. (Compile-time macro in llama-cpp-python 0.3.16 — it
+# is NOT a runtime env var, so it must be baked in here.)
+ENV CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=${GPU_TARGETS} -DGGML_CUDA_FORCE_MMQ=ON"
 RUN HIPCXX=/opt/rocm/llvm/bin/clang HIP_PATH=/opt/rocm \
     pip install --no-cache-dir "llama-cpp-python==0.3.16" --no-binary llama-cpp-python
 
@@ -75,7 +81,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     LD_LIBRARY_PATH=/opt/rocm/lib \
-    JARVIS_FLASH_ATTN=false
+    JARVIS_FLASH_ATTN=false \
+    ROCBLAS_USE_HIPBLASLT=0
 
 # hipblas + rocblas are the ROCm math RUNTIME libs libllama.so links against
 # (GGML_HIP). The builder installs the -dev variants to compile; the runtime
