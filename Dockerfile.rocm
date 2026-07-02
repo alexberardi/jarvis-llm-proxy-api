@@ -121,6 +121,7 @@ COPY storage/ ./storage/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY main.py .
+COPY gpu_select.py .
 COPY pyproject.toml .
 
 RUN mkdir -p /app/.models /app/logs /tmp/jarvis-adapters
