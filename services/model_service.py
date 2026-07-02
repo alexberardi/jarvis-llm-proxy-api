@@ -21,6 +21,18 @@ from services.settings_helpers import get_setting
 
 load_dotenv()
 
+# Pin the GPU backend to the DISCRETE GPU before any backend import triggers
+# llama.cpp's Vulkan/HIP init (ModelManager() below -> gguf_backend -> llama_cpp).
+# On dGPU+iGPU boxes this avoids binding the integrated GPU. Best-effort and
+# guarded: a missing module or any failure must never block the model service.
+# Respects an operator-set *_VISIBLE_DEVICES.
+try:
+    from gpu_select import select_discrete_gpu
+
+    select_discrete_gpu()
+except Exception:  # noqa: BLE001 - startup must not depend on GPU auto-select
+    pass
+
 logger = logging.getLogger("uvicorn")
 
 app = FastAPI()

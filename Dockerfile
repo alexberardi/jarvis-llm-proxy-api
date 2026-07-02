@@ -101,6 +101,7 @@ COPY storage/ ./storage/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY main.py .
+COPY gpu_select.py .
 COPY pyproject.toml .
 
 # Create directories that may be needed at runtime
