@@ -86,6 +86,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
+# The compose passes group_add: [video, render] for GPU /dev/dri access; Ubuntu's
+# minimal base has `video` but NOT `render`, so create it — otherwise the container
+# fails to start with "unable to find group render".
+RUN groupadd -f render && groupadd -f video
+
 COPY --from=builder /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
