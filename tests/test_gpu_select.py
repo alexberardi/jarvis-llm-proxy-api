@@ -120,7 +120,6 @@ def test_noop_when_no_gpu_tooling(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gpu_select.shutil, "which", _which())  # no vulkaninfo/rocminfo
     monkeypatch.setattr(gpu_select.os.path, "isdir", lambda p: False)  # no /opt/rocm
-    monkeypatch.setattr(gpu_select, "_can_load", lambda lib: False)  # no libs
 
     gpu_select.select_discrete_gpu()  # must be a silent no-op
 
@@ -129,13 +128,48 @@ def test_noop_when_no_gpu_tooling(monkeypatch):
     assert "HIP_VISIBLE_DEVICES" not in os.environ
 
 
+def test_noop_on_cpu_image_with_software_vulkan(monkeypatch):
+    # Regression: CPU images ship Mesa llvmpipe's libvulkan.so.1 but NO vulkaninfo.
+    # The old code treated a loadable libvulkan as a GPU signal and ctypes-probed it
+    # -> native SIGSEGV (uncatchable). Now: no vulkaninfo/rocminfo tool -> no-op, and
+    # the dangerous libvulkan probe is never reached.
+    for var in gpu_select._OVERRIDE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(gpu_select.shutil, "which", _which())  # no vulkaninfo / rocminfo
+    monkeypatch.setattr(gpu_select.os.path, "isdir", lambda p: False)  # no /opt/rocm
+
+    def _must_not_probe():
+        raise AssertionError("must not ctypes-probe software Vulkan on a CPU image")
+
+    monkeypatch.setattr(gpu_select, "_vk_via_libvulkan", _must_not_probe)
+
+    gpu_select.select_discrete_gpu()  # no-op; the probe is never entered
+
+    import os
+    assert "GGML_VK_VISIBLE_DEVICES" not in os.environ
+    assert "HIP_VISIBLE_DEVICES" not in os.environ
+
+
+def test_noop_when_backend_forced_none(monkeypatch):
+    # An explicit JARVIS_GPU_BACKEND=none opt-out wins even if tooling is present.
+    for var in gpu_select._OVERRIDE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("JARVIS_GPU_BACKEND", "none")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("vulkaninfo"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(VULKANINFO_IGPU_FIRST))
+
+    gpu_select.select_discrete_gpu()
+
+    import os
+    assert "GGML_VK_VISIBLE_DEVICES" not in os.environ
+
+
 def test_vulkan_backend_sets_ggml_visible_devices(monkeypatch):
     for var in gpu_select._OVERRIDE_VARS:
         monkeypatch.delenv(var, raising=False)
-    # Vulkan image: vulkaninfo present, no ROCm.
+    # Vulkan image: vulkaninfo present (that's the GPU-image signal), no ROCm.
     monkeypatch.setattr(gpu_select.shutil, "which", _which("vulkaninfo"))
     monkeypatch.setattr(gpu_select.os.path, "isdir", lambda p: False)
-    monkeypatch.setattr(gpu_select, "_can_load", lambda lib: lib == "libvulkan.so.1")
     monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(VULKANINFO_IGPU_FIRST))
 
     gpu_select.select_discrete_gpu()
