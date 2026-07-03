@@ -239,6 +239,120 @@ def select_discrete_rocm_index() -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# CUDA topology (for GGUF split-mode auto)
+# ---------------------------------------------------------------------------
+def cuda_device_count() -> int:
+    """Number of CUDA GPUs visible to this process. Never raises; 0 on any failure.
+
+    Tooling-gated FIRST (this module's probe rule): without nvidia-smi (injected
+    into CUDA containers by nvidia-container-toolkit) there is no CUDA platform,
+    so a stray CUDA_VISIBLE_DEVICES cargo-culted onto a ROCm/Vulkan/CPU box must
+    count 0, not conjure phantom GPUs — otherwise auto-split would flip on for
+    devices llama.cpp cannot even see. The gate is tooling presence, NEVER a
+    merely-loadable shared library — a ctypes probe of libcuda would repeat the
+    Mesa-llvmpipe libvulkan SIGSEGV footgun on CPU images (see _detect_backend).
+
+    On real NVIDIA images an operator-set CUDA_VISIBLE_DEVICES is respected:
+    comma-separated non-empty entries are counted (index or GPU-UUID form — both
+    select a device), stopping at (and excluding) any "-1" entry, because the
+    CUDA runtime truncates the visible list at the first invalid entry.
+    Set-but-empty means "no GPUs". Otherwise the count comes from
+    `nvidia-smi --list-gpus`.
+    """
+    try:
+        if not shutil.which("nvidia-smi"):
+            return 0
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible is not None:
+            count = 0
+            for entry in visible.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if entry == "-1":
+                    break
+                count += 1
+            return count
+        out = subprocess.run(
+            ["nvidia-smi", "--list-gpus"],
+            capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        return len(re.findall(r"^GPU \d+: ", out, flags=re.MULTILINE))
+    except Exception:  # contract: never raises
+        return 0
+
+
+# Heterogeneous multi-GPU guard for split-mode auto: a compute card next to a
+# small display/spare card (GT 710/1030-class) must NOT layer-split — llama.cpp
+# would place layers on the tiny card (VRAM OOM, PCIe-bound slowdown, or a hard
+# "no kernel image available" on pre-supported arches). Identical names (the
+# dual-3090 target topology) always split; mixed names split only when even the
+# smallest card can hold a meaningful layer share.
+_MIN_SPLIT_VRAM_MIB = 8192
+
+
+def _cuda_gpu_inventory() -> list[tuple[str, int]]:
+    """(name, total VRAM MiB) per CUDA GPU via nvidia-smi; [] on any failure."""
+    try:
+        if not shutil.which("nvidia-smi"):
+            return []
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        gpus: list[tuple[str, int]] = []
+        for line in out.splitlines():
+            name, sep, mem = line.rpartition(",")
+            if not sep:
+                continue
+            gpus.append((name.strip(), int(mem.strip())))
+        return gpus
+    except Exception:  # contract: never raises
+        return []
+
+
+def auto_gguf_split_mode() -> int:
+    """Resolve the GGUF split-mode AUTO sentinel (-1) from the visible topology.
+
+    Returns 1 (LLAMA_SPLIT_MODE_LAYER) only when >=2 CUDA GPUs are visible AND
+    the topology genuinely wants layer split: identical GPU names (the
+    dual-RTX-3090 prod box, where single-GPU mode piles both models onto GPU0
+    and OOMs at boot), or mixed names where even the smallest card clears
+    _MIN_SPLIT_VRAM_MIB. A big compute card next to a small/old display card —
+    a common desktop topology that worked fine under the old single-GPU default
+    and never set any split setting — stays 0, because splitting onto the tiny
+    card means OOM/slowdown/no-kernel-image arriving silently on image upgrade.
+    Anything unverifiable also stays 0. Operators can always force a mode via
+    inference.gguf.split_mode / JARVIS_GGUF_SPLIT_MODE.
+
+    Why NVIDIA-only: blanket auto-split across every visible device is a footgun
+    on AMD boxes where a kernel-less iGPU (e.g. gfx1036) enumerates next to the
+    dGPU — llama.cpp faults trying to place tensors on it. But those boxes are
+    already visibility-pinned to the single discrete GPU by select_discrete_gpu()
+    (HIP_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES), so exactly one device is
+    visible there and split mode is irrelevant. CPU/Metal images have no
+    nvidia-smi, count 0, and stay single-GPU.
+    """
+    if cuda_device_count() < 2:
+        return 0
+    gpus = _cuda_gpu_inventory()
+    if len(gpus) < 2:
+        log.info("split-mode auto: 2+ CUDA GPUs counted but the topology is "
+                 "unverifiable; staying single-GPU.")
+        return 0
+    names = {name for name, _ in gpus}
+    smallest = min(mem for _, mem in gpus)
+    if len(names) > 1 and smallest < _MIN_SPLIT_VRAM_MIB:
+        log.info("split-mode auto: heterogeneous CUDA GPUs %s with a small card "
+                 "(%d MiB < %d MiB); staying single-GPU. Set split_mode=1 "
+                 "(inference.gguf.split_mode / JARVIS_GGUF_SPLIT_MODE) to force "
+                 "layer split.", sorted(names), smallest, _MIN_SPLIT_VRAM_MIB)
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def _detect_backend() -> str | None:
