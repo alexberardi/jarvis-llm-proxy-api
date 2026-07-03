@@ -11,6 +11,7 @@ degraded model service as an unhealthy container. Returning 200 with a
 """
 
 import os
+import time
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -24,10 +25,33 @@ router = APIRouter(tags=["health"])
 # model service stall every healthcheck. Cap the probe at 5s.
 _PROBE_TIMEOUT_CAP_S = 5.0
 
-# Grace window for slow model loads (e.g. a 32B GGUF): while the model service
-# reports the live slot still loading AND its uptime is under this window, we
-# stay 200 ("initializing") so container health doesn't flap during startup.
+# Grace window for slow model loads (e.g. a 32B GGUF): while the live slot is
+# observed not-ready, we stay 200 ("initializing") until it has been not-ready
+# for this long. The clock lives in THIS process (see _live_not_ready_since),
+# NOT the model service's uptime: the model service restarts from uptime 0 on
+# every serve.sh respawn (a native boot-crash loop must not stay
+# "initializing" forever), and it does NOT restart on /internal/model/reload
+# (a routine post-training reload on a long-lived box must get a fresh grace
+# window instead of an instant 503).
 _LOADING_GRACE_WINDOW_S = 900.0
+
+# Monotonic timestamp of when this API process FIRST observed the live slot
+# not ready (loading or failed); None once it is observed ready.
+_live_not_ready_since: float | None = None
+
+
+def _seconds_live_not_ready() -> float:
+    """Record/return how long the live slot has been observed not-ready."""
+    global _live_not_ready_since
+    now = time.monotonic()
+    if _live_not_ready_since is None:
+        _live_not_ready_since = now
+    return now - _live_not_ready_since
+
+
+def _mark_live_ready() -> None:
+    global _live_not_ready_since
+    _live_not_ready_since = None
 
 
 async def _get_health_status() -> JSONResponse:
@@ -56,12 +80,27 @@ async def _get_health_status() -> JSONResponse:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url, headers=headers)
-    except httpx.TimeoutException:
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         return JSONResponse(
             status_code=503,
             content={
                 "status": "degraded",
-                "reason": "Model service health check timed out",
+                "reason": f"Cannot reach model service at {url}",
+            },
+        )
+    except httpx.TimeoutException:
+        # Connection succeeded but the response stalled: the single-worker
+        # model service blocks its event loop for the whole of a sync
+        # non-streaming generation (worst case minutes per completion on
+        # CPU-only boxes), so a stalled /health means BUSY, not dead.
+        # Flipping the container unhealthy on every long generation is
+        # exactly the flapping this endpoint exists to avoid — 503 is
+        # reserved for refused connections, failed loads, and past-grace.
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "busy",
+                "reason": "Model service busy (health probe stalled mid-response)",
             },
         )
     except httpx.HTTPError:
@@ -89,11 +128,15 @@ async def _get_health_status() -> JSONResponse:
     # "ok" is the model service's literal for "live slot ready" (older model
     # services without slots always report "ok" — treat them as healthy too).
     if data.get("status") == "ok" or live_status == "ready":
+        _mark_live_ready()
         return JSONResponse(
             status_code=200, content={"status": "healthy", "model_service": data}
         )
 
     if live_status == "failed":
+        # failed is also not-ready: keep the grace clock running so a retry
+        # attempt (slot flips back to "loading") can't restart the window.
+        _seconds_live_not_ready()
         return JSONResponse(
             status_code=503,
             content={
@@ -103,11 +146,11 @@ async def _get_health_status() -> JSONResponse:
             },
         )
 
-    # Live slot still loading: grace window so slow 32B loads don't flap
-    # container health. A body without uptime_s (older model service) is
-    # treated as within grace.
-    uptime_s = data.get("uptime_s")
-    if uptime_s is None or uptime_s < _LOADING_GRACE_WINDOW_S:
+    # Live slot still loading: grace window (measured in THIS process — see
+    # _LOADING_GRACE_WINDOW_S) so slow loads and routine reloads don't flap
+    # container health, while a model-service crash-loop can't hide behind a
+    # forever-fresh uptime.
+    if _seconds_live_not_ready() < _LOADING_GRACE_WINDOW_S:
         return JSONResponse(
             status_code=200,
             content={"status": "initializing", "model_service": data},

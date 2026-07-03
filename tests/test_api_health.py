@@ -7,6 +7,7 @@ model service surface as an unhealthy container.
 respx is not in the venv, so httpx.AsyncClient is stubbed directly.
 """
 
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -15,6 +16,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.health_routes as health_routes
+
+
+@pytest.fixture(autouse=True)
+def reset_grace_clock():
+    """The loading-grace clock is module state in the API process."""
+    health_routes._live_not_ready_since = None
+    yield
+    health_routes._live_not_ready_since = None
 
 
 @pytest.fixture
@@ -124,7 +133,8 @@ def test_loading_within_grace_is_200_initializing(
 def test_loading_without_uptime_is_treated_as_within_grace(
     client, monkeypatch, model_service_url, default_timeout
 ):
-    """Older model service body lacks uptime_s → assume within grace."""
+    """Older model service body lacks uptime_s — irrelevant to the grace
+    clock (which is API-side), so first observation is within grace."""
     body = {
         "status": "loading",
         "models": [],
@@ -158,12 +168,15 @@ def test_live_failed_is_503(client, monkeypatch, model_service_url, default_time
 
 
 def test_loading_past_grace_is_503(client, monkeypatch, model_service_url, default_timeout):
+    """The grace clock is the API's own observation window, NOT model-service
+    uptime — the live slot has been observed not-ready for > 900s here."""
+    health_routes._live_not_ready_since = time.monotonic() - 1000.0
     body = {
         "status": "loading",
         "models": [],
         "aliases": {},
         "slots": {"live": {"status": "loading"}},
-        "uptime_s": 1200.0,  # > 900s grace window
+        "uptime_s": 1200.0,
     }
     _stub_httpx(monkeypatch, response=_response(body))
 
@@ -171,6 +184,89 @@ def test_loading_past_grace_is_503(client, monkeypatch, model_service_url, defau
 
     assert resp.status_code == 503
     assert resp.json()["status"] == "degraded"
+
+
+def test_reload_on_long_lived_service_gets_fresh_grace(
+    client, monkeypatch, model_service_url, default_timeout
+):
+    """/internal/model/reload does NOT restart the model service, so its
+    uptime is huge while the fresh manager loads — the grace window must key
+    on the API's first not-ready observation, not uptime, or every
+    post-training/vision reload flips the container unhealthy."""
+    body = {
+        "status": "loading",
+        "models": [],
+        "aliases": {},
+        "slots": {"live": {"status": "loading"}},
+        "uptime_s": 50_000.0,  # long-lived process mid-reload
+    }
+    _stub_httpx(monkeypatch, response=_response(body))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "initializing"
+
+
+def test_crash_loop_respawn_does_not_reset_grace(
+    client, monkeypatch, model_service_url, default_timeout
+):
+    """serve.sh respawns reset model-service uptime to ~0 on every native
+    boot-crash; the API-side clock must keep accumulating or a crash-loop
+    stays 'initializing' (healthy) forever."""
+    health_routes._live_not_ready_since = time.monotonic() - 1000.0
+    body = {
+        "status": "loading",
+        "models": [],
+        "aliases": {},
+        "slots": {"live": {"status": "loading"}},
+        "uptime_s": 42.0,  # freshly respawned process
+    }
+    _stub_httpx(monkeypatch, response=_response(body))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "degraded"
+
+
+def test_ready_observation_resets_grace_clock(
+    client, monkeypatch, model_service_url, default_timeout
+):
+    health_routes._live_not_ready_since = time.monotonic() - 1000.0
+    body = {
+        "status": "ok",
+        "models": ["m"],
+        "aliases": {"live": "m"},
+        "slots": {"live": {"status": "ready"}},
+        "uptime_s": 42.0,
+    }
+    _stub_httpx(monkeypatch, response=_response(body))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert health_routes._live_not_ready_since is None
+
+
+def test_failed_observation_starts_grace_clock(
+    client, monkeypatch, model_service_url, default_timeout
+):
+    """failed is not-ready too: a later retry (slot flips back to 'loading')
+    must not restart the grace window."""
+    body = {
+        "status": "degraded",
+        "models": [],
+        "aliases": {},
+        "slots": {"live": {"status": "failed", "error": "RuntimeError: boom"}},
+        "uptime_s": 42.0,
+    }
+    _stub_httpx(monkeypatch, response=_response(body))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 503
+    assert health_routes._live_not_ready_since is not None
 
 
 def test_model_service_unreachable_is_503(
@@ -186,15 +282,31 @@ def test_model_service_unreachable_is_503(
     assert "reason" in payload
 
 
-def test_model_service_timeout_is_503(
+def test_model_service_connect_timeout_is_503(
     client, monkeypatch, model_service_url, default_timeout
 ):
-    _stub_httpx(monkeypatch, exc=httpx.TimeoutException("timed out"))
+    """Could not even connect: that's dead, not busy."""
+    _stub_httpx(monkeypatch, exc=httpx.ConnectTimeout("connect timed out"))
 
     resp = client.get("/health")
 
     assert resp.status_code == 503
-    assert resp.json()["reason"] == "Model service health check timed out"
+    assert resp.json()["status"] == "degraded"
+
+
+def test_model_service_read_timeout_is_200_busy(
+    client, monkeypatch, model_service_url, default_timeout
+):
+    """Connection accepted but response stalled: the single-worker model
+    service blocks its event loop for the whole of a sync non-streaming
+    generation (worker 32B jobs, CPU-only boxes) — that is BUSY, not dead.
+    A 503 here would flip the container unhealthy on every long completion."""
+    _stub_httpx(monkeypatch, exc=httpx.ReadTimeout("read timed out"))
+
+    resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "busy"
 
 
 def test_model_service_error_status_is_503(

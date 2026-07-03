@@ -153,11 +153,12 @@ Full model build pipeline (generate → train → validate → merge → convert
 
 **HTTP status codes are load-bearing** (the docker healthcheck fails on non-2xx):
 - **200 `healthy`** — model service reachable, live slot ready.
-- **200 `initializing`** — live slot still loading and model-service uptime < 15 min (grace so slow 32B loads don't flap container health).
+- **200 `initializing`** — live slot observed not-ready for < 15 min (grace so slow 32B loads and routine `/internal/model/reload`s don't flap container health). The grace clock lives in the **API process**, not model-service uptime — it spans model-service respawns (a serve.sh crash-loop can't stay "initializing" forever) and restarts fresh for reloads.
+- **200 `busy`** — model service accepted the connection but the response stalled: its single-worker event loop is blocked by an in-flight sync generation (minutes-long on CPU-only boxes). Busy ≠ dead; must not flap the container.
 - **200 `degraded` + `MODEL_SERVICE_URL not set`** — deliberate passthrough posture (macOS dev); stays green.
-- **503** — model service unreachable/timeout, live slot `failed`, or still loading past the grace window.
+- **503** — model service unreachable (connection refused / connect timeout), live slot `failed`, or observed not-ready past the grace window.
 
-The model service's own `/health` (:7705) is always HTTP 200 while the process is alive; its body carries `status` (`ok`/`loading`/`degraded`), `models`, `aliases`, plus per-slot `slots` state, `uptime_s`, `started_at`. Inference endpoints return **503 `model_not_loaded`** (and trigger a non-blocking retry) when the addressed slot has no backend.
+The model service's own `/health` (:7705) is always HTTP 200 while the process is alive; its body carries `status` (`ok`/`loading`/`degraded`), `models`, `aliases`, plus per-slot `slots` state, `uptime_s`, `started_at`. Inference endpoints return **503 `model_not_loaded`** (and trigger a non-blocking retry) when the addressed slot has no backend. `/internal/model/reload` is **ok-iff-loaded**: 200 `{status: ok, slots}` only when the live slot is ready after the reload, otherwise 503 `{status: degraded, slots}` (the retry loop keeps working on the failed slot either way). Because :7705's HTTP code no longer means "loaded", the split-container prod compose healthcheck asserts the **body** (`status == "ok"`, read-timeout = busy = pass) so its `service_healthy` gates still mean "weights loaded".
 
 ---
 

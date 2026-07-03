@@ -72,8 +72,28 @@ services:
       python -m uvicorn services.model_service:app
       --host 0.0.0.0
       --port 7705
+    # :7705 /health is deliberately HTTP 200 whenever the process is alive
+    # (bind-first + fault-isolated loads), so `curl -f` can never fail —
+    # assert the BODY instead: healthy iff the live slot is ready ("ok"),
+    # preserving the pre-bind-first contract that `service_healthy` (the API
+    # and worker gates below) means "weights actually loaded". A read TIMEOUT
+    # exits 0: the single-worker model service blocks its event loop for the
+    # whole of a sync non-streaming generation, and busy must not flap the
+    # container unhealthy.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7705/health"]
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          try:
+              body = json.load(urllib.request.urlopen("http://localhost:7705/health", timeout=5))
+          except TimeoutError:
+              sys.exit(0)  # busy generating (event loop blocked) — process alive
+          except Exception:
+              sys.exit(1)  # refused / dead
+          sys.exit(0 if body.get("status") == "ok" else 1)
       interval: 30s
       timeout: 10s
       retries: 3

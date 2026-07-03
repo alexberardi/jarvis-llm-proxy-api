@@ -138,3 +138,92 @@ def test_chat_stream_returns_503_when_live_not_loaded(model_service, monkeypatch
 
     assert resp.status_code == 503
     assert resp.json()["detail"]["error"]["code"] == "model_not_loaded"
+
+
+# ---------------------------------------------------------------------------
+# /internal/model/unload + /internal/model/reload
+# ---------------------------------------------------------------------------
+
+
+def _patch_mock_settings(monkeypatch):
+    """MOCK backend settings in the managers.model_manager namespace so the
+    fresh manager built by /internal/model/reload loads instantly."""
+    import managers.model_manager as mm_module
+
+    values = {
+        "model.live.backend": "MOCK",
+        "model.live.name": "mock-live",
+    }
+    monkeypatch.setattr(
+        mm_module,
+        "get_setting",
+        lambda key, env_fallback, default, value_type="string": values.get(key, default),
+    )
+    monkeypatch.setattr(
+        mm_module,
+        "get_int_setting",
+        lambda key, env_fallback, default: int(values.get(key, default)),
+    )
+
+
+def test_unload_pauses_retry_loads(model_service, monkeypatch):
+    """The unload endpoint hands the GPU to vision/training — the retry
+    machinery must not reload weights into it mid-job."""
+    ms = model_service
+    monkeypatch.setenv("MODEL_SERVICE_TOKEN", "test-token")
+
+    with TestClient(ms.app) as client:
+        ms.model_manager._set_slot_state(
+            "live", "failed", error="RuntimeError: boom", count_attempt=True
+        )
+
+        resp = client.post(
+            "/internal/model/unload", headers={"X-Internal-Token": "test-token"}
+        )
+
+        assert resp.status_code == 200
+        assert ms.model_manager.retry_failed_loads(force=True) is False
+
+
+def test_reload_returns_ok_with_slots_when_live_ready(model_service, monkeypatch):
+    ms = model_service
+    monkeypatch.setenv("MODEL_SERVICE_TOKEN", "test-token")
+    _patch_mock_settings(monkeypatch)
+
+    with TestClient(ms.app) as client:
+        resp = client.post(
+            "/internal/model/reload", headers={"X-Internal-Token": "test-token"}
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["slots"]["live"]["status"] == "ready"
+    # A reload also swaps in a fresh, UNPAUSED manager (resume after unload).
+    assert ms.model_manager.model_states["live"]["status"] == "ready"
+
+
+def test_reload_onto_broken_config_returns_503_degraded(model_service, monkeypatch):
+    """ok-iff-loaded: reload callers (adapter-training resume, vision resume,
+    patch_settings) log success on 200 — a reload that leaves the live model
+    dead must not read as success. The retry loop keeps working on the failed
+    slot either way."""
+    ms = model_service
+    monkeypatch.setenv("MODEL_SERVICE_TOKEN", "test-token")
+    _patch_mock_settings(monkeypatch)
+
+    def boom(self, **kwargs):
+        raise RuntimeError("broken model config")
+
+    monkeypatch.setattr(ModelManager, "_create_backend", boom)
+
+    with TestClient(ms.app) as client:
+        resp = client.post(
+            "/internal/model/reload", headers={"X-Internal-Token": "test-token"}
+        )
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["slots"]["live"]["status"] == "failed"
+    assert "broken model config" in body["slots"]["live"]["error"]

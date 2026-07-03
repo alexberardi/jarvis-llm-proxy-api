@@ -87,16 +87,25 @@ class ModelManager:
             "live": self._new_slot_state(),
             "background": self._new_slot_state(),
         }
-        # Resolved per-slot configs, frozen by _initialize_models (see comment
-        # there for why retries do not re-read settings).
+        # Resolved per-slot configs, frozen by _resolve_slot_configs (see
+        # comment there for why retries do not re-read settings).
         self._slot_configs: dict[str, dict] = {}
         self._slots_shared: bool = False
-        # Serialize retries: concurrent callers no-op fast instead of queueing.
-        self._retry_lock = threading.Lock()
-        self._retry_in_flight = False
+        # ONE load at a time per manager: load_all(), retry_failed_loads() and
+        # the swap methods all serialize on this lock so two full-weight loads
+        # can never run concurrently in one process (double VRAM → native
+        # llama.cpp OOM/abort kills the whole model service).
+        self._load_lock = threading.Lock()
+        # Loads paused: /internal/model/unload freed the GPU on purpose
+        # (vision/training) — retries must not reload weights mid-job.
+        self._loads_paused = False
+        # Retired: /internal/model/reload swapped in a fresh manager — no new
+        # load may start on this instance (in-flight loader/retry threads hold
+        # bound references to it).
+        self._shutdown = False
 
         if auto_load:
-            self._initialize_models()
+            self.load_all()
 
     # ------------------------------------------------------------------ #
     #  Slot state tracking                                                 #
@@ -136,8 +145,56 @@ class ModelManager:
             self._set_slot_state(slot, "loading")
 
     def load_all(self) -> None:
-        """Run the initial model load (pairs with auto_load=False)."""
-        self._initialize_models()
+        """Run the initial model load (pairs with auto_load=False).
+
+        Serialized with retry_failed_loads() on _load_lock so the retry loop
+        can never run a second full-weight load concurrently with an
+        in-flight initial load / reload. An exception that escapes
+        _initialize_models OUTSIDE the per-slot fault isolation (e.g. a
+        malformed settings value in the resolution preamble) marks every
+        still-pending slot "failed" — a slot must never wedge in "loading",
+        which the retry machinery ignores.
+        """
+        with self._load_lock:
+            if self._shutdown:
+                logger.warning("load_all skipped: manager has been retired (reload)")
+                return
+            try:
+                self._initialize_models()
+            except Exception as e:  # noqa: BLE001 — a wedged "loading" slot is unretryable
+                logger.exception(
+                    f"🚨 Model initialization failed outside per-slot isolation: {e}"
+                )
+                for slot, state in self.model_states.items():
+                    if state["status"] not in ("ready", "failed"):
+                        self._set_slot_state(
+                            slot,
+                            "failed",
+                            error=f"{type(e).__name__}: {e}",
+                            count_attempt=True,
+                        )
+
+    def pause_loads(self) -> None:
+        """Stop retry loads: /internal/model/unload freed the GPU on purpose
+        (vision inference / adapter training) — a retry reloading weights
+        mid-job would OOM or crash llama.cpp natively. Cleared implicitly by
+        /internal/model/reload (fresh manager) or resume_loads()."""
+        self._loads_paused = True
+
+    def resume_loads(self) -> None:
+        self._loads_paused = False
+
+    def begin_shutdown(self) -> None:
+        """Retire this manager (called by /internal/model/reload before the
+        singleton swap). Blocks until any in-flight load_all/retry on this
+        instance finishes; afterwards no new load can start on it. Without
+        this, a retry thread minutes deep inside a load (bound to the OLD
+        instance) races the reload's fresh load — two concurrent full-weight
+        loads, and the old manager's weights land orphaned (never unloaded).
+        """
+        self._shutdown = True
+        with self._load_lock:
+            pass
 
     # ------------------------------------------------------------------ #
     #  Backend factory                                                     #
@@ -199,6 +256,37 @@ class ModelManager:
     # ------------------------------------------------------------------ #
 
     def _initialize_models(self):
+        self._resolve_slot_configs()
+
+        # ---- Create backend instances (per-slot fault isolation) ----
+        # A failed load records model_states[slot] = failed and leaves the
+        # slot None — it must NEVER raise out of here (the 2026-07 incident:
+        # a boot-fatal background load killed the process before it could
+        # bind the port, leaving a healthy-looking but dead container).
+        self._attempt_slot_load("live")
+
+        if self._slots_shared:
+            self._mirror_live_to_background()
+        else:
+            self._attempt_slot_load("background")
+
+        # Populate model registry (tolerant of None slots)
+        self._populate_registry()
+
+        # Auto-load date key adapter for successfully loaded slots
+        if self.live_model is not None:
+            self._load_date_key_adapter(
+                self.live_model, self._slot_configs["live"]["model_path"], "live"
+            )
+        if not self._slots_shared and self.background_model is not None:
+            self._load_date_key_adapter(
+                self.background_model,
+                self._slot_configs["background"]["model_path"],
+                "background",
+            )
+
+    def _resolve_slot_configs(self) -> None:
+        """Read settings and freeze the per-slot configs (+ sharing flag)."""
         # ---- Read live config (with fallback to legacy main settings) ----
         live_backend = get_setting(
             "model.live.backend", "JARVIS_LIVE_MODEL_BACKEND", ""
@@ -326,26 +414,42 @@ class ModelManager:
         }
         self._slots_shared = should_share
 
-        # ---- Create backend instances (per-slot fault isolation) ----
-        # A failed load records model_states[slot] = failed and leaves the
-        # slot None — it must NEVER raise out of here (the 2026-07 incident:
-        # a boot-fatal background load killed the process before it could
-        # bind the port, leaving a healthy-looking but dead container).
-        self._attempt_slot_load("live")
+    def _reresolve_configs_preserving_loaded(self) -> None:
+        """Re-run settings resolution, keeping the frozen config of any slot
+        whose backend is currently loaded — the frozen snapshot must keep
+        describing the weights actually in memory (registry/alias labels)."""
+        preserved = {
+            slot: cfg
+            for slot, cfg in self._slot_configs.items()
+            if self.model_states.get(slot, {}).get("status") == "ready"
+        }
+        self._resolve_slot_configs()
+        if preserved:
+            self._slot_configs.update(preserved)
+            # Sharing was computed from the fresh resolution; recompute it
+            # against the effective (possibly preserved) configs.
+            live_cfg = self._slot_configs.get("live") or {}
+            bg_cfg = self._slot_configs.get("background") or {}
+            self._slots_shared = (
+                live_cfg.get("backend_type") == bg_cfg.get("backend_type")
+                and live_cfg.get("model_path") == bg_cfg.get("model_path")
+            )
 
-        if should_share:
-            self._mirror_live_to_background()
-        else:
-            self._attempt_slot_load("background")
-
-        # Populate model registry (tolerant of None slots)
-        self._populate_registry()
-
-        # Auto-load date key adapter for successfully loaded slots
-        if self.live_model is not None:
-            self._load_date_key_adapter(self.live_model, live_model_path, "live")
-        if not should_share and self.background_model is not None:
-            self._load_date_key_adapter(self.background_model, bg_model_path, "background")
+    def _frozen_config_unloadable(self, slot: str) -> bool:
+        """True when the frozen config can NEVER produce a backend: missing
+        entirely, or missing the one input its backend requires (typically the
+        settings DB was unreachable at resolve time and the env fallback was
+        empty → model_path froze as None). MOCK defaults its path; REST needs
+        rest_url instead of a path."""
+        cfg = self._slot_configs.get(slot)
+        if cfg is None:
+            return True
+        backend_type = (cfg.get("backend_type") or "").upper()
+        if backend_type == "MOCK":
+            return False
+        if backend_type == "REST":
+            return not cfg.get("rest_url")
+        return not cfg.get("model_path")
 
     # ------------------------------------------------------------------ #
     #  Per-slot loading + retry                                            #
@@ -384,6 +488,11 @@ class ModelManager:
             self._set_slot_state(slot, "failed", error=f"{type(e).__name__}: {e}")
             return False
         setattr(self, self._slot_attr(slot), backend)
+        # Register BEFORE flipping to "ready": a slot observed ready must be
+        # addressable via get_model_config, or /internal/model/chat 404s
+        # ("Model not found" — treated as non-retryable by callers, unlike the
+        # 503 model_not_loaded contract) while a sibling slot is still loading.
+        self._populate_registry()
         self._set_slot_state(slot, "ready")
         logger.info(f"✅ {slot} model ready: {cfg['model_path']} ({cfg['backend_type']})")
         return True
@@ -409,25 +518,46 @@ class ModelManager:
     def retry_failed_loads(self, force: bool = False) -> bool:
         """Re-attempt loading ONLY failed slots.
 
-        Concurrency-safe: while one retry is in flight, other callers no-op
-        fast (return False). Each slot has an exponential cooldown (60s
-        doubling to a 600s cap) unless force=True.
+        Concurrency-safe: serialized with load_all() on _load_lock; while ANY
+        load is in flight, other callers no-op fast (return False). No-ops
+        while paused (vision/training unloaded the GPU on purpose) or after
+        begin_shutdown() (manager retired by /internal/model/reload). Each
+        slot has an exponential cooldown (60s doubling to a 600s cap) unless
+        force=True.
 
         Returns True if anything was (re)loaded.
         """
-        with self._retry_lock:
-            if self._retry_in_flight:
-                return False
-            self._retry_in_flight = True
+        if self._shutdown or self._loads_paused:
+            return False
+        if not self._load_lock.acquire(blocking=False):
+            return False
         try:
             reloaded = False
             for slot in ("live", "background"):
+                if self._shutdown or self._loads_paused:
+                    break
                 if slot == "background" and self._slots_shared:
                     continue  # mirrored from live below
                 if self.model_states[slot]["status"] != "failed":
                     continue
                 if not force and self._cooldown_remaining(slot, time.monotonic()) > 0:
                     continue
+                if self._frozen_config_unloadable(slot):
+                    # The frozen snapshot can never load — replaying it
+                    # verbatim would fail forever with no operator recourse
+                    # short of a manual reload. Re-resolve settings first
+                    # (valid-but-failing configs still retry frozen — see the
+                    # freeze comment in _resolve_slot_configs).
+                    try:
+                        self._reresolve_configs_preserving_loaded()
+                    except Exception as e:  # noqa: BLE001 — settings DB may still be down
+                        self._set_slot_state(
+                            slot,
+                            "failed",
+                            error=f"settings re-resolution failed: {type(e).__name__}: {e}",
+                            count_attempt=True,
+                        )
+                        continue
                 if self._attempt_slot_load(slot):
                     reloaded = True
                     cfg = self._slot_configs.get(slot, {})
@@ -440,8 +570,7 @@ class ModelManager:
                 self._populate_registry()
             return reloaded
         finally:
-            with self._retry_lock:
-                self._retry_in_flight = False
+            self._load_lock.release()
 
     # ------------------------------------------------------------------ #
     #  Date key adapter                                                    #
@@ -471,33 +600,47 @@ class ModelManager:
         new_model_chat_format: str,
         new_model_context_window: int = None,
     ):
-        try:
-            if hasattr(self.live_model, 'unload'):
-                self.live_model.unload()
+        # Serialized on _load_lock: a swap racing an in-flight retry/load
+        # would run two full-weight loads concurrently (double VRAM).
+        with self._load_lock:
+            try:
+                if hasattr(self.live_model, 'unload'):
+                    self.live_model.unload()
 
-            rest_url = ""
-            if new_model_backend.upper() == "REST":
-                rest_url = get_setting(
-                    "model.live.rest_url", "JARVIS_REST_MODEL_URL", ""
+                rest_url = ""
+                if new_model_backend.upper() == "REST":
+                    rest_url = get_setting(
+                        "model.live.rest_url", "JARVIS_REST_MODEL_URL", ""
+                    )
+
+                self.live_model = self._create_backend(
+                    backend_type=new_model_backend,
+                    model_path=new_model,
+                    chat_format=new_model_chat_format,
+                    stop_tokens="",
+                    context_window=new_model_context_window or 8192,
+                    rest_url=rest_url,
+                    model_type="live",
                 )
-
-            self.live_model = self._create_backend(
-                backend_type=new_model_backend,
-                model_path=new_model,
-                chat_format=new_model_chat_format,
-                stop_tokens="",
-                context_window=new_model_context_window or 8192,
-                rest_url=rest_url,
-                model_type="live",
-            )
-            # Keep slot state honest — a swap onto a previously failed slot
-            # must clear the failed status so /health recovers.
-            self._set_slot_state("live", "ready", count_attempt=True)
-            return {"status": "success", "message": f"Live model swapped to {new_model}"}
-        except Exception as e:
-            if self.live_model is None:
-                self._set_slot_state("live", "failed", error=f"{type(e).__name__}: {e}")
-            return {"status": "error", "message": str(e)}
+                # Keep the frozen snapshot honest — retries and registry
+                # populates must describe the weights actually loaded.
+                self._slot_configs["live"] = {
+                    "backend_type": new_model_backend.upper(),
+                    "model_path": new_model,
+                    "chat_format": new_model_chat_format,
+                    "stop_tokens": "",
+                    "context_window": new_model_context_window or 8192,
+                    "rest_url": rest_url,
+                }
+                self._slots_shared = self.background_model is self.live_model
+                # Keep slot state honest — a swap onto a previously failed slot
+                # must clear the failed status so /health recovers.
+                self._set_slot_state("live", "ready", count_attempt=True)
+                return {"status": "success", "message": f"Live model swapped to {new_model}"}
+            except Exception as e:
+                if self.live_model is None:
+                    self._set_slot_state("live", "failed", error=f"{type(e).__name__}: {e}")
+                return {"status": "error", "message": str(e)}
 
     def swap_background_model(
         self,
@@ -506,31 +649,42 @@ class ModelManager:
         new_model_chat_format: str,
         new_model_context_window: int = None,
     ):
-        try:
-            if hasattr(self.background_model, 'unload'):
-                self.background_model.unload()
+        # Serialized on _load_lock (see swap_live_model).
+        with self._load_lock:
+            try:
+                if hasattr(self.background_model, 'unload'):
+                    self.background_model.unload()
 
-            rest_url = ""
-            if new_model_backend.upper() == "REST":
-                rest_url = get_setting(
-                    "model.background.rest_url", "JARVIS_BACKGROUND_REST_MODEL_URL", ""
+                rest_url = ""
+                if new_model_backend.upper() == "REST":
+                    rest_url = get_setting(
+                        "model.background.rest_url", "JARVIS_BACKGROUND_REST_MODEL_URL", ""
+                    )
+
+                self.background_model = self._create_backend(
+                    backend_type=new_model_backend,
+                    model_path=new_model,
+                    chat_format=new_model_chat_format,
+                    stop_tokens="",
+                    context_window=new_model_context_window or 8192,
+                    rest_url=rest_url,
+                    model_type="background",
                 )
-
-            self.background_model = self._create_backend(
-                backend_type=new_model_backend,
-                model_path=new_model,
-                chat_format=new_model_chat_format,
-                stop_tokens="",
-                context_window=new_model_context_window or 8192,
-                rest_url=rest_url,
-                model_type="background",
-            )
-            self._set_slot_state("background", "ready", count_attempt=True)
-            return {"status": "success", "message": f"Background model swapped to {new_model}"}
-        except Exception as e:
-            if self.background_model is None:
-                self._set_slot_state("background", "failed", error=f"{type(e).__name__}: {e}")
-            return {"status": "error", "message": str(e)}
+                self._slot_configs["background"] = {
+                    "backend_type": new_model_backend.upper(),
+                    "model_path": new_model,
+                    "chat_format": new_model_chat_format,
+                    "stop_tokens": "",
+                    "context_window": new_model_context_window or 8192,
+                    "rest_url": rest_url,
+                }
+                self._slots_shared = self.background_model is self.live_model
+                self._set_slot_state("background", "ready", count_attempt=True)
+                return {"status": "success", "message": f"Background model swapped to {new_model}"}
+            except Exception as e:
+                if self.background_model is None:
+                    self._set_slot_state("background", "failed", error=f"{type(e).__name__}: {e}")
+                return {"status": "error", "message": str(e)}
 
     def unload_all(self):
         """Unload all model backends (best-effort)."""
@@ -566,32 +720,25 @@ class ModelManager:
     # ------------------------------------------------------------------ #
 
     def _populate_registry(self):
-        """Populate the model registry and aliases after models are initialized."""
-        live_model_id = get_setting(
-            "model.live.name", "JARVIS_LIVE_MODEL_NAME", ""
-        ) or get_setting(
-            "model.main.name", "JARVIS_MODEL_NAME", "jarvis-text-8b"
-        )
-        live_backend = get_setting(
-            "model.live.backend", "JARVIS_LIVE_MODEL_BACKEND", ""
-        ) or get_setting(
-            "model.main.backend", "JARVIS_MODEL_BACKEND", "GGUF"
-        )
-        live_context = get_int_setting(
-            "model.live.context_window", "JARVIS_LIVE_MODEL_CONTEXT_WINDOW", 0
-        ) or get_int_setting(
-            "model.main.context_window", "JARVIS_MODEL_CONTEXT_WINDOW", 4096
-        )
+        """Populate the model registry and aliases after models are initialized.
 
-        bg_model_id = get_setting(
-            "model.background.name", "JARVIS_BACKGROUND_MODEL_NAME", ""
-        ) or live_model_id
-        bg_backend = get_setting(
-            "model.background.backend", "JARVIS_BACKGROUND_MODEL_BACKEND", ""
-        ) or live_backend
-        bg_context = get_int_setting(
-            "model.background.context_window", "JARVIS_BACKGROUND_MODEL_CONTEXT_WINDOW", 0
-        ) or live_context
+        Reads ONLY the frozen _slot_configs — never live settings. The
+        registry must describe the weights that are actually loaded;
+        re-reading settings here would let a mid-flight settings change
+        relabel the old weights with a new model id / context window (the
+        exact half-applied-settings hazard the freeze in
+        _resolve_slot_configs defends against).
+        """
+        live_cfg = self._slot_configs.get("live") or {}
+        bg_cfg = self._slot_configs.get("background") or {}
+
+        live_model_id = live_cfg.get("model_path") or "jarvis-text-8b"
+        live_backend = live_cfg.get("backend_type") or "GGUF"
+        live_context = live_cfg.get("context_window") or 4096
+
+        bg_model_id = bg_cfg.get("model_path") or live_model_id
+        bg_backend = bg_cfg.get("backend_type") or live_backend
+        bg_context = bg_cfg.get("context_window") or live_context
 
         # Register live model
         if self.live_model:

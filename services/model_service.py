@@ -8,7 +8,7 @@ import time
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -172,9 +172,12 @@ service_started_epoch: float | None = None
 _RETRY_LOOP_INTERVAL_S = 60.0
 
 
-def _load_models_in_background() -> None:
+def _load_models_in_background(manager: ModelManager) -> None:
+    """Initial loader. Bound to the manager captured at startup: if a reload
+    retires that instance mid-flight, its load_all() no-ops (shutdown flag)
+    instead of racing a second full-weight load on the replacement manager."""
     try:
-        model_manager.load_all()
+        manager.load_all()
     except Exception:  # noqa: BLE001 — the loader thread must never die silently
         logger.exception("🚨 Unexpected error during initial model load")
 
@@ -204,7 +207,10 @@ def startup_event():
     # reports "not_loaded" in the gap.
     model_manager.mark_all_loading()
     threading.Thread(
-        target=_load_models_in_background, name="model-loader", daemon=True
+        target=_load_models_in_background,
+        args=(model_manager,),
+        name="model-loader",
+        daemon=True,
     ).start()
     threading.Thread(target=_retry_loop, name="model-retry-loop", daemon=True).start()
     logger.info("🚀 Model service bound; loading models in a background thread")
@@ -284,10 +290,19 @@ def shutdown_event():
     model_manager.unload_all()
 
 
+# Serialize reloads with each other; coordination with in-flight loads on the
+# CURRENT manager happens via begin_shutdown() below.
+_reload_lock = threading.Lock()
+
+
 @app.post("/internal/model/unload")
 def unload_models(x_internal_token: str | None = Header(default=None)):
     require_internal_token(x_internal_token)
     logger.info("🧹 Unloading models (debug pause)...")
+    # The GPU is being handed to vision inference / adapter training: the
+    # retry machinery must not reload weights into it mid-job (OOM / native
+    # crash). Cleared by /internal/model/reload (fresh manager is unpaused).
+    model_manager.pause_loads()
     model_manager.unload_all()
     logger.info("✅ Unload complete")
     return {"status": "ok"}
@@ -299,29 +314,48 @@ def reload_models(x_internal_token: str | None = Header(default=None)):
     global model_manager
     logger.info("🔄 Reloading models (debug resume)")
 
-    # Invalidate settings cache before reloading
-    try:
-        from services.settings_service import get_settings_service
-        settings = get_settings_service()
-        settings.invalidate_cache()
-        logger.info("🔄 Settings cache invalidated")
-    except Exception as e:
-        logger.warning(f"⚠️  Failed to invalidate settings cache: {e}")
+    with _reload_lock:
+        # Invalidate settings cache before reloading
+        try:
+            from services.settings_service import get_settings_service
+            settings = get_settings_service()
+            settings.invalidate_cache()
+            logger.info("🔄 Settings cache invalidated")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to invalidate settings cache: {e}")
 
-    try:
-        model_manager.unload_all()
-    except (RuntimeError, AttributeError) as e:
-        logger.debug(f"unload_all during reload failed: {e}")
-    # Reset the singleton so the fresh manager re-reads settings, then load
-    # through the fault-isolated machinery. force=True semantics: a reload
-    # always attempts every slot immediately (fresh manager → no cooldown).
-    # A failed slot no longer raises — it lands in model_states and the
-    # retry loop keeps working on it.
-    ModelManager._instance = None
-    ModelManager._initialized = False
-    model_manager = ModelManager(auto_load=False)
-    model_manager.load_all()
-    return {"status": "ok"}
+        # Retire the old manager FIRST: begin_shutdown() blocks until any
+        # in-flight load on it finishes (the startup loader thread and retry
+        # threads hold bound references to the OLD instance) and prevents new
+        # ones — otherwise two full-weight loads race in one process (double
+        # VRAM → native llama.cpp OOM/abort) and the old manager's weights
+        # land orphaned after we swap.
+        old_manager = model_manager
+        old_manager.begin_shutdown()
+        try:
+            old_manager.unload_all()
+        except (RuntimeError, AttributeError) as e:
+            logger.debug(f"unload_all during reload failed: {e}")
+        # Reset the singleton so the fresh manager re-reads settings, then load
+        # through the fault-isolated machinery. force=True semantics: a reload
+        # always attempts every slot immediately (fresh manager → no cooldown).
+        # A failed slot no longer raises — it lands in model_states and the
+        # retry loop keeps working on it.
+        ModelManager._instance = None
+        ModelManager._initialized = False
+        model_manager = ModelManager(auto_load=False)
+        new_manager = model_manager
+        new_manager.load_all()
+
+    # ok-iff-loaded: callers (adapter-training resume, vision resume,
+    # patch_settings) log success on 200 — a reload onto a broken config must
+    # not read as success while the retry loop grinds on a dead live model.
+    slots = {slot: dict(state) for slot, state in new_manager.model_states.items()}
+    live_ready = new_manager.model_states["live"]["status"] == "ready"
+    return JSONResponse(
+        status_code=200 if live_ready else 503,
+        content={"status": "ok" if live_ready else "degraded", "slots": slots},
+    )
 
 
 def _get_user_text(req: ChatCompletionRequest) -> str:

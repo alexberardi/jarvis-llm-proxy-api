@@ -21,14 +21,39 @@
 #   RUN_MODEL_SERVICE   (default "true"; "false" skips the model service —
 #                        REST/passthrough deployments, parity with run.sh's
 #                        macOS behavior)
+#   RUN_MIGRATIONS      (default "true"; runs `alembic upgrade head` before
+#                        starting, like the sibling launchers and the
+#                        compose-generated commands do — composes that keep
+#                        their own migrate step can set "false")
+#   MODEL_SERVICE_URL   (defaulted to http://127.0.0.1:$MODEL_SERVICE_PORT
+#                        when RUN_MODEL_SERVICE=true — parity with
+#                        run.sh/run-prod.sh; without it the API silently
+#                        degrades to passthrough-only while /health stays 200)
 
 set -u
 
 MODEL_SERVICE_PORT="${MODEL_SERVICE_PORT:-7705}"
 SERVER_PORT="${SERVER_PORT:-7704}"
 RUN_MODEL_SERVICE="${RUN_MODEL_SERVICE:-true}"
+RUN_MIGRATIONS="${RUN_MIGRATIONS:-true}"
+
+if [[ "$RUN_MIGRATIONS" == "true" ]]; then
+    echo "[serve] running alembic migrations" >&2
+    if ! python -m alembic upgrade head; then
+        echo "[serve] FATAL: alembic upgrade head failed" >&2
+        exit 1
+    fi
+else
+    echo "[serve] RUN_MIGRATIONS=$RUN_MIGRATIONS — skipping migrations" >&2
+fi
 
 if [[ "$RUN_MODEL_SERVICE" == "true" ]]; then
+    # The API decides passthrough-vs-model-service from MODEL_SERVICE_URL. If
+    # we run the model service, the API must know where it is — an unset URL
+    # is the July incident signature: model service loads fine, every
+    # completion 500s, and /health deliberately reports 200 "degraded"
+    # (passthrough posture) so docker keeps showing healthy.
+    export MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
     (
         backoff=5
         while true; do

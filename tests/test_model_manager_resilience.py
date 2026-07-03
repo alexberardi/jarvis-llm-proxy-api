@@ -235,3 +235,225 @@ def test_concurrent_retries_do_not_double_load(reset_singleton, monkeypatch):
     assert calls["count"] == initial_calls + 1  # exactly ONE retry load
     assert sorted(results) == [False, True]
     assert manager.model_states["background"]["status"] == "ready"
+
+
+def test_retry_noops_while_load_all_in_flight(reset_singleton, monkeypatch):
+    """load_all() and retry_failed_loads() serialize on the same lock — the
+    60s retry loop must never run a second full-weight load concurrently with
+    an in-flight initial load (double VRAM → native OOM)."""
+    _patch_settings(monkeypatch, SPLIT_SETTINGS)
+    calls = _install_factory(monkeypatch, set(), slow_slots={"live"}, delay_s=0.3)
+
+    manager = ModelManager(auto_load=False)
+    loader = threading.Thread(target=manager.load_all)
+    loader.start()
+    real_time.sleep(0.05)  # land while the slow live load is in flight
+
+    assert manager.retry_failed_loads(force=True) is False
+
+    loader.join()
+    assert calls["count"] == 2  # only load_all's two attempts, no retry load
+
+
+# ---------------------------------------------------------------------------
+# Wedged-loading protection (exceptions outside per-slot isolation)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_preamble_failure_marks_slots_failed_not_loading(
+    reset_singleton, monkeypatch
+):
+    """An exception in the settings-resolution preamble (e.g. a malformed DB
+    value) escapes the per-slot fault isolation — the slots must land in
+    'failed' (retryable) rather than wedge in 'loading' forever, and
+    construction must not raise."""
+
+    def broken_get_setting(key, env_fallback, default, value_type="string"):
+        return 12345  # non-string DB value → .upper() AttributeError
+
+    monkeypatch.setattr(mm_module, "get_setting", broken_get_setting)
+
+    manager = ModelManager()  # must NOT raise
+
+    for slot in ("live", "background"):
+        state = manager.model_states[slot]
+        assert state["status"] == "failed"
+        assert "AttributeError" in state["error"]
+        assert state["attempts"] == 1  # cooldown applies — no hot retry loop
+
+
+def test_retry_heals_settings_preamble_failure(reset_singleton, monkeypatch):
+    """After a preamble failure there are NO frozen configs — a retry must
+    re-run settings resolution (nothing frozen to replay) and recover once
+    settings are readable again."""
+    values = dict(SPLIT_SETTINGS)
+    _patch_settings(monkeypatch, values)
+    _install_factory(monkeypatch, set())
+
+    resolve_calls = {"broken": True}
+    real_resolve = ModelManager._resolve_slot_configs
+
+    def flaky_resolve(self):
+        if resolve_calls["broken"]:
+            raise RuntimeError("settings DB unreachable")
+        real_resolve(self)
+
+    monkeypatch.setattr(ModelManager, "_resolve_slot_configs", flaky_resolve)
+
+    manager = ModelManager()
+    assert manager.model_states["live"]["status"] == "failed"
+    assert manager._slot_configs == {}
+
+    resolve_calls["broken"] = False
+    assert manager.retry_failed_loads(force=True) is True
+    assert manager.model_states["live"]["status"] == "ready"
+    assert manager.model_states["background"]["status"] == "ready"
+    assert "mock-live" in manager.registry
+
+
+# ---------------------------------------------------------------------------
+# Frozen configs: replay valid ones, re-resolve unloadable ones
+# ---------------------------------------------------------------------------
+
+
+def test_retry_re_resolves_unloadable_frozen_config(reset_singleton, monkeypatch):
+    """A frozen config with no model path (settings DB unreachable at resolve
+    time, empty env fallback) can NEVER load — the retry must re-resolve
+    settings instead of replaying the frozen garbage forever."""
+    values = {"model.live.backend": "GGUF"}  # no model name anywhere
+    _patch_settings(monkeypatch, values)
+    seen_paths: list = []
+
+    def factory(
+        self,
+        backend_type,
+        model_path,
+        chat_format,
+        stop_tokens,
+        context_window,
+        rest_url,
+        model_type,
+    ):
+        seen_paths.append(model_path)
+        if not model_path:
+            raise RuntimeError("no model path")
+        return object()  # stand-in backend
+
+    monkeypatch.setattr(ModelManager, "_create_backend", factory)
+
+    manager = ModelManager()
+    assert manager.model_states["live"]["status"] == "failed"
+    assert seen_paths == [None]
+
+    # Operator fixes the settings DB; the next retry re-reads it.
+    values["model.live.name"] = "fixed-model"
+    assert manager.retry_failed_loads(force=True) is True
+    assert manager.model_states["live"]["status"] == "ready"
+    assert seen_paths[-1] == "fixed-model"
+    assert "fixed-model" in manager.registry
+
+
+def test_registry_uses_frozen_config_after_settings_change(
+    reset_singleton, monkeypatch
+):
+    """A successful retry loads the FROZEN config — the registry and aliases
+    must advertise the weights actually loaded, not a settings value that
+    changed between the failure and the retry."""
+    values = dict(SPLIT_SETTINGS)
+    _patch_settings(monkeypatch, values)
+    fail_slots = {"background"}
+    _install_factory(monkeypatch, fail_slots)
+
+    manager = ModelManager()
+
+    # Operator points background at a NEW model while the retry is pending.
+    values["model.background.name"] = "mock-bg-v2"
+    fail_slots.clear()
+
+    assert manager.retry_failed_loads(force=True) is True
+    assert manager.aliases["background"] == "mock-bg"
+    assert "mock-bg" in manager.registry
+    assert "mock-bg-v2" not in manager.registry
+
+
+def test_ready_slot_is_immediately_addressable(reset_singleton, monkeypatch):
+    """No ready-before-registry window: as soon as a slot reports 'ready',
+    get_model_config must resolve it (otherwise /internal/model/chat 404s —
+    a non-retryable signal — while the sibling slot is still loading)."""
+    _patch_settings(monkeypatch, SPLIT_SETTINGS)
+    _install_factory(monkeypatch, set(), slow_slots={"background"}, delay_s=0.5)
+
+    manager = ModelManager(auto_load=False)
+    loader = threading.Thread(target=manager.load_all)
+    loader.start()
+    try:
+        deadline = real_time.monotonic() + 5.0
+        while (
+            real_time.monotonic() < deadline
+            and manager.model_states["live"]["status"] != "ready"
+        ):
+            real_time.sleep(0.01)
+        assert manager.model_states["live"]["status"] == "ready"
+        assert manager.get_model_config("live") is not None
+        assert manager.aliases.get("live") == "mock-live"
+    finally:
+        loader.join()
+
+
+# ---------------------------------------------------------------------------
+# Pause (vision/training GPU handoff) + shutdown (reload retirement)
+# ---------------------------------------------------------------------------
+
+
+def test_paused_manager_never_retries(reset_singleton, monkeypatch):
+    """While /internal/model/unload has freed the GPU for a vision/training
+    job, the retry machinery must not reload weights into it."""
+    _patch_settings(monkeypatch, SPLIT_SETTINGS)
+    fail_slots = {"background"}
+    calls = _install_factory(monkeypatch, fail_slots)
+
+    manager = ModelManager()
+    initial_calls = calls["count"]
+    fail_slots.clear()
+
+    manager.pause_loads()
+    assert manager.retry_failed_loads(force=True) is False
+    assert calls["count"] == initial_calls
+    assert manager.model_states["background"]["status"] == "failed"
+
+    manager.resume_loads()
+    assert manager.retry_failed_loads(force=True) is True
+    assert manager.model_states["background"]["status"] == "ready"
+
+
+def test_begin_shutdown_waits_for_in_flight_load_and_blocks_new_ones(
+    reset_singleton, monkeypatch
+):
+    """Reload retires the old manager: begin_shutdown() must block until the
+    in-flight retry finishes (no concurrent double-load with the fresh
+    manager) and prevent any load from starting afterwards."""
+    _patch_settings(monkeypatch, SPLIT_SETTINGS)
+    fail_slots = {"background"}
+    calls = _install_factory(
+        monkeypatch, fail_slots, slow_slots={"background"}, delay_s=0.3
+    )
+
+    manager = ModelManager()
+    fail_slots.clear()
+
+    retry_thread = threading.Thread(
+        target=manager.retry_failed_loads, kwargs={"force": True}
+    )
+    retry_thread.start()
+    real_time.sleep(0.05)  # let the slow retry get in flight
+
+    manager.begin_shutdown()  # must block until the retry completes
+    assert manager.model_states["background"]["status"] == "ready"
+    retry_thread.join()
+
+    # No new loads on a retired manager.
+    calls_after_shutdown = calls["count"]
+    manager._set_slot_state("background", "failed", error="boom")
+    assert manager.retry_failed_loads(force=True) is False
+    manager.load_all()
+    assert calls["count"] == calls_after_shutdown
