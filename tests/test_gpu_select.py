@@ -206,23 +206,29 @@ GPU 1: NVIDIA GeForce RTX 3090 (UUID: GPU-66666666-7777-8888-9999-aaaaaaaaaaaa)
 
 def test_cuda_count_respects_visible_devices_single(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    # nvidia-smi would say 2 — the operator's mask must win.
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(NVIDIA_SMI_DUAL_3090))
     assert gpu_select.cuda_device_count() == 1
 
 
 def test_cuda_count_respects_visible_devices_pair(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
     assert gpu_select.cuda_device_count() == 2
 
 
 def test_cuda_count_trailing_minus_one_excluded(monkeypatch):
     # CUDA truncates the visible list at an invalid entry; "-1" itself never counts.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0,-1")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
     assert gpu_select.cuda_device_count() == 2
 
 
 def test_cuda_count_minus_one_truncates_rest(monkeypatch):
     # Entries AFTER "-1" are invisible to CUDA too: "0,-1,1" exposes only GPU 0.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,-1,1")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
     assert gpu_select.cuda_device_count() == 1
 
 
@@ -239,7 +245,19 @@ def test_cuda_count_uuid_entries_count(monkeypatch):
         "CUDA_VISIBLE_DEVICES",
         "GPU-11111111-2222-3333-4444-555555555555,GPU-66666666-7777-8888-9999-aaaaaaaaaaaa",
     )
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
     assert gpu_select.cuda_device_count() == 2
+
+
+def test_cuda_count_env_ignored_without_nvidia_smi(monkeypatch):
+    # A CUDA_VISIBLE_DEVICES cargo-culted onto a ROCm/Vulkan/CPU image (no CUDA
+    # platform, no nvidia-smi) must NOT conjure phantom GPUs: the tooling gate
+    # runs BEFORE the env branch, so the count is 0 — and split-mode auto stays
+    # single-GPU instead of splitting onto a kernel-less device.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which())  # tool absent
+    assert gpu_select.cuda_device_count() == 0
+    assert gpu_select.auto_gguf_split_mode() == 0
 
 
 def test_cuda_count_no_nvidia_smi_returns_zero(monkeypatch):
@@ -273,8 +291,77 @@ def test_cuda_count_subprocess_error_returns_zero(monkeypatch):
     assert gpu_select.cuda_device_count() == 0  # never raises
 
 
+# --------------------------------------------------------------------------
+# GPU inventory (name + VRAM) parsing
+# --------------------------------------------------------------------------
+NVIDIA_SMI_QUERY_MIXED = """\
+NVIDIA GeForce RTX 3090, 24576
+NVIDIA GeForce GT 710, 2048
+"""
+
+
+def test_cuda_gpu_inventory_parses_query(monkeypatch):
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(NVIDIA_SMI_QUERY_MIXED))
+    assert gpu_select._cuda_gpu_inventory() == [
+        ("NVIDIA GeForce RTX 3090", 24576),
+        ("NVIDIA GeForce GT 710", 2048),
+    ]
+
+
+def test_cuda_gpu_inventory_no_tool_returns_empty(monkeypatch):
+    monkeypatch.setattr(gpu_select.shutil, "which", _which())  # tool absent
+    assert gpu_select._cuda_gpu_inventory() == []
+
+
+def test_cuda_gpu_inventory_garbage_never_raises(monkeypatch):
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(
+        gpu_select.subprocess, "run", _fake_run("NVML error, not a number")
+    )
+    assert gpu_select._cuda_gpu_inventory() == []
+
+
 def test_auto_split_mode_by_gpu_count(monkeypatch):
     # LAYER split only makes sense with >=2 visible CUDA GPUs; 0/1 -> single-GPU.
     for count, expected in ((0, 0), (1, 0), (2, 1), (4, 1)):
         monkeypatch.setattr(gpu_select, "cuda_device_count", lambda c=count: c)
+        monkeypatch.setattr(
+            gpu_select,
+            "_cuda_gpu_inventory",
+            lambda c=count: [("NVIDIA GeForce RTX 3090", 24576)] * c,
+        )
         assert gpu_select.auto_gguf_split_mode() == expected
+
+
+def test_auto_split_display_card_stays_single_gpu(monkeypatch):
+    # Big compute card + small/old display card (GT 710-class): auto must NOT
+    # layer-split — llama.cpp would place layers on the tiny card (VRAM OOM,
+    # PCIe-bound slowdown, or "no kernel image" on pre-supported arches) on
+    # boxes that worked fine under the old single-GPU default.
+    monkeypatch.setattr(gpu_select, "cuda_device_count", lambda: 2)
+    monkeypatch.setattr(
+        gpu_select,
+        "_cuda_gpu_inventory",
+        lambda: [("NVIDIA GeForce RTX 3090", 24576), ("NVIDIA GeForce GT 710", 2048)],
+    )
+    assert gpu_select.auto_gguf_split_mode() == 0
+
+
+def test_auto_split_mixed_capable_cards_layer(monkeypatch):
+    # Heterogeneous names but the smallest card clears the VRAM floor -> split.
+    monkeypatch.setattr(gpu_select, "cuda_device_count", lambda: 2)
+    monkeypatch.setattr(
+        gpu_select,
+        "_cuda_gpu_inventory",
+        lambda: [("NVIDIA GeForce RTX 3090", 24576), ("NVIDIA GeForce RTX 3060", 12288)],
+    )
+    assert gpu_select.auto_gguf_split_mode() == 1
+
+
+def test_auto_split_unverifiable_inventory_stays_single_gpu(monkeypatch):
+    # 2+ GPUs counted but the name/VRAM query failed: don't split on an
+    # unverified topology — conservative single-GPU, operator can force 1.
+    monkeypatch.setattr(gpu_select, "cuda_device_count", lambda: 2)
+    monkeypatch.setattr(gpu_select, "_cuda_gpu_inventory", lambda: [])
+    assert gpu_select.auto_gguf_split_mode() == 0

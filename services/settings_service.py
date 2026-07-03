@@ -291,7 +291,7 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         category="inference.gguf",
         value_type="int",
         default=-1,
-        description="Multi-GPU split: -1=auto (recommended: splits layers across GPUs when 2+ NVIDIA GPUs are visible, single-GPU otherwise), 0=single GPU (main_gpu only), 1=split layers across GPUs, 2=split rows.",
+        description="Multi-GPU split: -1=auto (recommended: splits layers across GPUs when 2+ capable NVIDIA GPUs are visible — identical cards, or mixed cards all >=8GB; single-GPU otherwise), 0=single GPU (main_gpu only), 1=split layers across GPUs, 2=split rows.",
         env_fallback="JARVIS_GGUF_SPLIT_MODE",
         requires_reload=True,
     ),

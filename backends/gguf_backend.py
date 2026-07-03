@@ -75,12 +75,15 @@ class GGUFClient(LLMBackendBase):
         # Multi-GPU configuration
         # split_mode: -1=auto (default), 0=NONE (single GPU / main_gpu only),
         # 1=LAYER (split layers across GPUs), 2=ROW (split rows across GPUs).
-        # Auto resolves to LAYER only when >=2 NVIDIA GPUs are visible (the dual-3090
-        # prod box needs it — single-GPU there piles both models onto GPU0 and OOMs
-        # at boot). Blanket auto-split is still a footgun on AMD boxes where a
-        # kernel-less iGPU (gfx1036) enumerates next to the dGPU, but gpu_select
-        # already pins those to the one dGPU via HIP/GGML_VK_VISIBLE_DEVICES, so a
-        # single device is visible and split mode is moot. An explicit DB/env value
+        # Auto resolves to LAYER only when >=2 NVIDIA GPUs are visible AND the
+        # topology is split-worthy — identical cards (the dual-3090 prod box,
+        # where single-GPU piles both models onto GPU0 and OOMs at boot) or
+        # mixed cards that all clear a VRAM floor; a big compute card next to a
+        # small display card stays single-GPU (see gpu_select.auto_gguf_split_mode).
+        # Blanket auto-split is still a footgun on AMD boxes where a kernel-less
+        # iGPU (gfx1036) enumerates next to the dGPU, but gpu_select already pins
+        # those to the one dGPU via HIP/GGML_VK_VISIBLE_DEVICES, so a single
+        # device is visible and split mode is moot. An explicit DB/env value
         # (0/1/2) always wins over auto.
         split_mode = get_int_setting(
             "inference.gguf.split_mode", "JARVIS_GGUF_SPLIT_MODE", -1
@@ -88,9 +91,9 @@ class GGUFClient(LLMBackendBase):
         if split_mode == -1:
             split_mode = auto_gguf_split_mode()
             if split_mode == 1:
-                logger.info("split_mode auto → LAYER (2+ CUDA GPUs visible)")
+                logger.info("split_mode auto → LAYER (multi-GPU CUDA topology)")
             else:
-                logger.info("split_mode auto → single-GPU (0-1 CUDA GPUs visible)")
+                logger.info("split_mode auto → single-GPU")
         # main_gpu: index of the GPU to use for scratch buffers and small tensors
         main_gpu = get_int_setting(
             "inference.gguf.main_gpu", "JARVIS_GGUF_MAIN_GPU", 0
