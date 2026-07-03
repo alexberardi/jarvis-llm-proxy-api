@@ -40,9 +40,11 @@ WORKDIR /build
 COPY requirements-base.txt .
 RUN pip install --no-cache-dir -r requirements-base.txt
 
-# Build llama-cpp-python with OpenBLAS (CPU optimized)
+# Build llama-cpp-python with OpenBLAS (CPU optimized).
+# Pinned to match the deliberate 0.3.16 pins in Dockerfile.rocm / Dockerfile.vulkan —
+# unpinned from-source builds silently pick a new llama.cpp on every CI rebuild.
 ENV CMAKE_ARGS="-DGGML_BLAS=on -DGGML_BLAS_VENDOR=OpenBLAS"
-RUN pip install --no-cache-dir llama-cpp-python --no-binary llama-cpp-python
+RUN pip install --no-cache-dir "llama-cpp-python==0.3.16" --no-binary llama-cpp-python
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime

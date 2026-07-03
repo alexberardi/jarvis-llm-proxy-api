@@ -50,8 +50,11 @@ RUN pip install --no-cache-dir -r requirements-base.txt
 COPY requirements-vllm.txt .
 RUN pip install --no-cache-dir -r requirements-vllm.txt
 
-# Install llama-cpp-python with prebuilt CUDA 12.4 wheels (for GGUF backend)
-RUN pip install --no-cache-dir llama-cpp-python \
+# Install llama-cpp-python with prebuilt CUDA 12.4 wheels (for GGUF backend).
+# Pinned: unpinned installs let every CI rebuild silently pick up a new llama.cpp;
+# 0.3.23 is the version in the currently-deployed prod image, verified working on
+# the dual-3090 box. Bump deliberately, not via rebuild drift.
+RUN pip install --no-cache-dir "llama-cpp-python==0.3.23" \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
 
 # ---------------------------------------------------------------------------

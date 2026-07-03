@@ -193,3 +193,88 @@ def test_select_discrete_gpu_never_raises(monkeypatch):
 
     import os
     assert "GGML_VK_VISIBLE_DEVICES" not in os.environ
+
+
+# --------------------------------------------------------------------------
+# CUDA topology probe (cuda_device_count / auto_gguf_split_mode)
+# --------------------------------------------------------------------------
+NVIDIA_SMI_DUAL_3090 = """\
+GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-11111111-2222-3333-4444-555555555555)
+GPU 1: NVIDIA GeForce RTX 3090 (UUID: GPU-66666666-7777-8888-9999-aaaaaaaaaaaa)
+"""
+
+
+def test_cuda_count_respects_visible_devices_single(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    assert gpu_select.cuda_device_count() == 1
+
+
+def test_cuda_count_respects_visible_devices_pair(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert gpu_select.cuda_device_count() == 2
+
+
+def test_cuda_count_trailing_minus_one_excluded(monkeypatch):
+    # CUDA truncates the visible list at an invalid entry; "-1" itself never counts.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0,-1")
+    assert gpu_select.cuda_device_count() == 2
+
+
+def test_cuda_count_minus_one_truncates_rest(monkeypatch):
+    # Entries AFTER "-1" are invisible to CUDA too: "0,-1,1" exposes only GPU 0.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,-1,1")
+    assert gpu_select.cuda_device_count() == 1
+
+
+def test_cuda_count_empty_visible_devices_means_zero(monkeypatch):
+    # Set-but-empty means "hide all GPUs" — must NOT fall through to nvidia-smi.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(NVIDIA_SMI_DUAL_3090))
+    assert gpu_select.cuda_device_count() == 0
+
+
+def test_cuda_count_uuid_entries_count(monkeypatch):
+    monkeypatch.setenv(
+        "CUDA_VISIBLE_DEVICES",
+        "GPU-11111111-2222-3333-4444-555555555555,GPU-66666666-7777-8888-9999-aaaaaaaaaaaa",
+    )
+    assert gpu_select.cuda_device_count() == 2
+
+
+def test_cuda_count_no_nvidia_smi_returns_zero(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(gpu_select.shutil, "which", _which())  # tool absent
+    assert gpu_select.cuda_device_count() == 0
+
+
+def test_cuda_count_parses_nvidia_smi_list(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run(NVIDIA_SMI_DUAL_3090))
+    assert gpu_select.cuda_device_count() == 2
+
+
+def test_cuda_count_garbage_output_returns_zero(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _fake_run("No devices found"))
+    assert gpu_select.cuda_device_count() == 0
+
+
+def test_cuda_count_subprocess_error_returns_zero(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("exploding tool")
+
+    monkeypatch.setattr(gpu_select.shutil, "which", _which("nvidia-smi"))
+    monkeypatch.setattr(gpu_select.subprocess, "run", _boom)
+    assert gpu_select.cuda_device_count() == 0  # never raises
+
+
+def test_auto_split_mode_by_gpu_count(monkeypatch):
+    # LAYER split only makes sense with >=2 visible CUDA GPUs; 0/1 -> single-GPU.
+    for count, expected in ((0, 0), (1, 0), (2, 1), (4, 1)):
+        monkeypatch.setattr(gpu_select, "cuda_device_count", lambda c=count: c)
+        assert gpu_select.auto_gguf_split_mode() == expected

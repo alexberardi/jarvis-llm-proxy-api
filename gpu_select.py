@@ -239,6 +239,65 @@ def select_discrete_rocm_index() -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# CUDA topology (for GGUF split-mode auto)
+# ---------------------------------------------------------------------------
+def cuda_device_count() -> int:
+    """Number of CUDA GPUs visible to this process. Never raises; 0 on any failure.
+
+    An operator-set CUDA_VISIBLE_DEVICES is respected: comma-separated non-empty
+    entries are counted (index or GPU-UUID form — both select a device), stopping
+    at (and excluding) any "-1" entry, because the CUDA runtime truncates the
+    visible list at the first invalid entry. Set-but-empty means "no GPUs".
+
+    Otherwise the count comes from `nvidia-smi --list-gpus`. Gating on the
+    nvidia-smi TOOL (injected into CUDA containers by nvidia-container-toolkit)
+    follows this module's probe rule: tooling presence, NEVER a merely-loadable
+    shared library — a ctypes probe of libcuda would repeat the Mesa-llvmpipe
+    libvulkan SIGSEGV footgun on CPU images (see _detect_backend).
+    """
+    try:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible is not None:
+            count = 0
+            for entry in visible.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if entry == "-1":
+                    break
+                count += 1
+            return count
+        if not shutil.which("nvidia-smi"):
+            return 0
+        out = subprocess.run(
+            ["nvidia-smi", "--list-gpus"],
+            capture_output=True, text=True, timeout=15, check=False,
+        ).stdout
+        return len(re.findall(r"^GPU \d+: ", out, flags=re.MULTILINE))
+    except Exception:  # contract: never raises
+        return 0
+
+
+def auto_gguf_split_mode() -> int:
+    """Resolve the GGUF split-mode AUTO sentinel (-1) from the visible topology.
+
+    Returns 1 (LLAMA_SPLIT_MODE_LAYER) when >=2 CUDA GPUs are visible — the only
+    topology that genuinely wants layer split (e.g. the dual-RTX-3090 prod box,
+    where single-GPU mode piles both models onto GPU0 and OOMs at boot) — and
+    0 (SPLIT_MODE_NONE) otherwise.
+
+    Why NVIDIA-only: blanket auto-split across every visible device is a footgun
+    on AMD boxes where a kernel-less iGPU (e.g. gfx1036) enumerates next to the
+    dGPU — llama.cpp faults trying to place tensors on it. But those boxes are
+    already visibility-pinned to the single discrete GPU by select_discrete_gpu()
+    (HIP_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES), so exactly one device is
+    visible there and split mode is irrelevant. CPU/Metal images have no
+    nvidia-smi, count 0, and stay single-GPU.
+    """
+    return 1 if cuda_device_count() >= 2 else 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def _detect_backend() -> str | None:
