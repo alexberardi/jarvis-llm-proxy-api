@@ -146,6 +146,17 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             from services.chat_runner import run_chat_completion
             from services.model_service import model_manager
+            # In-process mode: services.model_service constructs the manager
+            # with auto_load=False (the model service loads via its FastAPI
+            # startup hook, which never runs in a worker process) — trigger
+            # the load here or every in-process job 404s on an empty registry.
+            if model_manager.model_states["background"]["status"] == "not_loaded":
+                _safe_print("📥 In-process model manager not loaded yet — loading models...")
+                model_manager.load_all()
+            elif model_manager.background_model is None:
+                # A previous in-process load failed — give the cooldown-gated
+                # retry machinery a chance before running the job.
+                model_manager.retry_failed_loads()
             resp = asyncio.run(run_chat_completion(model_manager, req_obj, allow_images=False))
             processing_ms = _elapsed_ms(started_ms)
             result = {

@@ -118,3 +118,13 @@ COPY pyproject.toml .
 RUN mkdir -p /app/.models /app/logs /tmp/jarvis-adapters
 
 EXPOSE 7704 7705
+
+# Default: supervised launcher (alembic migrations, then API in foreground +
+# auto-respawning model service). Compose services typically override this
+# with their own command; serve.sh is the migration target for those compose
+# commands (it replaces the unsupervised `uvicorn model_service & exec uvicorn
+# main` pattern). serve.sh runs `alembic upgrade head` itself (RUN_MIGRATIONS
+# defaults true), so export-style compose commands that currently inline
+# `alembic upgrade head && ...` can drop their command without silently
+# losing migrations.
+CMD ["bash", "scripts/serve.sh"]

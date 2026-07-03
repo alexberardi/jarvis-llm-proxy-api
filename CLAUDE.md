@@ -11,7 +11,7 @@ OpenAI-compatible LLM inference layer with multi-backend support, an async job q
 | Process | Port | What it owns | Started by |
 |---|---|---|---|
 | **API server** (`main.py`) | 7704 | OpenAI-compatible HTTP surface, auth, settings, training-job records, request routing. **Stateless.** | `uvicorn main:app` |
-| **Model service** (`services.model_service:app`) | 7705 | The `ModelManager` singleton — actually loads weights into memory. Exposes `/internal/model/*`. Speaks `X-Internal-Token`. | `uvicorn services.model_service:app` (run by `run.sh`; auto-disabled on macOS by `run.sh` since GPU-dependent backends run locally) |
+| **Model service** (`services.model_service:app`) | 7705 | The `ModelManager` singleton — actually loads weights into memory. Binds the port FIRST, then loads models in a background thread (per-slot fault-isolated + retried). Exposes `/internal/model/*`. Speaks `X-Internal-Token`. | `uvicorn services.model_service:app` (run by `run.sh`; auto-disabled on macOS by `run.sh` since GPU-dependent backends run locally). In containers: `scripts/serve.sh` supervises it (respawn with backoff). |
 | **Queue worker** (`scripts/queue_worker.py`) | — | Consumes Redis jobs (`adapter_train`, async LLM jobs), calls the model service for inference, fires callbacks. Optional. | `LLM_PROXY_PROCESS_ROLE=worker python scripts/queue_worker.py` |
 
 ```
@@ -149,7 +149,16 @@ Full model build pipeline (generate → train → validate → merge → convert
 ### Health
 | Method | Path |
 |---|---|
-| GET | `/api/v1/health` |
+| GET | `/health` (also legacy `/v1/health`) |
+
+**HTTP status codes are load-bearing** (the docker healthcheck fails on non-2xx):
+- **200 `healthy`** — model service reachable, live slot ready.
+- **200 `initializing`** — live slot observed not-ready for < 15 min (grace so slow 32B loads and routine `/internal/model/reload`s don't flap container health). The grace clock lives in the **API process**, not model-service uptime — it spans model-service respawns (a serve.sh crash-loop can't stay "initializing" forever) and restarts fresh for reloads.
+- **200 `busy`** — model service accepted the connection but the response stalled: its single-worker event loop is blocked by an in-flight sync generation (minutes-long on CPU-only boxes). Busy ≠ dead; must not flap the container.
+- **200 `degraded` + `MODEL_SERVICE_URL not set`** — deliberate passthrough posture (macOS dev); stays green.
+- **503** — model service unreachable (connection refused / connect timeout), live slot `failed`, or observed not-ready past the grace window.
+
+The model service's own `/health` (:7705) is always HTTP 200 while the process is alive; its body carries `status` (`ok`/`loading`/`degraded`), `models`, `aliases`, plus per-slot `slots` state, `uptime_s`, `started_at`. Inference endpoints return **503 `model_not_loaded`** (and trigger a non-blocking retry) when the addressed slot has no backend. `/internal/model/reload` is **ok-iff-loaded**: 200 `{status: ok, slots}` only when the live slot is ready after the reload, otherwise 503 `{status: degraded, slots}` (the retry loop keeps working on the failed slot either way). Because :7705's HTTP code no longer means "loaded", the split-container prod compose healthcheck asserts the **body** (`status == "ok"`, read-timeout = busy = pass) so its `service_healthy` gates still mean "weights loaded".
 
 ---
 
@@ -189,7 +198,7 @@ Don't talk to the model directly — go through the model service over HTTP usin
 
 ## Invariants & gotchas
 
-1. **API server is stateless — model service owns the weights.** Restarting the API doesn't drop the model. Restarting the model service drops everything and reloads on next request. Don't try to load a model from the API codebase; the only reason that would "work" would be to load it twice.
+1. **API server is stateless — model service owns the weights.** Restarting the API doesn't drop the model. Restarting the model service drops everything and reloads on next request. Don't try to load a model from the API codebase; the only reason that would "work" would be to load it twice. **Model loads are per-slot fault-isolated and self-healing** (since the 2026-07 boot-fatal-load incident): the model service binds :7705 first, then loads in a background thread; a failed slot records `model_states[slot] = "failed"` and 503s (`model_not_loaded`) instead of killing the process, and a retry loop re-attempts it with 60s→600s exponential cooldown. `scripts/serve.sh` (the container launcher) additionally respawns the whole model service if it dies natively (llama.cpp crashes).
 2. **Settings DB is the source of truth — env is bootstrap/secrets only.** When adding a new config knob, **always prefer adding to settings_service** with an env-var fallback for migration. The `env.template` file states this explicitly: secrets, service discovery, ports, and library env (`LLAMA_METAL`, etc.) stay in env; everything else goes in the DB.
 3. **`MODEL_SERVICE_TOKEN` vs `LLM_PROXY_INTERNAL_TOKEN` are different tokens with different scopes.** The first protects `/internal/model/*` on the model service (called by API + worker). The second protects `/internal/queue/*` on the API server (called by command-center and other queue producers). They can be the same string in practice (run.sh does this for dev convenience), but they're semantically distinct.
 4. **`live` and `background` share a backend instance if their resolved path + backend match.** Saves memory on small dev boxes (Mac). On prod with separate models, both load. Don't write code that assumes they're always the same OR always different — check `ModelManager.aliases["live"] == ModelManager.aliases["background"]` when needed.
@@ -329,6 +338,7 @@ jarvis-llm-proxy-api/
 │   ├── redis_queue.py              # BLPOP, push, dedup, status
 │   └── tasks.py                    # Worker handlers per job_type
 ├── scripts/
+│   ├── serve.sh                    # Container launcher — API foreground + supervised model service (respawn w/ backoff); RUN_MODEL_SERVICE=false skips
 │   ├── queue_worker.py             # Standalone worker process entry
 │   ├── seed_settings.py            # Bootstrap settings DB from env
 │   ├── train_adapter*.py           # CLI tools for adapter training
@@ -372,7 +382,8 @@ pytest tests/test_date_key_classifier.py -v
 
 | Failure | Behavior |
 |---|---|
-| Model service down | Chat / embeddings / pipeline return 500 with "MODEL_SERVICE_URL is not set; API is passthrough-only" or upstream error |
+| Model service down | Chat / embeddings / pipeline return 500 with "MODEL_SERVICE_URL is not set; API is passthrough-only" or upstream error. API `/health` returns **503** → docker marks the container unhealthy. In containers, `scripts/serve.sh` respawns the model service with backoff. |
+| Model failed to load (per slot) | Model service stays up; affected requests get **503 `model_not_loaded`**; retry loop re-attempts with 60s→600s cooldown. Live slot failed ⇒ API `/health` 503. |
 | Postgres down | Settings reads fall back to env-var-fallback values; training routes fail |
 | Redis down | Chat still works; queue enqueue fails |
 | Auth down | All app-auth routes return 401/503; pipeline + settings writes 401 |
