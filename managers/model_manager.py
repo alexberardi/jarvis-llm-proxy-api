@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("uvicorn")
@@ -7,6 +9,10 @@ from services.settings_helpers import (
     get_int_setting,
     get_setting,
 )
+
+# Retry backoff for failed model loads: 60s doubling per attempt, capped at 600s.
+_RETRY_BACKOFF_BASE_S = 60.0
+_RETRY_BACKOFF_CAP_S = 600.0
 
 
 class ModelConfig:
@@ -36,18 +42,31 @@ class ModelManager:
     If both resolve to the same model path and backend, they share a single instance.
 
     Use ModelManager() to get the singleton instance. The first call
-    initializes the models; subsequent calls return the same instance.
+    initializes the models (unless auto_load=False — then call load_all());
+    subsequent calls return the same instance.
+
+    Model loads are per-slot fault-isolated: a failed load records
+    model_states[slot] = "failed" instead of raising, and retry_failed_loads()
+    re-attempts it with exponential cooldown.
     """
 
     _instance: Optional["ModelManager"] = None
     _initialized: bool = False
 
-    def __new__(cls) -> "ModelManager":
+    def __new__(cls, *args: Any, **kwargs: Any) -> "ModelManager":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, auto_load: bool = True):
+        """Create (or return) the singleton.
+
+        Args:
+            auto_load: when False, models are NOT loaded during construction;
+                call load_all() to run the initial load. Singleton caveat: the
+                flag only matters on the FIRST construction — subsequent
+                ModelManager() calls return the existing instance and ignore it.
+        """
         # Only initialize once
         if ModelManager._initialized:
             return
@@ -62,6 +81,62 @@ class ModelManager:
         # Aliases for stable client references
         self.aliases: Dict[str, str] = {}
 
+        # Per-slot load state — drives the model service /health body and the
+        # retry machinery. A failed load NEVER raises out of construction.
+        self.model_states: dict[str, dict] = {
+            "live": self._new_slot_state(),
+            "background": self._new_slot_state(),
+        }
+        # Resolved per-slot configs, frozen by _initialize_models (see comment
+        # there for why retries do not re-read settings).
+        self._slot_configs: dict[str, dict] = {}
+        self._slots_shared: bool = False
+        # Serialize retries: concurrent callers no-op fast instead of queueing.
+        self._retry_lock = threading.Lock()
+        self._retry_in_flight = False
+
+        if auto_load:
+            self._initialize_models()
+
+    # ------------------------------------------------------------------ #
+    #  Slot state tracking                                                 #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _new_slot_state() -> dict:
+        return {
+            "status": "not_loaded",  # not_loaded | loading | ready | failed
+            "error": None,
+            "attempts": 0,
+            "last_attempt_monotonic": None,
+            "loaded_at_epoch": None,
+        }
+
+    def _set_slot_state(
+        self,
+        slot: str,
+        status: str,
+        error: str | None = None,
+        count_attempt: bool = False,
+    ) -> None:
+        """Single transition helper so every slot-state change stays consistent."""
+        state = self.model_states[slot]
+        state["status"] = status
+        state["error"] = error
+        if count_attempt:
+            state["attempts"] += 1
+            state["last_attempt_monotonic"] = time.monotonic()
+        if status == "ready":
+            state["loaded_at_epoch"] = time.time()
+
+    def mark_all_loading(self) -> None:
+        """Flag every slot as loading (the service calls this before spawning
+        the loader thread so /health never reports not_loaded in the gap)."""
+        for slot in self.model_states:
+            self._set_slot_state(slot, "loading")
+
+    def load_all(self) -> None:
+        """Run the initial model load (pairs with auto_load=False)."""
         self._initialize_models()
 
     # ------------------------------------------------------------------ #
@@ -224,40 +299,149 @@ class ModelManager:
             logger.info(f"   → Backend: {live_backend}, Model: {live_model_path}")
             logger.info("   → Memory savings: ~50% (single model instance)")
 
-        # ---- Create backend instances ----
-        logger.info(f"🔁 Initializing live model: {live_model_path} ({live_backend})")
-        self.live_model = self._create_backend(
-            backend_type=live_backend,
-            model_path=live_model_path,
-            chat_format=live_chat_format,
-            stop_tokens=live_stop_tokens,
-            context_window=live_context_window,
-            rest_url=live_rest_url,
-            model_type="live",
-        )
+        # ---- Freeze resolved configs for retries ----
+        # Deliberate: retry_failed_loads re-attempts the SAME config that
+        # failed rather than re-reading settings mid-flight — a half-applied
+        # settings change must not make a background retry silently load a
+        # different model than the operator asked for. Config changes go
+        # through /internal/model/reload, which rebuilds the manager and
+        # re-reads settings.
+        self._slot_configs = {
+            "live": {
+                "backend_type": live_backend,
+                "model_path": live_model_path,
+                "chat_format": live_chat_format,
+                "stop_tokens": live_stop_tokens,
+                "context_window": live_context_window,
+                "rest_url": live_rest_url,
+            },
+            "background": {
+                "backend_type": bg_backend,
+                "model_path": bg_model_path,
+                "chat_format": bg_chat_format,
+                "stop_tokens": bg_stop_tokens,
+                "context_window": bg_context_window,
+                "rest_url": bg_rest_url,
+            },
+        }
+        self._slots_shared = should_share
+
+        # ---- Create backend instances (per-slot fault isolation) ----
+        # A failed load records model_states[slot] = failed and leaves the
+        # slot None — it must NEVER raise out of here (the 2026-07 incident:
+        # a boot-fatal background load killed the process before it could
+        # bind the port, leaving a healthy-looking but dead container).
+        self._attempt_slot_load("live")
 
         if should_share:
-            self.background_model = self.live_model
-            logger.info("✅ Background model sharing live instance")
+            self._mirror_live_to_background()
         else:
-            logger.info(f"🔁 Initializing background model: {bg_model_path} ({bg_backend})")
-            self.background_model = self._create_backend(
-                backend_type=bg_backend,
-                model_path=bg_model_path,
-                chat_format=bg_chat_format,
-                stop_tokens=bg_stop_tokens,
-                context_window=bg_context_window,
-                rest_url=bg_rest_url,
-                model_type="background",
-            )
+            self._attempt_slot_load("background")
 
-        # Populate model registry
+        # Populate model registry (tolerant of None slots)
         self._populate_registry()
 
-        # Auto-load date key adapter for the live model
-        self._load_date_key_adapter(self.live_model, live_model_path, "live")
-        if not should_share and self.background_model:
+        # Auto-load date key adapter for successfully loaded slots
+        if self.live_model is not None:
+            self._load_date_key_adapter(self.live_model, live_model_path, "live")
+        if not should_share and self.background_model is not None:
             self._load_date_key_adapter(self.background_model, bg_model_path, "background")
+
+    # ------------------------------------------------------------------ #
+    #  Per-slot loading + retry                                            #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _slot_attr(slot: str) -> str:
+        return "live_model" if slot == "live" else "background_model"
+
+    def _attempt_slot_load(self, slot: str) -> bool:
+        """Load one slot's backend from its frozen config. Never raises on a
+        backend/model failure — records the failure in model_states instead."""
+        cfg = self._slot_configs.get(slot)
+        if cfg is None:
+            self._set_slot_state(slot, "failed", error="no resolved config for slot")
+            return False
+        self._set_slot_state(slot, "loading", count_attempt=True)
+        logger.info(f"🔁 Initializing {slot} model: {cfg['model_path']} ({cfg['backend_type']})")
+        try:
+            backend = self._create_backend(
+                backend_type=cfg["backend_type"],
+                model_path=cfg["model_path"],
+                chat_format=cfg["chat_format"],
+                stop_tokens=cfg["stop_tokens"],
+                context_window=cfg["context_window"],
+                rest_url=cfg["rest_url"],
+                model_type=slot,
+            )
+        except Exception as e:  # noqa: BLE001 — model-load failure must not kill the process
+            logger.exception(
+                f"🚨🚨 MODEL LOAD FAILED for '{slot}' slot "
+                f"({cfg['backend_type']} {cfg['model_path']}) — continuing WITHOUT it; "
+                f"requests for this slot will 503 (model_not_loaded) until a retry succeeds: {e}"
+            )
+            setattr(self, self._slot_attr(slot), None)
+            self._set_slot_state(slot, "failed", error=f"{type(e).__name__}: {e}")
+            return False
+        setattr(self, self._slot_attr(slot), backend)
+        self._set_slot_state(slot, "ready")
+        logger.info(f"✅ {slot} model ready: {cfg['model_path']} ({cfg['backend_type']})")
+        return True
+
+    def _mirror_live_to_background(self) -> None:
+        """Shared-instance case (bg config == live config): background mirrors
+        live's outcome — instance AND state — without a second load attempt."""
+        self.background_model = self.live_model
+        self.model_states["background"] = dict(self.model_states["live"])
+        if self.model_states["live"]["status"] == "ready":
+            logger.info("✅ Background model sharing live instance")
+
+    def _cooldown_remaining(self, slot: str, now: float) -> float:
+        """Seconds until this slot may be retried (exponential 60s → 600s cap)."""
+        state = self.model_states[slot]
+        last = state["last_attempt_monotonic"]
+        if last is None:
+            return 0.0
+        attempts = max(state["attempts"], 1)
+        delay = min(_RETRY_BACKOFF_BASE_S * (2 ** (attempts - 1)), _RETRY_BACKOFF_CAP_S)
+        return max(0.0, delay - (now - last))
+
+    def retry_failed_loads(self, force: bool = False) -> bool:
+        """Re-attempt loading ONLY failed slots.
+
+        Concurrency-safe: while one retry is in flight, other callers no-op
+        fast (return False). Each slot has an exponential cooldown (60s
+        doubling to a 600s cap) unless force=True.
+
+        Returns True if anything was (re)loaded.
+        """
+        with self._retry_lock:
+            if self._retry_in_flight:
+                return False
+            self._retry_in_flight = True
+        try:
+            reloaded = False
+            for slot in ("live", "background"):
+                if slot == "background" and self._slots_shared:
+                    continue  # mirrored from live below
+                if self.model_states[slot]["status"] != "failed":
+                    continue
+                if not force and self._cooldown_remaining(slot, time.monotonic()) > 0:
+                    continue
+                if self._attempt_slot_load(slot):
+                    reloaded = True
+                    cfg = self._slot_configs.get(slot, {})
+                    self._load_date_key_adapter(
+                        getattr(self, self._slot_attr(slot)), cfg.get("model_path", ""), slot
+                    )
+            if reloaded:
+                if self._slots_shared:
+                    self._mirror_live_to_background()
+                self._populate_registry()
+            return reloaded
+        finally:
+            with self._retry_lock:
+                self._retry_in_flight = False
 
     # ------------------------------------------------------------------ #
     #  Date key adapter                                                    #
@@ -265,6 +449,8 @@ class ModelManager:
 
     def _load_date_key_adapter(self, backend: Any, model_path: str, model_type: str) -> None:
         """Try to auto-load a date key adapter for the given backend."""
+        if backend is None:
+            return
         try:
             from services.date_key_adapter import try_load_adapter
             if try_load_adapter(backend, model_path):
@@ -304,8 +490,13 @@ class ModelManager:
                 rest_url=rest_url,
                 model_type="live",
             )
+            # Keep slot state honest — a swap onto a previously failed slot
+            # must clear the failed status so /health recovers.
+            self._set_slot_state("live", "ready", count_attempt=True)
             return {"status": "success", "message": f"Live model swapped to {new_model}"}
         except Exception as e:
+            if self.live_model is None:
+                self._set_slot_state("live", "failed", error=f"{type(e).__name__}: {e}")
             return {"status": "error", "message": str(e)}
 
     def swap_background_model(
@@ -334,8 +525,11 @@ class ModelManager:
                 rest_url=rest_url,
                 model_type="background",
             )
+            self._set_slot_state("background", "ready", count_attempt=True)
             return {"status": "success", "message": f"Background model swapped to {new_model}"}
         except Exception as e:
+            if self.background_model is None:
+                self._set_slot_state("background", "failed", error=f"{type(e).__name__}: {e}")
             return {"status": "error", "message": str(e)}
 
     def unload_all(self):

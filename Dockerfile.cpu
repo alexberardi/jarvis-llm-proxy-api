@@ -91,3 +91,9 @@ COPY pyproject.toml .
 RUN mkdir -p /app/.models /app/logs /tmp/jarvis-adapters
 
 EXPOSE 7704 7705
+
+# Default: supervised launcher (API in foreground + auto-respawning model
+# service). Compose services typically override this with their own command;
+# serve.sh is the migration target for those compose commands (it replaces the
+# unsupervised `uvicorn model_service & exec uvicorn main` pattern).
+CMD ["bash", "scripts/serve.sh"]

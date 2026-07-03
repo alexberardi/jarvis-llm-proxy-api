@@ -110,4 +110,8 @@ RUN mkdir -p /app/.models /app/logs /tmp/jarvis-adapters
 # API (7704) + Model service (7705)
 EXPOSE 7704 7705
 
-# No CMD — each compose service specifies its own command
+# Default: supervised launcher (API in foreground + auto-respawning model
+# service). Compose services typically override this with their own command;
+# serve.sh is the migration target for those compose commands (it replaces the
+# unsupervised `uvicorn model_service & exec uvicorn main` pattern).
+CMD ["bash", "scripts/serve.sh"]

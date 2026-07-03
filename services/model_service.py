@@ -3,6 +3,8 @@ import hmac
 import json
 import logging
 import os
+import threading
+import time
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
@@ -151,7 +153,108 @@ def _forward_log_entry(entry: LogEntry) -> None:
         # Fallback to local logging if remote not available
         logger.log(level, f"[worker] {entry.message}")
 
-model_manager = ModelManager()
+# auto_load=False keeps the import cheap and crash-proof: the process binds
+# the port FIRST, then loads weights in a background thread (startup hook
+# below). This is the fix for the 2026-07 incident where a boot-fatal
+# background-model load killed the process before uvicorn could bind :7705,
+# leaving a healthy-looking container that 500'd every completion for hours.
+model_manager = ModelManager(auto_load=False)
+
+# ============================================================================
+# Startup: bind first, load models in the background, self-heal failures
+# ============================================================================
+
+# Guard against double-startup (TestClient re-enters the lifespan).
+_startup_done = False
+service_started_monotonic: float | None = None
+service_started_epoch: float | None = None
+
+_RETRY_LOOP_INTERVAL_S = 60.0
+
+
+def _load_models_in_background() -> None:
+    try:
+        model_manager.load_all()
+    except Exception:  # noqa: BLE001 — the loader thread must never die silently
+        logger.exception("🚨 Unexpected error during initial model load")
+
+
+def _retry_loop() -> None:
+    """Self-healing loop: while any slot is failed, keep calling
+    retry_failed_loads(). It self-gates via per-slot cooldown (60s → 600s),
+    so this interval just controls how promptly we notice cooldown expiry."""
+    while True:
+        time.sleep(_RETRY_LOOP_INTERVAL_S)
+        try:
+            if any(s["status"] == "failed" for s in model_manager.model_states.values()):
+                model_manager.retry_failed_loads()
+        except Exception:  # noqa: BLE001
+            logger.exception("Model retry loop iteration failed")
+
+
+@app.on_event("startup")
+def startup_event():
+    global _startup_done, service_started_monotonic, service_started_epoch
+    if _startup_done:
+        return
+    _startup_done = True
+    service_started_monotonic = time.monotonic()
+    service_started_epoch = time.time()
+    # Mark slots loading BEFORE the loader thread spawns so /health never
+    # reports "not_loaded" in the gap.
+    model_manager.mark_all_loading()
+    threading.Thread(
+        target=_load_models_in_background, name="model-loader", daemon=True
+    ).start()
+    threading.Thread(target=_retry_loop, name="model-retry-loop", daemon=True).start()
+    logger.info("🚀 Model service bound; loading models in a background thread")
+
+
+# ============================================================================
+# Slot readiness guard for inference endpoints
+# ============================================================================
+
+
+def _resolve_slot(model_name: str | None) -> str:
+    """Map a requested model name/alias to a manager slot for state checks."""
+    name = (model_name or "live").lower()
+    if name in ("live", "background"):
+        return name
+    for slot in ("live", "background"):
+        if model_manager.aliases.get(slot) == model_name:
+            return slot
+    return "live"
+
+
+def _require_loaded_backend(model_name: str | None) -> None:
+    """503 (model_not_loaded) when the resolved slot has no backend.
+
+    Also fires an opportunistic, non-blocking retry: retry_failed_loads()
+    holds its own lock + cooldown, so the daemon thread can never block or
+    stampede — concurrent callers no-op fast.
+    """
+    slot = _resolve_slot(model_name)
+    backend = model_manager.live_model if slot == "live" else model_manager.background_model
+    if backend is not None:
+        return
+    state = dict(model_manager.model_states.get(slot, {}))
+    if state.get("status") == "failed":
+        threading.Thread(target=model_manager.retry_failed_loads, daemon=True).start()
+    status = state.get("status", "unknown")
+    error = state.get("error") or "not loaded yet"
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "model_not_loaded",
+                "message": f"{slot} model is {status}: {error}",
+                "code": "model_not_loaded",
+                "slot": slot,
+                "state": state,
+            }
+        },
+    )
+
 
 # Safety net: atexit handler runs even if FastAPI shutdown event doesn't fire
 # (e.g., when process is killed before uvicorn can run shutdown hooks)
@@ -209,10 +312,15 @@ def reload_models(x_internal_token: str | None = Header(default=None)):
         model_manager.unload_all()
     except (RuntimeError, AttributeError) as e:
         logger.debug(f"unload_all during reload failed: {e}")
-    # Reset singleton so __init__ re-reads settings
+    # Reset the singleton so the fresh manager re-reads settings, then load
+    # through the fault-isolated machinery. force=True semantics: a reload
+    # always attempts every slot immediately (fresh manager → no cooldown).
+    # A failed slot no longer raises — it lands in model_states and the
+    # retry loop keeps working on it.
     ModelManager._instance = None
     ModelManager._initialized = False
-    model_manager = ModelManager()
+    model_manager = ModelManager(auto_load=False)
+    model_manager.load_all()
     return {"status": "ok"}
 
 
@@ -236,6 +344,7 @@ def _get_user_text(req: ChatCompletionRequest) -> str:
 @app.post("/internal/model/chat")
 async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = Header(default=None)):
     require_internal_token(x_internal_token)
+    _require_loaded_backend(req.model)
     logger.info(f"▶️  /internal/model/chat model={req.model} messages={len(req.messages)}")
 
     # Extract date keys using deterministic regex matcher (~0ms).
@@ -285,6 +394,7 @@ async def model_chat_stream(
     event containing the full content and usage stats.
     """
     require_internal_token(x_internal_token)
+    _require_loaded_backend(req.model)
     logger.info(f"▶️  /internal/model/chat/stream model={req.model} messages={len(req.messages)}")
 
     # Date key extraction (same as non-streaming)
@@ -342,10 +452,42 @@ async def model_chat_stream(
 
 @app.get("/health")
 async def health():
+    """Model service health — unauthenticated, always HTTP 200 while the
+    process is alive. The API server (api/health_routes.py) aggregates this
+    body into a real HTTP status code for the docker healthcheck.
+
+    Backward-compatible keys: "status" ("ok" only when the live slot is
+    ready), "models", "aliases". Added: "slots", "uptime_s", "started_at".
+    """
+    now = time.monotonic()
+    slots: dict[str, dict] = {}
+    for slot, state in model_manager.model_states.items():
+        view = dict(state)
+        last = view.pop("last_attempt_monotonic", None)
+        view["last_attempt_seconds_ago"] = (
+            round(now - last, 1) if last is not None else None
+        )
+        slots[slot] = view
+
+    live_status = model_manager.model_states["live"]["status"]
+    if live_status == "ready":
+        status = "ok"  # keep the historical literal — consumers match on it
+    elif live_status == "failed":
+        status = "degraded"
+    else:
+        status = "loading"
+
     return {
-        "status": "ok",
+        "status": status,
         "models": list(model_manager.registry.keys()),
         "aliases": model_manager.aliases,
+        "slots": slots,
+        "uptime_s": (
+            round(now - service_started_monotonic, 1)
+            if service_started_monotonic is not None
+            else None
+        ),
+        "started_at": service_started_epoch,
     }
 
 
