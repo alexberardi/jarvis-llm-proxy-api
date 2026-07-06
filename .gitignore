@@ -295,3 +295,6 @@ tools/
 
 # Vendored llama.cpp sparse checkout (local clone, not committed)
 scripts/vendor/llama.cpp/
+
+# Generated env-var inventory (scripts output, not config)
+env.generated
