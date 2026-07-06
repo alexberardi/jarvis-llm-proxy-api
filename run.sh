@@ -91,6 +91,9 @@ export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=${OBJC_DISABLE_INITIALIZE_FORK_SAFETY
 
 # Model service config
 MODEL_SERVICE_PORT="${MODEL_SERVICE_PORT:-7705}"
+# Loopback-only by default: the API and worker run on the same host. Set
+# MODEL_SERVICE_HOST=0.0.0.0 only if something off-box must reach :7705.
+MODEL_SERVICE_HOST="${MODEL_SERVICE_HOST:-127.0.0.1}"
 MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://127.0.0.1:${MODEL_SERVICE_PORT}}"
 MODEL_SERVICE_TOKEN_EXPORT="${MODEL_SERVICE_TOKEN:-${LLM_PROXY_INTERNAL_TOKEN:-}}"
 
@@ -102,7 +105,7 @@ echo -e "${BLUE}🔢 API_PID=${API_PID}${NC}"
 
 # Start model service in background
 echo -e "${BLUE}[model] Starting model service on port $MODEL_SERVICE_PORT${NC}"
-MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host 0.0.0.0 --port "$MODEL_SERVICE_PORT" &
+MODEL_SERVICE_URL="$MODEL_SERVICE_URL" MODEL_SERVICE_TOKEN="$MODEL_SERVICE_TOKEN_EXPORT" "$VENV/bin/uvicorn" services.model_service:app --host "$MODEL_SERVICE_HOST" --port "$MODEL_SERVICE_PORT" &
 MODEL_PID=$!
 echo -e "${BLUE}🔢 MODEL_PID=${MODEL_PID}${NC}"
 
