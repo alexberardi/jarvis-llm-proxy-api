@@ -18,9 +18,27 @@ export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=${OBJC_DISABLE_INITIALIZE_FORK_SAFETY
 echo -e "${GREEN}🚀 Jarvis LLM Proxy API - Production Mode${NC}"
 echo -e "${BLUE}📁 Root directory: $ROOT${NC}"
 
+# Production / native launchd runs have no TTY — never prompt for hardware
+# acceleration or optional installs. Auto-detect instead (Metal on Apple
+# Silicon) so check_setup writes .setup_config non-interactively instead of
+# blocking on stdin and crash-looping under launchd.
+export AUTO_SETUP="${AUTO_SETUP:-true}"
+
 # Setup and configuration
 check_setup
 load_env "$ENV_FILE"
+
+# Native macOS DB wiring: postgres runs in Docker, published on the host at
+# 127.0.0.1:${POSTGRES_PORT}. Docker gets DATABASE_URL from the compose
+# generator; the native run path must build it from the shared .env creds
+# (DB_USER + POSTGRES_PASSWORD). Only set when not already provided.
+if [[ "$(uname)" == "Darwin" && -z "${DATABASE_URL:-}" ]]; then
+    export DATABASE_URL="postgresql+psycopg2://${DB_USER:-jarvis}:${POSTGRES_PASSWORD:-}@127.0.0.1:${POSTGRES_PORT:-5432}/jarvis_llm_proxy"
+fi
+if [[ -z "${MIGRATIONS_DATABASE_URL:-}" ]]; then
+    export MIGRATIONS_DATABASE_URL="${DATABASE_URL:-}"
+fi
+
 configure_vllm_env
 
 # Create virtual environment (production strategy)
