@@ -27,6 +27,17 @@ _ENV_VAR_FALLBACKS: dict[str, str] = {
     "jarvis-logs": "JARVIS_LOGS_URL",
 }
 
+# Hardcoded defaults for services that must resolve at import time. get_auth_url()
+# is called at module import (route setup), before init() runs, so the config
+# client isn't available yet — and on native macOS deployments config-service
+# only advertises host.docker.internal URLs (unusable off-container). This lets
+# the service start against the host-published localhost ports. In Docker the
+# compose sets these env vars, so the defaults are never reached.
+_DEFAULTS: dict[str, str] = {
+    "jarvis-auth": "http://localhost:7701",
+    "jarvis-logs": "http://localhost:7702",
+}
+
 
 def init(db_engine: object | None = None) -> bool:
     """Initialize service discovery. Call at startup."""
@@ -97,6 +108,11 @@ def _get_url(service_name: str) -> str:
                 env_var, service_name,
             )
             return env_url
+
+    default = _DEFAULTS.get(service_name)
+    if default:
+        logger.info("Using default URL for %s: %s", service_name, default)
+        return default
 
     raise ValueError(
         f"Cannot discover {service_name}. "
