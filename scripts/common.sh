@@ -75,10 +75,27 @@ create_venv_dev() {
 }
 
 create_venv_prod() {
-    # Production: use system python only
+    # Production: create the venv with a Python >=3.11. macOS system python3 is
+    # usually 3.9, and `brew install python@3.11` provides `python3.11` — NOT a
+    # bare `python3` — so prefer explicitly-versioned interpreters and only
+    # accept `python3` when it is new enough. Fail loudly instead of building a
+    # 3.9 venv that pip then rejects dependency-by-dependency.
     if [[ ! -d "$VENV" ]]; then
-        echo -e "${BLUE}📦 Creating virtual environment...${NC}"
-        python3 -m venv "$VENV"
+        local BASE_PY="" _cand
+        for _cand in python3.13 python3.12 python3.11; do
+            if command -v "$_cand" >/dev/null 2>&1; then BASE_PY="$_cand"; break; fi
+        done
+        if [[ -z "$BASE_PY" ]] && command -v python3 >/dev/null 2>&1 \
+            && python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+            BASE_PY="python3"
+        fi
+        if [[ -z "$BASE_PY" ]]; then
+            echo -e "${RED}❌ Python >=3.11 is required but was not found.${NC}" >&2
+            echo -e "${RED}   Install it (e.g. 'brew install python@3.11') and retry.${NC}" >&2
+            exit 1
+        fi
+        echo -e "${BLUE}📦 Creating virtual environment with $BASE_PY ($("$BASE_PY" --version 2>&1))...${NC}"
+        "$BASE_PY" -m venv "$VENV"
         echo -e "${GREEN}✅ Virtual environment created${NC}"
     fi
     
