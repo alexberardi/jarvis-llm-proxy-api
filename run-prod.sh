@@ -28,10 +28,15 @@ export AUTO_SETUP="${AUTO_SETUP:-true}"
 check_setup
 load_env "$ENV_FILE"
 
-# Native macOS DB wiring: postgres runs in Docker, published on the host at
-# 127.0.0.1:${POSTGRES_PORT}. Docker gets DATABASE_URL from the compose
-# generator; the native run path must build it from the shared .env creds
-# (DB_USER + POSTGRES_PASSWORD). Only set when not already provided.
+# Native macOS service env: the Docker compose injects service-discovery URLs +
+# DATABASE_URL per container; the native run path must derive them from the
+# shared .env. Without JARVIS_CONFIG_URL the service can't discover jarvis-auth
+# and refuses to start; config-service is on the host at localhost:CONFIG_SERVICE_PORT.
+if [[ "$(uname)" == "Darwin" && -z "${JARVIS_CONFIG_URL:-}" ]]; then
+    export JARVIS_CONFIG_URL="http://localhost:${CONFIG_SERVICE_PORT:-7700}"
+fi
+
+# DB: postgres runs in Docker, published on the host at 127.0.0.1:${POSTGRES_PORT}.
 if [[ "$(uname)" == "Darwin" && -z "${DATABASE_URL:-}" ]]; then
     export DATABASE_URL="postgresql+psycopg2://${DB_USER:-jarvis}:${POSTGRES_PASSWORD:-}@127.0.0.1:${POSTGRES_PORT:-5432}/jarvis_llm_proxy"
 fi
