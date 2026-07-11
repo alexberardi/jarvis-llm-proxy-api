@@ -16,6 +16,13 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- Native macOS services reach Docker peers via host-published localhost
+             ports. config-service advertises host.docker.internal by default (for
+             Docker consumers); 'external' makes it return each service's
+             external_host (localhost) instead, so app-auth to jarvis-auth
+             resolves off-container. Requires jarvis-config-client >= 0.2.1. -->
+        <key>JARVIS_CONFIG_URL_STYLE</key>
+        <string>external</string>
         <key>ENV_FILE</key>
         <string>__ENV_FILE__</string>
         <key>SERVER_HOST</key>
