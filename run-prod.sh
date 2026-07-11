@@ -63,6 +63,13 @@ else
     echo -e "${YELLOW}⏭️  Skipping llama-cpp-python installation (not needed for current backends)${NC}"
 fi
 
+# Run database migrations. Without this the settings (and training) tables are
+# never created on a fresh native install, so DB-backed settings writes silently
+# no-op and every read falls back to env/definition defaults only. Mirrors the
+# migration step whisper/tts already run in their native launchers.
+echo -e "${BLUE}🗄️  Running database migrations...${NC}"
+"$PY" -m alembic upgrade head
+
 # Run diagnostics
 run_diagnostics
 
