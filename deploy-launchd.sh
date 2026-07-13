@@ -41,10 +41,35 @@ sed -e "s#__ROOT__#$ROOT#g" \
 echo "📄 Installed launchd plist to $TARGET_PLIST"
 
 echo "🔄 Reloading launchd service $LABEL..."
-launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$TARGET_PLIST"
-launchctl enable "gui/$(id -u)/$LABEL"
-launchctl kickstart -k "gui/$(id -u)/$LABEL"
+LAUNCH_UID="$(id -u)"
+
+# `launchctl bootout` returns BEFORE launchd has finished tearing the job down.
+# Bootstrapping immediately races that teardown: the bootstrap fails, and since
+# the old job is already gone the service is left UNLOADED — i.e. redeploying
+# over a RUNNING agent (what a platform update does) silently kills it. A fresh
+# install never hit this: there was nothing to boot out.
+# Wait for the label to actually disappear, then bootstrap, with retries.
+launchctl bootout "gui/$LAUNCH_UID/$LABEL" >/dev/null 2>&1 || true
+for _ in $(seq 1 50); do
+    launchctl print "gui/$LAUNCH_UID/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.2
+done
+
+bootstrapped=0
+for _ in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$LAUNCH_UID" "$TARGET_PLIST" 2>/dev/null; then
+        bootstrapped=1
+        break
+    fi
+    sleep 1
+done
+if [ "$bootstrapped" -ne 1 ]; then
+    echo "❌ launchctl bootstrap failed for $LABEL — service is NOT running" >&2
+    exit 1
+fi
+
+launchctl enable "gui/$LAUNCH_UID/$LABEL"
+launchctl kickstart -k "gui/$LAUNCH_UID/$LABEL"
 
 echo "✅ LaunchAgent ready. Check status with: launchctl print gui/$(id -u)/$LABEL"
 echo "📜 Logs: $LOG_DIR/{out,err}.log"
