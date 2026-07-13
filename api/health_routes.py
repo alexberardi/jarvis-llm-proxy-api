@@ -10,6 +10,7 @@ degraded model service as an unhealthy container. Returning 200 with a
 100% of completions failed for hours.
 """
 
+import json
 import os
 import time
 
@@ -17,6 +18,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 import httpx
 from services.settings_helpers import get_float_setting, get_setting
+from version import __version__
 
 router = APIRouter(tags=["health"])
 
@@ -165,10 +167,29 @@ async def _get_health_status() -> JSONResponse:
     )
 
 
+def _with_version(resp: JSONResponse) -> JSONResponse:
+    """Stamp the service version onto a health payload.
+
+    _get_health_status() returns from several branches (healthy / degraded /
+    initializing / model-service-unreachable), so decorate the response here
+    instead of threading `version` through every one of them. The HTTP status
+    code is load-bearing (the docker healthcheck fails on non-2xx) and is
+    preserved exactly.
+    """
+    try:
+        payload = json.loads(resp.body)
+        if isinstance(payload, dict):
+            payload["version"] = __version__
+            return JSONResponse(status_code=resp.status_code, content=payload)
+    except Exception:  # noqa: BLE001 — observability must never break liveness
+        pass
+    return resp
+
+
 @router.get("/health")
 async def root_health() -> JSONResponse:
     """Root-level health endpoint (standardized across all services)."""
-    return await _get_health_status()
+    return _with_version(await _get_health_status())
 
 
 @router.get("/v1/health")

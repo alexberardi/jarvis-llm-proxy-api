@@ -91,7 +91,12 @@ def test_no_model_service_url_is_deliberate_200_degraded(client, monkeypatch):
     resp = client.get("/health")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "degraded", "reason": "MODEL_SERVICE_URL not set"}
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["reason"] == "MODEL_SERVICE_URL not set"
+    # Version is stamped onto every health branch (see _with_version) — it's how
+    # an operator tells which code is live on a native (git-checkout) install.
+    assert body["version"]
 
 
 def test_live_ready_is_200_healthy(client, monkeypatch, model_service_url, default_timeout):
