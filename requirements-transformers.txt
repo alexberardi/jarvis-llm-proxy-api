@@ -3,7 +3,7 @@
 
 # Core transformers libraries
 transformers>=4.30.0
-torch>=2.0.0
+torch>=2.13.0
 accelerate>=0.20.0
 
 # Quantization support (optional but recommended)
