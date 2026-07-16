@@ -1,9 +1,17 @@
 name: Trigger install-e2e
 
-# On push to main, ask the umbrella jarvis repo to run the full install-e2e
-# (compose-export bring-up + migrations-ran + node/K2) against this service's
-# freshly-built :dev image — so a service change that breaks the INSTALL is
-# caught immediately, not just at the nightly run.
+# Once the :dev image is BUILT AND PUSHED, ask the umbrella jarvis repo to run
+# the full install-e2e (compose-export bring-up + migrations-ran + node/K2)
+# against it — so a service change that breaks the INSTALL is caught
+# immediately, not just at the nightly run.
+#
+# This MUST chain off the image build, not off `push`. Both used to fire on
+# `push: main` in parallel, with no ordering between them: the build takes
+# ~7.5min and install-e2e pulls :dev ~5min in, so install-e2e systematically
+# tested the PREVIOUS commit's image. When a fix lands that reads as a flake
+# (pulls the old broken image, goes red). The dangerous direction is the other
+# one — a commit that BREAKS the image pulls the old working one and the gate
+# goes GREEN. Ordering is the whole point of the gate.
 #
 # Required secret: INSTALL_E2E_DISPATCH_TOKEN — a fine-grained PAT with
 #   Contents:read + repository_dispatch:write on alexberardi/jarvis ONLY.
@@ -11,13 +19,19 @@ name: Trigger install-e2e
 # is provisioned.
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types: [completed]
     branches: [main]
 
 jobs:
   dispatch:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    # Never e2e an image that was never pushed. A failed or cancelled build
+    # leaves the OLD :dev on the registry — which is exactly the stale-image
+    # run we're trying to stop.
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Dispatch install-e2e on the umbrella repo
         env:
@@ -27,7 +41,10 @@ jobs:
             echo "::warning::INSTALL_E2E_DISPATCH_TOKEN not set — skipping install-e2e dispatch"
             exit 0
           fi
+          # In a workflow_run context `github.sha` is the default branch's head,
+          # NOT the commit that produced the image. Use head_sha or the payload
+          # names the wrong commit.
           gh api --method POST /repos/alexberardi/jarvis/dispatches \
             -f "event_type=service-commit" \
             -f "client_payload[service]=${{ github.repository }}" \
-            -f "client_payload[sha]=${{ github.sha }}"
+            -f "client_payload[sha]=${{ github.event.workflow_run.head_sha }}"
