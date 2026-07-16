@@ -112,6 +112,11 @@ COPY storage/ ./storage/
 COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY main.py .
+# version.py is read by api/health_routes.py to report the running version on
+# /health. The root .py files are copied EXPLICITLY here, so a new one must be
+# added or the container dies at import: ModuleNotFoundError: No module named
+# 'version' (caught by install-e2e, 2026-07-14).
+COPY version.py .
 COPY gpu_select.py .
 COPY pyproject.toml .
 

@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import List, Dict, Any, Optional
+from typing import TYPE_CHECKING, List, Dict, Any, Optional
 
 import torch
 from transformers import (
@@ -18,6 +18,11 @@ from services.settings_helpers import (
     get_int_setting,
     get_setting,
 )
+
+if TYPE_CHECKING:
+    # Quoted forward-refs to these were used in signatures below but the names
+    # were never imported — unresolvable for typing.get_type_hints() (ruff F821).
+    from managers.chat_types import ChatResult, GenerationParams, NormalizedMessage
 
 logger = logging.getLogger("uvicorn")
 
