@@ -58,7 +58,7 @@ jobs:
 
       - name: Cache pip dependencies
         if: env.HAS_KEY == 'true'
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-behavior-${{ hashFiles('**/requirements*.txt') }}
