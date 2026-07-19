@@ -48,6 +48,7 @@ class _StubClient:
     next_status: int = 200
     next_lines: list[str] = []
     next_headers: dict = {}
+    next_raise: Exception | None = None
 
     def __init__(self, *args, **kwargs):
         pass
@@ -70,6 +71,8 @@ class _StubClient:
 
         class _Ctx:
             async def __aenter__(_self):
+                if _StubClient.next_raise is not None:
+                    raise _StubClient.next_raise
                 return resp
 
             async def __aexit__(_self, *exc):
@@ -89,6 +92,7 @@ def stub_httpx(monkeypatch):
     _StubClient.next_status = 200
     _StubClient.next_lines = []
     _StubClient.next_headers = {}
+    _StubClient.next_raise = None
     yield _StubClient
 
 
@@ -113,6 +117,24 @@ def test_upstream_error_frame_is_valid_json(client, stub_httpx):
     assert len(frames) == 1
     assert "error" in frames[0]
     assert "503" in frames[0]["error"]
+
+
+def test_transport_error_yields_error_frame(client, stub_httpx):
+    """Connect/read failures must end the stream with a valid {"error"} frame,
+    not a bare truncation the consumer can't distinguish from success."""
+    import httpx as real_httpx
+
+    stub_httpx.next_raise = real_httpx.ConnectError("connection refused")
+
+    with client.stream("POST", "/v1/chat/completions", json=_stream_body()) as resp:
+        frames = [
+            json.loads(line[len("data: "):])
+            for line in resp.iter_lines()
+            if line.startswith("data: ")
+        ]
+
+    assert len(frames) == 1
+    assert "connection" in frames[0]["error"].lower()
 
 
 def test_stream_passthrough_preserves_frames(client, stub_httpx):

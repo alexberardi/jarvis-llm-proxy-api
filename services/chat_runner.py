@@ -3,8 +3,10 @@ import base64
 import json
 import logging
 import re
+import threading
 import time
-from typing import Any, Dict, List, Optional
+import weakref
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 
@@ -385,6 +387,44 @@ def summarize_json_schema(schema: Optional[Dict[str, Any]]) -> str:
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Sync-backend offload with per-backend serialization
+#
+# Before the 2026-07 threadpool offload, sync backend calls ran directly on
+# the event loop, which (badly) also serialized them process-wide. Moving
+# them to asyncio.to_thread frees the loop but would let two executor
+# threads enter a lock-less sync backend concurrently (vLLM's sync engine,
+# transformers). A per-backend-instance lock, taken INSIDE the worker
+# thread, restores exactly the old one-generation-at-a-time guarantee
+# without ever blocking the loop. Backends with their own lock (gguf) just
+# nest: same acquisition order everywhere, so no deadlock.
+# ---------------------------------------------------------------------------
+
+_sync_call_locks: "weakref.WeakKeyDictionary[Any, threading.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_sync_call_locks_guard = threading.Lock()
+
+
+def _backend_call_lock(backend: Any) -> threading.Lock:
+    with _sync_call_locks_guard:
+        lock = _sync_call_locks.get(backend)
+        if lock is None:
+            lock = threading.Lock()
+            _sync_call_locks[backend] = lock
+        return lock
+
+
+async def run_sync_generation(backend: Any, fn: Callable, *args: Any) -> Any:
+    """Run a sync backend call in the executor, serialized per backend."""
+
+    def call():
+        with _backend_call_lock(backend):
+            return fn(*args)
+
+    return await asyncio.to_thread(call)
+
+
 async def fix_json_with_retry(
     backend: Any,
     model_config: Any,
@@ -447,7 +487,8 @@ Return the corrected, complete JSON:"""
                     # Sync backends block for the whole generation (holding the
                     # backend lock) — never on the event loop. See model_service
                     # stream-pump comment for the deadlock this prevents.
-                    result: ChatResult = await asyncio.to_thread(
+                    result: ChatResult = await run_sync_generation(
+                        backend,
                         backend.generate_text_chat,
                         model_config,
                         retry_messages,
@@ -464,14 +505,14 @@ Return the corrected, complete JSON:"""
                     if asyncio.iscoroutinefunction(backend.chat_with_temperature):
                         output = await backend.chat_with_temperature(legacy_messages, params.temperature)
                     else:
-                        output = await asyncio.to_thread(
-                            backend.chat_with_temperature, legacy_messages, params.temperature
+                        output = await run_sync_generation(
+                            backend, backend.chat_with_temperature, legacy_messages, params.temperature
                         )
                 else:
                     if asyncio.iscoroutinefunction(backend.chat):
                         output = await backend.chat(legacy_messages)
                     else:
-                        output = await asyncio.to_thread(backend.chat, legacy_messages)
+                        output = await run_sync_generation(backend, backend.chat, legacy_messages)
                 usage = None
                 if hasattr(backend, 'last_usage'):
                     usage = backend.last_usage
@@ -570,7 +611,8 @@ async def run_chat_completion(
                     model_config, normalized_messages, params
                 )
             else:
-                result: ChatResult = await asyncio.to_thread(
+                result: ChatResult = await run_sync_generation(
+                    backend,
                     backend.generate_vision_chat,
                     model_config,
                     normalized_messages,
@@ -586,7 +628,8 @@ async def run_chat_completion(
                     # Sync generation blocks for its full duration holding the
                     # backend lock — offload so the event loop (and /health)
                     # stays live and stream-abort finalizers can run.
-                    result: ChatResult = await asyncio.to_thread(
+                    result: ChatResult = await run_sync_generation(
+                        backend,
                         backend.generate_text_chat,
                         model_config,
                         normalized_messages,
@@ -603,14 +646,14 @@ async def run_chat_completion(
                     if asyncio.iscoroutinefunction(backend.chat_with_temperature):
                         output = await backend.chat_with_temperature(legacy_messages, params.temperature)
                     else:
-                        output = await asyncio.to_thread(
-                            backend.chat_with_temperature, legacy_messages, params.temperature
+                        output = await run_sync_generation(
+                            backend, backend.chat_with_temperature, legacy_messages, params.temperature
                         )
                 else:
                     if asyncio.iscoroutinefunction(backend.chat):
                         output = await backend.chat(legacy_messages)
                     else:
-                        output = await asyncio.to_thread(backend.chat, legacy_messages)
+                        output = await run_sync_generation(backend, backend.chat, legacy_messages)
                 usage = None
                 if hasattr(backend, 'last_usage'):
                     usage = backend.last_usage

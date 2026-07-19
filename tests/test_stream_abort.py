@@ -37,11 +37,13 @@ class FakeLockedBackend:
     def __init__(self, tokens: list[str] | None = None, delay: float = 0.01):
         self._lock = threading.Lock()
         self.generator_closed = threading.Event()
+        self.generation_started = threading.Event()
         self.tokens = tokens  # None → stream forever
         self.delay = delay
 
     def generate_text_chat_stream(self, model_cfg, messages, params):
         with self._lock:
+            self.generation_started.set()
             try:
                 if self.tokens is None:
                     i = 0
@@ -307,6 +309,180 @@ def test_orphaned_stream_does_not_poison_next_request(model_service):
         )
         assert result["status"] == 200
         assert result["body"]["content"] == "sync-response"
+
+
+def test_disconnect_before_first_frame_releases_lock(model_service):
+    """Pin for the unstarted-generator hole: cancellation landing before the
+    consumer generator's first __anext__ must still run teardown (via
+    ClosingStreamingResponse.on_teardown), or the producer wedges holding the
+    backend lock with nothing left to release it."""
+    ms = model_service
+    backend = FakeLockedBackend(tokens=None)
+    _install_fake_backend(ms, backend)
+
+    async def drive():
+        stream = AsgiStream(
+            ms.app, "/internal/model/chat/stream", _chat_body(), AUTH
+        )
+        await stream.start()
+        # Generation is running, but NOT ONE body frame has been consumed —
+        # cancel now, racing the consumer's first __anext__.
+        assert await asyncio.to_thread(backend.generation_started.wait, 5.0)
+        await stream.disconnect()
+
+    asyncio.run(drive())
+
+    assert backend.generator_closed.wait(5.0), (
+        "generator never closed — teardown skipped on pre-first-frame disconnect"
+    )
+    assert backend._lock.acquire(timeout=5.0)
+    backend._lock.release()
+
+
+def test_closing_response_teardown_runs_when_body_never_starts():
+    """Unit pin for ClosingStreamingResponse: send() failing at
+    http.response.start must still fire on_teardown, even though aclose() on
+    the never-started generator skips its body (and its finally) entirely."""
+    from services.streaming import ClosingStreamingResponse
+
+    body_ran = threading.Event()
+    teardown_ran = threading.Event()
+
+    async def body():
+        body_ran.set()
+        yield b"data: {}\n\n"
+
+    async def failing_send(message):
+        raise OSError("client already gone")
+
+    async def drive():
+        resp = ClosingStreamingResponse(body(), on_teardown=teardown_ran.set)
+        with pytest.raises(OSError):
+            await resp.stream_response(failing_send)
+
+    asyncio.run(drive())
+
+    assert teardown_ran.is_set(), "on_teardown skipped when body never started"
+    assert not body_ran.is_set()
+
+
+def test_backend_error_mid_stream_delivers_error_frame(model_service):
+    """A backend exception mid-generation must end the stream with a valid
+    {"error"} frame — never a silent truncation."""
+    ms = model_service
+
+    class ErroringBackend(FakeLockedBackend):
+        def generate_text_chat_stream(self, model_cfg, messages, params):
+            with self._lock:
+                try:
+                    yield {"delta": "a"}
+                    yield {"delta": "b"}
+                    raise RuntimeError("llama.cpp exploded")
+                finally:
+                    self.generator_closed.set()
+
+    backend = ErroringBackend()
+    _install_fake_backend(ms, backend)
+
+    frames: list[dict] = []
+
+    async def drive():
+        stream = AsgiStream(
+            ms.app, "/internal/model/chat/stream", _chat_body(), AUTH
+        )
+        await stream.start()
+        frames.extend(await stream.read_to_end())
+
+    asyncio.run(drive())
+
+    assert [f.get("delta") for f in frames[:2]] == ["a", "b"]
+    assert "llama.cpp exploded" in frames[-1]["error"]
+    assert backend.generator_closed.wait(2.0)
+
+
+def test_done_frame_survives_slow_token_gaps(model_service):
+    """Pin for the Empty/is_alive race: inter-token gaps longer than the
+    consumer's poll interval must never drop the final done frame."""
+    ms = model_service
+    backend = FakeLockedBackend(tokens=["x", "y"], delay=1.3)
+    _install_fake_backend(ms, backend)
+
+    frames: list[dict] = []
+
+    async def drive():
+        stream = AsgiStream(
+            ms.app, "/internal/model/chat/stream", _chat_body(), AUTH
+        )
+        await stream.start()
+        frames.extend(await stream.read_to_end())
+
+    asyncio.run(drive())
+
+    assert frames[-1]["done"] is True
+    assert frames[-1]["content"] == "xy"
+
+
+def test_duplicate_request_id_supersedes_stale_stream(model_service):
+    """A retry with a stable X-Request-Id must abort the stale stream and
+    proceed — never 409 against a predecessor that is still tearing down."""
+    ms = model_service
+    backend = FakeLockedBackend(tokens=None)  # first stream: infinite
+    _install_fake_backend(ms, backend)
+
+    b_frames: list[dict] = []
+
+    async def drive():
+        headers = {**AUTH, "X-Request-Id": "phone-turn-9"}
+        a = AsgiStream(ms.app, "/internal/model/chat/stream", _chat_body(), headers)
+        await a.start()
+        await a.read_data_frames(2)
+
+        # Second attempt, same id. The first stream holds the backend lock —
+        # supersede must abort it so this one can proceed.
+        backend.tokens = ["r", "s"]  # picked up at the new generator's start
+        b = AsgiStream(ms.app, "/internal/model/chat/stream", _chat_body(), headers)
+        await b.start()
+        b_frames.extend(await b.read_to_end())
+
+        # The superseded stream must terminate on its own.
+        assert a.task is not None
+        await asyncio.wait_for(a.task, timeout=10.0)
+
+    asyncio.run(drive())
+
+    assert b_frames[-1]["done"] is True
+    assert b_frames[-1]["content"] == "rs"
+
+    # Guarded pop: B's teardown removed B's own registry entry.
+    with TestClient(ms.app) as client:
+        resp = client.post("/internal/model/cancel/phone-turn-9", headers=AUTH)
+        assert resp.status_code == 404
+
+
+def test_non_generator_stream_backend_gets_501_and_no_registry_leak(model_service):
+    """base.py defines generate_text_chat_stream as a plain raising function —
+    the capability check must be structural (isgeneratorfunction), reject with
+    501, and never leave a registry entry behind."""
+    ms = model_service
+
+    class NonStreamingBackend(FakeLockedBackend):
+        def generate_text_chat_stream(self, model_cfg, messages, params):
+            raise NotImplementedError("no streaming here")  # plain function
+
+    _install_fake_backend(ms, NonStreamingBackend())
+
+    with TestClient(ms.app) as client:
+        resp = client.post(
+            "/internal/model/chat/stream",
+            headers={**AUTH, "X-Request-Id": "leak-check-1"},
+            json=_chat_body(),
+        )
+        assert resp.status_code == 501
+
+        # No registry leak: the id was never registered, so cancel 404s and a
+        # retry with the same id is not poisoned.
+        resp = client.post("/internal/model/cancel/leak-check-1", headers=AUTH)
+        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------

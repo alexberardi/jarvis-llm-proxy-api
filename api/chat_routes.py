@@ -99,16 +99,26 @@ async def chat_completions(
                     async for line in resp.aiter_lines():
                         if line:
                             yield f"{line}\n\n"
+                except httpx.HTTPError as e:
+                    # Transport failures (connect refused, read timeout, mid-
+                    # stream drop) must honor the frame contract — a stream
+                    # that just truncates with no error/done frame hangs the
+                    # consumer's parser.
+                    frame = {"error": f"Model service connection error: {e}"}
+                    yield f"data: {json.dumps(frame)}\n\n"
                 finally:
                     # Deterministic upstream close: on consumer disconnect the
                     # model service must see the socket drop NOW (its abort
                     # machinery keys off it), not at GC. Shielded because this
                     # finally runs under a pending cancellation, where any
-                    # unshielded await re-raises and skips the close.
+                    # unshielded await re-raises and skips the close. Nested
+                    # so a raising resp.aclose() can't leak the client pool.
                     with anyio.CancelScope(shield=True):
-                        if resp is not None:
-                            await resp.aclose()
-                        await client.aclose()
+                        try:
+                            if resp is not None:
+                                await resp.aclose()
+                        finally:
+                            await client.aclose()
 
             # ClosingStreamingResponse acloses stream_proxy explicitly on
             # teardown — the finally above must run NOW on consumer
