@@ -109,7 +109,16 @@ alembic upgrade head
 ### Chat (`api/chat_routes.py`, app-auth)
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/chat/completions` | OpenAI-compatible. Body field `model` accepts `live` (default) or `background`. `stream=true` returns SSE proxied from the model service. |
+| POST | `/v1/chat/completions` | OpenAI-compatible for non-streaming. Body field `model` accepts `live` (default) or `background`. `stream=true` returns SSE proxied from the model service — **NOT OpenAI chunk format** (see below). |
+| POST | `/v1/chat/completions/cancel/{request_id}` | Cancel an in-flight **streamed** generation by its `X-Request-Id`. Proxies to the model service; cooperative (next token boundary). 404 if no such active stream. |
+
+**Streaming frame shape (`stream=true`)** — the endpoint is *not* OpenAI-compatible when streaming. SSE `data:` frames are:
+- `{"delta": "tok"}` per token
+- `{"done": true, "content", "usage", "tool_calls", "finish_reason"}` final frame
+- `{"error": "..."}` on failure, `{"cancelled": true}` after a cancel — all valid JSON
+- No `data: [DONE]` sentinel. Ground-truth consumer: CC `llm_proxy_client.py`.
+
+Every streamed response carries `X-Request-Id` (caller-supplied via header, else generated) — the handle for the cancel endpoint. **`tools` are silently dropped on the streaming path** (streaming handler never passes them; final frame hardcodes `tool_calls: None`) — native streaming tool-calls are an open work item (phone-calls PRD, open question 6).
 
 ### Embeddings (`api/embedding_routes.py`, app-auth)
 | Method | Path | Notes |
@@ -154,7 +163,7 @@ Full model build pipeline (generate → train → validate → merge → convert
 **HTTP status codes are load-bearing** (the docker healthcheck fails on non-2xx):
 - **200 `healthy`** — model service reachable, live slot ready.
 - **200 `initializing`** — live slot observed not-ready for < 15 min (grace so slow 32B loads and routine `/internal/model/reload`s don't flap container health). The grace clock lives in the **API process**, not model-service uptime — it spans model-service respawns (a serve.sh crash-loop can't stay "initializing" forever) and restarts fresh for reloads.
-- **200 `busy`** — model service accepted the connection but the response stalled: its single-worker event loop is blocked by an in-flight sync generation (minutes-long on CPU-only boxes). Busy ≠ dead; must not flap the container.
+- **200 `busy`** — model service accepted the connection but the response stalled. Since the 2026-07 stream-abort fix, sync generations run in a threadpool so the event loop (and :7705 `/health`) normally stays live even mid-generation; busy now mostly indicates GIL starvation under heavy CPU inference or an older deployment. Busy ≠ dead; must not flap the container.
 - **200 `degraded` + `MODEL_SERVICE_URL not set`** — deliberate passthrough posture (macOS dev); stays green.
 - **503** — model service unreachable (connection refused / connect timeout), live slot `failed`, or observed not-ready past the grace window.
 
@@ -198,7 +207,7 @@ Don't talk to the model directly — go through the model service over HTTP usin
 
 ## Invariants & gotchas
 
-1. **API server is stateless — model service owns the weights.** Restarting the API doesn't drop the model. Restarting the model service drops everything and reloads on next request. Don't try to load a model from the API codebase; the only reason that would "work" would be to load it twice. **Model loads are per-slot fault-isolated and self-healing** (since the 2026-07 boot-fatal-load incident): the model service binds :7705 first, then loads in a background thread; a failed slot records `model_states[slot] = "failed"` and 503s (`model_not_loaded`) instead of killing the process, and a retry loop re-attempts it with 60s→600s exponential cooldown. `scripts/serve.sh` (the container launcher) additionally respawns the whole model service if it dies natively (llama.cpp crashes).
+1. **API server is stateless — model service owns the weights.** Restarting the API doesn't drop the model. Restarting the model service drops everything and reloads on next request. Don't try to load a model from the API codebase; the only reason that would "work" would be to load it twice. **Model loads are per-slot fault-isolated and self-healing** (since the 2026-07 boot-fatal-load incident): the model service binds :7705 first, then loads in a background thread; a failed slot records `model_states[slot] = "failed"` and 503s (`model_not_loaded`) instead of killing the process, and a retry loop re-attempts it with 60s→600s exponential cooldown. `scripts/serve.sh` (the container launcher) additionally respawns the whole model service if it dies natively (llama.cpp crashes). **Streamed generations are abortable and disconnect-safe** (since the 2026-07-18 phone-call P0 wedge): a producer thread pumps the sync backend generator through a bounded queue; on consumer disconnect or `POST /internal/model/cancel/{request_id}` the generator is closed from the producer thread at the next token boundary, releasing the backend lock deterministically (never GC-dependent — both hops use `services/streaming.py:ClosingStreamingResponse`). Non-streaming generations run via `asyncio.to_thread`, so a lock-blocked request can no longer freeze the event loop (the old permanent-deadlock partner).
 2. **Settings DB is the source of truth — env is bootstrap/secrets only.** When adding a new config knob, **always prefer adding to settings_service** with an env-var fallback for migration. The `env.template` file states this explicitly: secrets, service discovery, ports, and library env (`LLAMA_METAL`, etc.) stay in env; everything else goes in the DB.
 3. **`MODEL_SERVICE_TOKEN` vs `LLM_PROXY_INTERNAL_TOKEN` are different tokens with different scopes.** The first protects `/internal/model/*` on the model service (called by API + worker). The second protects `/internal/queue/*` on the API server (called by command-center and other queue producers). They can be the same string in practice (run.sh does this for dev convenience), but they're semantically distinct.
 4. **`live` and `background` share a backend instance if their resolved path + backend match.** Saves memory on small dev boxes (Mac). On prod with separate models, both load. Don't write code that assumes they're always the same OR always different — check `ModelManager.aliases["live"] == ModelManager.aliases["background"]` when needed.

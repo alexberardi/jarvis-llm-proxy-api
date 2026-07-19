@@ -444,8 +444,14 @@ Return the corrected, complete JSON:"""
                         model_config, retry_messages, retry_params
                     )
                 else:
-                    result: ChatResult = backend.generate_text_chat(
-                        model_config, retry_messages, retry_params
+                    # Sync backends block for the whole generation (holding the
+                    # backend lock) — never on the event loop. See model_service
+                    # stream-pump comment for the deadlock this prevents.
+                    result: ChatResult = await asyncio.to_thread(
+                        backend.generate_text_chat,
+                        model_config,
+                        retry_messages,
+                        retry_params,
                     )
             else:
                 legacy_messages = []
@@ -458,12 +464,14 @@ Return the corrected, complete JSON:"""
                     if asyncio.iscoroutinefunction(backend.chat_with_temperature):
                         output = await backend.chat_with_temperature(legacy_messages, params.temperature)
                     else:
-                        output = backend.chat_with_temperature(legacy_messages, params.temperature)
+                        output = await asyncio.to_thread(
+                            backend.chat_with_temperature, legacy_messages, params.temperature
+                        )
                 else:
                     if asyncio.iscoroutinefunction(backend.chat):
                         output = await backend.chat(legacy_messages)
                     else:
-                        output = backend.chat(legacy_messages)
+                        output = await asyncio.to_thread(backend.chat, legacy_messages)
                 usage = None
                 if hasattr(backend, 'last_usage'):
                     usage = backend.last_usage
@@ -562,8 +570,11 @@ async def run_chat_completion(
                     model_config, normalized_messages, params
                 )
             else:
-                result: ChatResult = backend.generate_vision_chat(
-                    model_config, normalized_messages, params
+                result: ChatResult = await asyncio.to_thread(
+                    backend.generate_vision_chat,
+                    model_config,
+                    normalized_messages,
+                    params,
                 )
         else:
             if hasattr(backend, "generate_text_chat"):
@@ -572,8 +583,14 @@ async def run_chat_completion(
                         model_config, normalized_messages, params
                     )
                 else:
-                    result: ChatResult = backend.generate_text_chat(
-                        model_config, normalized_messages, params
+                    # Sync generation blocks for its full duration holding the
+                    # backend lock — offload so the event loop (and /health)
+                    # stays live and stream-abort finalizers can run.
+                    result: ChatResult = await asyncio.to_thread(
+                        backend.generate_text_chat,
+                        model_config,
+                        normalized_messages,
+                        params,
                     )
             else:
                 legacy_messages = []
@@ -586,12 +603,14 @@ async def run_chat_completion(
                     if asyncio.iscoroutinefunction(backend.chat_with_temperature):
                         output = await backend.chat_with_temperature(legacy_messages, params.temperature)
                     else:
-                        output = backend.chat_with_temperature(legacy_messages, params.temperature)
+                        output = await asyncio.to_thread(
+                            backend.chat_with_temperature, legacy_messages, params.temperature
+                        )
                 else:
                     if asyncio.iscoroutinefunction(backend.chat):
                         output = await backend.chat(legacy_messages)
                     else:
-                        output = backend.chat(legacy_messages)
+                        output = await asyncio.to_thread(backend.chat, legacy_messages)
                 usage = None
                 if hasattr(backend, 'last_usage'):
                     usage = backend.last_usage

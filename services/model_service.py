@@ -1,14 +1,17 @@
+import asyncio
 import atexit
 import hmac
 import json
 import logging
 import os
+import queue
 import threading
 import time
+import uuid
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,6 +19,7 @@ from managers.chat_types import GenerationParams
 from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest, Message
 from services.chat_runner import run_chat_completion, normalize_messages
+from services.streaming import ClosingStreamingResponse
 from services.date_keys import extract_date_keys_fast, build_date_hint_message
 from services.date_key_matcher import extract_date_keys as extract_date_keys_regex
 from api.settings_routes import router as settings_router
@@ -417,15 +421,124 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     return response
 
 
+# ============================================================================
+# Streaming: producer-thread pump with abort + cancel
+#
+# The backend stream generators (gguf, mlx) are SYNC generators that hold the
+# backend's threading.Lock across every yield. Before 2026-07 they were handed
+# straight to StreamingResponse: an abandoned client left the generator
+# suspended forever, the lock held, and llama.cpp grinding into a dead socket
+# — one dropped consumer poisoned every later request (and a sync
+# non-streaming request blocking the event loop on that lock could deadlock
+# the whole service, /health included).
+#
+# Now a dedicated producer thread iterates the generator and pushes events
+# into a bounded queue; the async consumer yields them as SSE. On client
+# disconnect or cancel, the abort event stops the producer at the next token
+# boundary and gen.close() runs IN THE PRODUCER THREAD, so GeneratorExit
+# unwinds the backend's `with self._lock:` deterministically — never left to
+# GC. Abort granularity is one token; a long prompt prefill inside
+# llama_decode still cannot be interrupted mid-eval.
+# ============================================================================
+
+_STREAM_SENTINEL = object()
+_STREAM_QUEUE_MAX = 256
+
+
+class _StreamHandle:
+    __slots__ = ("abort", "cancel_requested")
+
+    def __init__(self) -> None:
+        self.abort = threading.Event()
+        self.cancel_requested = threading.Event()
+
+
+_active_streams: dict[str, _StreamHandle] = {}
+_active_streams_lock = threading.Lock()
+
+
+def _queue_put_best_effort(q: "queue.Queue", item) -> None:
+    try:
+        q.put(item, timeout=1.0)
+    except queue.Full:
+        pass  # consumer is gone; nobody will drain — dropping is correct
+
+
+def _pump_stream(gen, q: "queue.Queue", abort: threading.Event) -> None:
+    """Producer: iterate the sync backend generator, honoring abort.
+
+    Runs in its own thread. The finally block closes the generator from this
+    same thread (it is suspended at a yield whenever we hold an item), which
+    releases any backend lock held across yields.
+    """
+    try:
+        for event in gen:
+            if abort.is_set():
+                break
+            while not abort.is_set():
+                try:
+                    q.put(event, timeout=0.25)
+                    break
+                except queue.Full:
+                    continue
+            if abort.is_set():
+                break
+    except Exception as e:  # noqa: BLE001 — surface backend errors as a frame
+        logger.error(f"Streaming error: {e}")
+        _queue_put_best_effort(q, {"error": str(e)})
+    finally:
+        try:
+            gen.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("Closing stream generator failed")
+        _queue_put_best_effort(q, _STREAM_SENTINEL)
+
+
+@app.post("/internal/model/cancel/{request_id}")
+def cancel_stream(
+    request_id: str,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Cancel an in-flight streaming generation by request id.
+
+    The id is the X-Request-Id echoed on the stream response (supplied by the
+    caller or generated). Cancellation is cooperative: it takes effect at the
+    next token boundary and the stream ends with a {"cancelled": true} frame.
+    """
+    require_internal_token(x_internal_token)
+    with _active_streams_lock:
+        handle = _active_streams.get(request_id)
+    if handle is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": f"No active stream with request id '{request_id}'",
+                    "code": "request_not_found",
+                }
+            },
+        )
+    handle.cancel_requested.set()
+    handle.abort.set()
+    return {"status": "cancelling", "request_id": request_id}
+
+
 @app.post("/internal/model/chat/stream")
 async def model_chat_stream(
     req: ChatCompletionRequest,
     x_internal_token: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
 ):
     """SSE streaming chat completion endpoint.
 
     Returns Server-Sent Events with token deltas, followed by a final
-    event containing the full content and usage stats.
+    event containing the full content and usage stats. NOT OpenAI chunk
+    format: frames are {"delta": "tok"} … {"done": true, content, usage,
+    tool_calls, finish_reason}, or {"error": "..."} / {"cancelled": true}.
+
+    The response echoes X-Request-Id (caller-supplied or generated); POST
+    /internal/model/cancel/{request_id} aborts the generation mid-stream.
     """
     require_internal_token(x_internal_token)
     _require_loaded_backend(req.model)
@@ -465,21 +578,66 @@ async def model_chat_stream(
         ),
     )
 
-    def event_generator():
-        try:
-            for event in backend.generate_text_chat_stream(model_config, normalized, params):
-                yield f"data: {json.dumps(event)}\n\n"
-        except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    request_id = x_request_id or uuid.uuid4().hex
+    handle = _StreamHandle()
+    with _active_streams_lock:
+        if request_id in _active_streams:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "type": "conflict",
+                        "message": f"Request id '{request_id}' already has an active stream",
+                        "code": "duplicate_request_id",
+                    }
+                },
+            )
+        _active_streams[request_id] = handle
 
-    return StreamingResponse(
-        event_generator(),
+    q: queue.Queue = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
+    gen = backend.generate_text_chat_stream(model_config, normalized, params)
+    producer = threading.Thread(
+        target=_pump_stream,
+        args=(gen, q, handle.abort),
+        name=f"stream-pump-{request_id[:8]}",
+        daemon=True,
+    )
+    producer.start()
+
+    async def event_stream():
+        try:
+            while True:
+                try:
+                    item = await asyncio.to_thread(q.get, True, 0.5)
+                except queue.Empty:
+                    if handle.cancel_requested.is_set():
+                        yield f"data: {json.dumps({'cancelled': True})}\n\n"
+                        break
+                    if handle.abort.is_set() or not producer.is_alive():
+                        break
+                    continue
+                if item is _STREAM_SENTINEL:
+                    if handle.cancel_requested.is_set():
+                        yield f"data: {json.dumps({'cancelled': True})}\n\n"
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            # Fires on normal completion AND on client disconnect:
+            # ClosingStreamingResponse acloses this generator explicitly, so
+            # teardown never depends on the ASGI disconnect flavor (anyio
+            # cancellation vs OSError-on-send) or on GC finalization.
+            handle.abort.set()
+            with _active_streams_lock:
+                _active_streams.pop(request_id, None)
+
+    return ClosingStreamingResponse(
+        event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Request-Id": request_id,
         },
     )
 

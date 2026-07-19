@@ -3,11 +3,13 @@
 OpenAI-compatible chat completions endpoint that proxies to the model service.
 """
 
+import json
 import logging
 import os
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+import anyio
+from fastapi import APIRouter, Depends, Header, HTTPException
 import httpx
 
 from auth.app_auth import require_app_auth
@@ -17,6 +19,7 @@ from models.api_models import (
 )
 from services.response_helpers import create_openai_response, openai_error
 from services.settings_helpers import get_float_setting, get_setting
+from services.streaming import ClosingStreamingResponse
 
 logger = logging.getLogger("uvicorn")
 
@@ -28,7 +31,10 @@ router = APIRouter(tags=["chat"])
     response_model=ChatCompletionResponse,
     dependencies=[Depends(require_app_auth)],
 )
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(
+    req: ChatCompletionRequest,
+    x_request_id: str | None = Header(default=None),
+):
     """OpenAI-compatible chat completions endpoint.
 
     Supports:
@@ -38,6 +44,14 @@ async def chat_completions(req: ChatCompletionRequest):
     Defaults to the **live** model. Consumers may explicitly request
     "background" when needed (e.g. heavy summarisation that shouldn't
     block the live model).
+
+    NOTE — `stream=true` is NOT OpenAI chunk format. Frames are
+    `{"delta": "tok"}` per token, then `{"done": true, content, usage,
+    tool_calls, finish_reason}`; errors are `{"error": "..."}` and
+    cancellations `{"cancelled": true}`. There is no `data: [DONE]`
+    sentinel. The response echoes X-Request-Id (supplied or generated);
+    POST /v1/chat/completions/cancel/{request_id} aborts an in-flight
+    streamed generation.
     """
     # Default to live; allow explicit "background" pass-through
     if not req.model or req.model.lower() not in ("live", "background"):
@@ -64,33 +78,56 @@ async def chat_completions(req: ChatCompletionRequest):
         # Streaming mode: proxy SSE from model service
         if req.stream:
             url = model_service_url.rstrip("/") + "/internal/model/chat/stream"
+            # One id across both hops: caller-supplied or generated here,
+            # forwarded to the model service and echoed back — it's the handle
+            # for the cancel endpoint.
+            request_id = x_request_id or uuid.uuid4().hex
+            headers["X-Request-Id"] = request_id
 
             async def stream_proxy():
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    async with client.stream(
-                        "POST", url, json=req.dict(), headers=headers
-                    ) as resp:
-                        if resp.status_code != 200:
-                            yield f"data: {{'error': 'Model service error {resp.status_code}'}}\n\n"
-                            return
-                        async for line in resp.aiter_lines():
-                            if line:
-                                yield f"{line}\n\n"
+                client = httpx.AsyncClient(timeout=timeout)
+                resp = None
+                try:
+                    stream_cm = client.stream(
+                        "POST", url, json=req.model_dump(), headers=headers
+                    )
+                    resp = await stream_cm.__aenter__()
+                    if resp.status_code != 200:
+                        frame = {"error": f"Model service error {resp.status_code}"}
+                        yield f"data: {json.dumps(frame)}\n\n"
+                        return
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield f"{line}\n\n"
+                finally:
+                    # Deterministic upstream close: on consumer disconnect the
+                    # model service must see the socket drop NOW (its abort
+                    # machinery keys off it), not at GC. Shielded because this
+                    # finally runs under a pending cancellation, where any
+                    # unshielded await re-raises and skips the close.
+                    with anyio.CancelScope(shield=True):
+                        if resp is not None:
+                            await resp.aclose()
+                        await client.aclose()
 
-            return StreamingResponse(
+            # ClosingStreamingResponse acloses stream_proxy explicitly on
+            # teardown — the finally above must run NOW on consumer
+            # disconnect, not at GC, or the model service never sees the drop.
+            return ClosingStreamingResponse(
                 stream_proxy(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
+                    "X-Request-Id": request_id,
                 },
             )
 
         # Non-streaming mode: existing behavior
         url = model_service_url.rstrip("/") + "/internal/model/chat"
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=req.dict(), headers=headers)
+            resp = await client.post(url, json=req.model_dump(), headers=headers)
             if resp.status_code != 200:
                 openai_error(
                     "internal_server_error",
@@ -120,3 +157,53 @@ async def chat_completions(req: ChatCompletionRequest):
 
         traceback.print_exc()
         openai_error("internal_server_error", f"Internal error: {str(e)}", 500)
+
+
+@router.post(
+    "/v1/chat/completions/cancel/{request_id}",
+    dependencies=[Depends(require_app_auth)],
+)
+async def cancel_chat_completion(request_id: str):
+    """Cancel an in-flight streamed generation by its X-Request-Id.
+
+    Proxies to the model service's cancel endpoint. Cancellation is
+    cooperative (next token boundary); the stream ends with a
+    {"cancelled": true} frame. 404 when no stream with that id is active.
+    """
+    model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")
+    if not model_service_url:
+        openai_error(
+            "internal_server_error",
+            "MODEL_SERVICE_URL is not set; API is passthrough-only.",
+            500,
+        )
+    internal_token = os.getenv("MODEL_SERVICE_TOKEN") or os.getenv(
+        "LLM_PROXY_INTERNAL_TOKEN"
+    )
+    headers = {}
+    if internal_token:
+        headers["X-Internal-Token"] = internal_token
+    timeout = get_float_setting(
+        "model_service.timeout_seconds", "MODEL_SERVICE_TIMEOUT", 60.0
+    )
+    url = model_service_url.rstrip("/") + f"/internal/model/cancel/{request_id}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, headers=headers)
+    if resp.status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": f"No active stream with request id '{request_id}'",
+                    "code": "request_not_found",
+                }
+            },
+        )
+    if resp.status_code != 200:
+        openai_error(
+            "internal_server_error",
+            f"Model service error {resp.status_code}",
+            500,
+        )
+    return resp.json()
