@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, List
+import os
+import time
+from typing import Any, Dict, Generator, List
 
 from managers.chat_types import ChatResult, ImagePart, NormalizedMessage, TextPart
 from backends.base import LLMBackendBase
@@ -60,6 +62,42 @@ class MockBackend(LLMBackendBase):
             "total_tokens": len(combined.split()) + len(content.split()),
         }
         return ChatResult(content=content, usage=usage, tool_calls=None, finish_reason="stop")
+
+    def generate_text_chat_stream(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: Any,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Sync streaming generator matching the gguf/mlx frame contract:
+        {"delta": tok} per token, then the {"done": true, ...} final frame.
+
+        MOCK_STREAM_TOKENS / MOCK_STREAM_DELAY_S control length and pacing so
+        smoke tests can catch a stream mid-flight (defaults: 20 × 50 ms).
+        """
+        n_tokens = int(os.getenv("MOCK_STREAM_TOKENS", "20"))
+        delay_s = float(os.getenv("MOCK_STREAM_DELAY_S", "0.05"))
+
+        content = ""
+        for i in range(n_tokens):
+            time.sleep(delay_s)
+            tok = f"mock{i} "
+            content += tok
+            yield {"delta": tok}
+
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": n_tokens,
+            "total_tokens": n_tokens,
+        }
+        self.last_usage = usage
+        yield {
+            "done": True,
+            "content": content.strip(),
+            "usage": usage,
+            "tool_calls": None,
+            "finish_reason": "stop",
+        }
 
     def unload(self) -> None:
         """No-op for mock backend."""

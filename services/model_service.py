@@ -1,14 +1,18 @@
+import asyncio
 import atexit
 import hmac
+import inspect
 import json
 import logging
 import os
+import queue
 import threading
 import time
+import uuid
 from typing import Optional, List
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,6 +20,7 @@ from managers.chat_types import GenerationParams
 from managers.model_manager import ModelManager
 from models.api_models import ChatCompletionRequest, Message
 from services.chat_runner import run_chat_completion, normalize_messages
+from services.streaming import ClosingStreamingResponse
 from services.date_keys import extract_date_keys_fast, build_date_hint_message
 from services.date_key_matcher import extract_date_keys as extract_date_keys_regex
 from api.settings_routes import router as settings_router
@@ -417,15 +422,142 @@ async def model_chat(req: ChatCompletionRequest, x_internal_token: str | None = 
     return response
 
 
+# ============================================================================
+# Streaming: producer-thread pump with abort + cancel
+#
+# The backend stream generators (gguf, mlx) are SYNC generators that hold the
+# backend's threading.Lock across every yield. Before 2026-07 they were handed
+# straight to StreamingResponse: an abandoned client left the generator
+# suspended forever, the lock held, and llama.cpp grinding into a dead socket
+# — one dropped consumer poisoned every later request (and a sync
+# non-streaming request blocking the event loop on that lock could deadlock
+# the whole service, /health included).
+#
+# Now a dedicated producer thread iterates the generator and pushes events
+# into a bounded queue; the async consumer yields them as SSE. On client
+# disconnect or cancel, the abort event stops the producer at the next token
+# boundary and gen.close() runs IN THE PRODUCER THREAD, so GeneratorExit
+# unwinds the backend's `with self._lock:` deterministically — never left to
+# GC. Abort granularity is one token; a long prompt prefill inside
+# llama_decode still cannot be interrupted mid-eval.
+# ============================================================================
+
+_STREAM_SENTINEL = object()
+_STREAM_QUEUE_MAX = 256
+
+
+class _StreamHandle:
+    __slots__ = ("abort", "cancel_requested")
+
+    def __init__(self) -> None:
+        self.abort = threading.Event()
+        self.cancel_requested = threading.Event()
+
+
+_active_streams: dict[str, _StreamHandle] = {}
+_active_streams_lock = threading.Lock()
+
+
+def _pump_stream(gen, q: "queue.Queue", handle: _StreamHandle, notify) -> None:
+    """Producer: iterate the sync backend generator, honoring abort.
+
+    Runs in its own thread. The finally block closes the generator from this
+    same thread (it is suspended at a yield whenever we hold an item), which
+    releases any backend lock held across yields. ``notify`` wakes the async
+    consumer (loop.call_soon_threadsafe) — the consumer never touches the
+    shared thread-pool executor, so blocked generation threads can't starve
+    stream consumption into a circular wait.
+    """
+    abort = handle.abort
+
+    def put_frame(item) -> bool:
+        """Deliver a frame with backpressure, bailing only on abort.
+
+        A full queue means the consumer is SLOW, not gone — a dead consumer
+        always sets abort via teardown, so waiting on Full is safe and
+        terminal frames (backend errors) are never silently dropped on a
+        connected-but-slow client.
+        """
+        while not abort.is_set():
+            try:
+                q.put(item, timeout=0.25)
+                notify()
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    try:
+        for event in gen:
+            if abort.is_set():
+                break
+            if not put_frame(event):
+                break
+    except Exception as e:  # noqa: BLE001 — surface backend errors as a frame
+        logger.error(f"Streaming error: {e}")
+        put_frame({"error": str(e)})
+    finally:
+        try:
+            gen.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("Closing stream generator failed")
+        # Sentinel is best-effort and non-blocking: if it can't be delivered
+        # (aborted stream / full queue) the consumer's drained-and-dead
+        # fallback ends the stream instead.
+        try:
+            q.put_nowait(_STREAM_SENTINEL)
+        except queue.Full:
+            pass
+        notify()
+
+
+@app.post("/internal/model/cancel/{request_id}")
+def cancel_stream(
+    request_id: str,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Cancel an in-flight streaming generation by request id.
+
+    The id is the X-Request-Id echoed on the stream response (supplied by the
+    caller or generated). Cancellation is cooperative: it takes effect at the
+    next token boundary and the stream ends with a {"cancelled": true} frame.
+    A new stream reusing an active id supersedes (aborts) the stale one, so
+    retries with a stable id never dead-end on a tearing-down predecessor.
+    """
+    require_internal_token(x_internal_token)
+    with _active_streams_lock:
+        handle = _active_streams.get(request_id)
+    if handle is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "type": "not_found",
+                    "message": f"No active stream with request id '{request_id}'",
+                    "code": "request_not_found",
+                }
+            },
+        )
+    handle.cancel_requested.set()
+    handle.abort.set()
+    return {"status": "cancelling", "request_id": request_id}
+
+
 @app.post("/internal/model/chat/stream")
 async def model_chat_stream(
     req: ChatCompletionRequest,
     x_internal_token: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
 ):
     """SSE streaming chat completion endpoint.
 
     Returns Server-Sent Events with token deltas, followed by a final
-    event containing the full content and usage stats.
+    event containing the full content and usage stats. NOT OpenAI chunk
+    format: frames are {"delta": "tok"} … {"done": true, content, usage,
+    tool_calls, finish_reason}, or {"error": "..."} / {"cancelled": true}.
+
+    The response echoes X-Request-Id (caller-supplied or generated); POST
+    /internal/model/cancel/{request_id} aborts the generation mid-stream.
     """
     require_internal_token(x_internal_token)
     _require_loaded_backend(req.model)
@@ -450,7 +582,13 @@ async def model_chat_stream(
         raise HTTPException(status_code=404, detail=f"Model '{req.model}' not found")
 
     backend = model_config.backend_instance
-    if not hasattr(backend, "generate_text_chat_stream"):
+    # Capability check must be structural: base.py defines
+    # generate_text_chat_stream as a plain raising function, so hasattr is
+    # always true — only a real generator function marks streaming support.
+    stream_fn = getattr(backend, "generate_text_chat_stream", None)
+    if stream_fn is None or not inspect.isgeneratorfunction(
+        getattr(stream_fn, "__func__", stream_fn)
+    ):
         raise HTTPException(status_code=501, detail="Backend does not support streaming")
 
     normalized = normalize_messages(req.messages)
@@ -465,21 +603,94 @@ async def model_chat_stream(
         ),
     )
 
-    def event_generator():
-        try:
-            for event in backend.generate_text_chat_stream(model_config, normalized, params):
-                yield f"data: {json.dumps(event)}\n\n"
-        except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    request_id = x_request_id or uuid.uuid4().hex
+    handle = _StreamHandle()
+    gen = backend.generate_text_chat_stream(model_config, normalized, params)
 
-    return StreamingResponse(
-        event_generator(),
+    with _active_streams_lock:
+        prior = _active_streams.get(request_id)
+        if prior is not None:
+            # Supersede, don't 409: a caller retrying with a stable id must
+            # win over its own stale/tearing-down predecessor.
+            prior.cancel_requested.set()
+            prior.abort.set()
+        _active_streams[request_id] = handle
+
+    def _teardown() -> None:
+        """Idempotent; safe from any thread. Guarded pop: a superseding
+        stream may own this id by now — never remove someone else's handle."""
+        handle.abort.set()
+        with _active_streams_lock:
+            if _active_streams.get(request_id) is handle:
+                del _active_streams[request_id]
+
+    loop = asyncio.get_running_loop()
+    data_ready = asyncio.Event()
+
+    def _notify() -> None:
+        try:
+            loop.call_soon_threadsafe(data_ready.set)
+        except RuntimeError:
+            pass  # loop closed (shutdown) — consumer is gone anyway
+
+    q: queue.Queue = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
+    producer = threading.Thread(
+        target=_pump_stream,
+        args=(gen, q, handle, _notify),
+        name=f"stream-pump-{request_id[:8]}",
+        daemon=True,
+    )
+    try:
+        producer.start()
+    except Exception:
+        _teardown()
+        raise
+
+    async def event_stream():
+        # Event-driven consumer: woken by call_soon_threadsafe, drains with
+        # get_nowait. Deliberately NO asyncio.to_thread here — the default
+        # executor can be saturated by threads blocked on the backend lock
+        # (chat_runner offloads), and a consumer queued behind them would
+        # complete the circular wait this module exists to prevent.
+        try:
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    data_ready.clear()
+                    try:
+                        item = q.get_nowait()  # re-check: lost-wakeup guard
+                    except queue.Empty:
+                        # Queue fully drained: only end if the producer is
+                        # gone too (its terminal frames are always enqueued
+                        # before it exits, so nothing can be lost here).
+                        if not producer.is_alive():
+                            break
+                        try:
+                            await asyncio.wait_for(data_ready.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                if item is _STREAM_SENTINEL:
+                    if handle.cancel_requested.is_set():
+                        yield f"data: {json.dumps({'cancelled': True})}\n\n"
+                    break
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            _teardown()
+
+    # on_teardown covers the hole the generator's own finally cannot: a
+    # client that disconnects before the first __anext__ acloses a
+    # never-started generator, skipping its body entirely.
+    return ClosingStreamingResponse(
+        event_stream(),
+        on_teardown=_teardown,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Request-Id": request_id,
         },
     )
 
