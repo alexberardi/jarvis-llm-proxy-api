@@ -171,9 +171,16 @@ class TestSyncBridgeEventLoop:
         assert client._bg_loop.is_running()
 
     def test_sync_context_still_works(self) -> None:
-        # No running loop (the standalone behavior test / scripts that create a
-        # fresh client per call): the inline asyncio.run path is used and the
-        # background loop is never started.
+        # A sync caller (scripts, tests) still gets a correct result.
+        #
+        # This used to additionally assert `client._bg_loop is None`, pinning
+        # the old "no running loop => inline asyncio.run" branch. That branch
+        # WAS the bug: once chat_runner began offloading sync generations with
+        # asyncio.to_thread, the model service reached this same no-running-loop
+        # state with a PERSISTENT client, and each throwaway loop poisoned the
+        # next call's pooled connection ("Event loop is closed", alternating
+        # 200/500 in the CI behavior corpus 2026-07-20). The bridge now always
+        # uses the dedicated loop, so the assertion is inverted here on purpose.
         client = _client()
         _mock_post(client, TOOL_CALL_RESPONSE)
         params = GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto", max_tokens=256)
@@ -181,4 +188,5 @@ class TestSyncBridgeEventLoop:
         result = client.generate_text_chat(None, _messages(), params)
 
         assert result.finish_reason == "tool_calls"
-        assert client._bg_loop is None
+        assert client._bg_loop is not None
+        assert client._bg_loop.is_running()

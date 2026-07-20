@@ -417,25 +417,21 @@ class RestClient(LLMBackendBase):
 
         # Sync bridge. The persistent ``self.client`` (and its connection pool)
         # binds to the event loop it is first used on, so it MUST always run on
-        # one stable loop. The old code ran each call on a throwaway loop via
-        # ``asyncio.run`` on a fresh worker thread whenever the caller was already
-        # in an async context (the model service's async /internal/model/chat
-        # endpoint) — reusing the persistent client across those per-call loops
-        # raised intermittent "RuntimeError: Event loop is closed" on connection
-        # cleanup. Route all async-context calls onto a single dedicated
-        # background loop so the client stays valid across requests.
-        try:
-            asyncio.get_running_loop()
-            in_async_context = True
-        except RuntimeError:
-            in_async_context = False
-
-        if in_async_context:
-            bg_loop = self._get_background_loop()
-            return asyncio.run_coroutine_threadsafe(_run(), bg_loop).result()
-        # No running loop (sync caller / tests, which create a fresh client per
-        # call): run inline on a throwaway loop — no cross-loop reuse occurs.
-        return asyncio.run(_run())
+        # one stable loop. Running a call on a throwaway loop (``asyncio.run``)
+        # poisons the pooled connection for the NEXT call, which then dies with
+        # "RuntimeError: Event loop is closed" during connection cleanup.
+        #
+        # This used to branch on "is there a running loop?" as a proxy for "is
+        # my caller async, and therefore is my client persistent?". That proxy
+        # broke when chat_runner started offloading sync generations with
+        # ``asyncio.to_thread``: inside a worker thread there IS no running
+        # loop, so every model-service call took the throwaway-loop branch and
+        # the REST backend alternated 200/500/200/500 (CI behavior corpus,
+        # 2026-07-20). Bind to the dedicated loop unconditionally instead —
+        # it is correct whatever thread or context the caller runs on, which
+        # the heuristic never was.
+        bg_loop = self._get_background_loop()
+        return asyncio.run_coroutine_threadsafe(_run(), bg_loop).result()
 
     def _get_background_loop(self) -> asyncio.AbstractEventLoop:
         """Lazily start (once) a dedicated background event loop on a daemon
