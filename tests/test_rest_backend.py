@@ -16,6 +16,7 @@ import os
 from unittest.mock import patch
 
 from backends.rest_backend import RestClient
+from managers.chat_types import GenerationParams, NormalizedMessage, TextPart
 
 
 class _StubSettings:
@@ -77,3 +78,101 @@ class TestRestClientAuthToken:
 
         assert client.auth_token == ""
         assert "Authorization" not in client.headers
+
+
+class TestSyncBridgeLoopStability:
+    """The persistent ``httpx.AsyncClient`` must stay bound to ONE event loop.
+
+    Regression: chat_runner offloads sync generations with ``asyncio.to_thread``
+    (#47). ``generate_text_chat`` used to ask "is a loop running?" as a proxy
+    for "is my caller async, so is my client persistent?". Inside a to_thread
+    worker no loop is running, so every model-service call ran on a throwaway
+    ``asyncio.run`` loop. The first call bound the connection pool to a loop
+    that was then closed, so the NEXT call died during cleanup with
+    "RuntimeError: Event loop is closed" — the alternating 200/500/200/500 in
+    the CI behavior corpus (2026-07-20).
+
+    These drive ``generate_text_chat`` itself, so they fail on the heuristic.
+    """
+
+    def _backend(self):
+        with _patch_settings({}):
+            return RestClient("http://example.invalid/v1")
+
+    @staticmethod
+    def _msg(text="hi"):
+        return NormalizedMessage(role="user", content=[TextPart(text=text)])
+
+    def _capturing_backend(self, loops):
+        """Backend whose async leaf records the loop it actually ran on."""
+        import asyncio as _asyncio
+
+        backend = self._backend()
+
+        async def _fake_chat(dict_messages, temperature):
+            loops.append(id(_asyncio.get_running_loop()))
+            return "ok"
+
+        backend.chat_with_temperature = _fake_chat
+        backend.last_usage = None
+        return backend
+
+    def test_sequential_calls_from_to_thread_share_one_loop(self):
+        """Ten calls in the exact shape chat_runner uses. The bug alternated,
+        so anything fewer than two calls would have passed."""
+        import asyncio as _asyncio
+
+        loops: list[int] = []
+        backend = self._capturing_backend(loops)
+        params = GenerationParams(temperature=0.1)
+
+        async def _drive():
+            for _ in range(10):
+                await _asyncio.to_thread(
+                    backend.generate_text_chat, None, [self._msg()], params
+                )
+
+        _asyncio.run(_drive())
+
+        assert len(loops) == 10
+        assert len(set(loops)) == 1, f"alternated across loops: {loops}"
+
+    def test_loop_is_not_closed_between_calls(self):
+        """The pooled connection is poisoned by the loop CLOSING, so assert the
+        loop the work ran on is still alive afterwards."""
+        import asyncio as _asyncio
+
+        loops: list[int] = []
+        backend = self._capturing_backend(loops)
+        params = GenerationParams(temperature=0.1)
+
+        async def _drive():
+            await _asyncio.to_thread(
+                backend.generate_text_chat, None, [self._msg()], params
+            )
+
+        _asyncio.run(_drive())
+
+        bg = backend._bg_loop
+        assert bg is not None, "work did not run on the dedicated loop"
+        assert not bg.is_closed()
+        assert id(bg) == loops[0]
+
+    def test_plain_sync_caller_uses_the_same_loop(self):
+        """A sync caller (tests, scripts) must not get a different loop than
+        the async path — one client, one loop, always."""
+        loops: list[int] = []
+        backend = self._capturing_backend(loops)
+        params = GenerationParams(temperature=0.1)
+
+        backend.generate_text_chat(None, [self._msg()], params)
+        backend.generate_text_chat(None, [self._msg()], params)
+
+        # Identity alone is not enough: CPython reuses the id() of a
+        # garbage-collected throwaway loop, so a buggy run can coincidentally
+        # report one id. Assert the work landed on the DEDICATED loop, which
+        # only happens when the bridge routes there.
+        bg = backend._bg_loop
+        assert bg is not None, "sync caller bypassed the dedicated loop"
+        assert not bg.is_closed()
+        assert loops == [id(bg), id(bg)], f"sync caller alternated: {loops}"
