@@ -28,7 +28,7 @@ peft>=0.12.0
 datasets>=2.14.0
 trl>=0.7.0
 accelerate>=0.21.0
-bitsandbytes>=0.41.0  # Required for 4-bit quantized training
+bitsandbytes>=0.49.2  # Required for 4-bit quantized training
 # huggingface-hub: mlx-lm requires >=1.0 (via transformers 5.x)
 huggingface-hub>=0.34.0
 # FastText for date key extraction (use wheel to avoid compilation issues)
