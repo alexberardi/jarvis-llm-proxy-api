@@ -10,7 +10,7 @@ debugpy
 Pillow
 num2words
 Pillow
-redis>=5.0.0
+redis>=8.0.1
 rq>=1.15.1
 psutil>=5.9.0  # For process management (vLLM cleanup)
 sqlalchemy>=2.0.23
