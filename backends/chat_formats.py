@@ -6,6 +6,8 @@ model.main.chat_format setting. Import this module before creating
 Llama instances so handlers are available in the registry.
 
 Registered formats:
+  - gemma2: Gemma 2 native template; folds the system message into the first
+    user turn (Gemma 2 has no system role).
   - gemma4: Gemma 4 native template with thinking disabled.
 """
 
@@ -17,6 +19,58 @@ from llama_cpp.llama_chat_format import (
     LlamaChatCompletionHandlerRegistry,
     chat_formatter_to_chat_completion_handler,
 )
+
+
+# ---------------------------------------------------------------------------
+# gemma2 — native Gemma 2 template; system folded into the first user turn
+# ---------------------------------------------------------------------------
+#
+# Gemma 2 has NO system role. llama-cpp-python's built-in "gemma" handler
+# therefore DROPS any system message outright — which silently breaks Jarvis's
+# text-embedded tool-calling providers (they put the tool schemas + rules in the
+# system prompt, so the model never sees a single tool and answers everything in
+# prose). Google's guidance for Gemma 2 is to place system instructions at the
+# start of the first user turn; this handler does exactly that, using native
+# <start_of_turn>/<end_of_turn> markers (no ChatML tokens, no Gemma-4 thinking
+# channel — both of which Gemma 2 mis-reads).
+#
+# Ref: https://ai.google.dev/gemma/docs/core/prompt-formatting
+
+
+def _format_gemma2(
+    messages: List[llama_types.ChatCompletionRequestMessage],
+    **kwargs: Any,
+) -> ChatFormatterResponse:
+    """Format messages for Gemma 2, folding system content into the first user
+    turn (Gemma 2 exposes no system role)."""
+    system_parts: list[str] = [
+        (msg.get("content", "") or "")  # type: ignore[arg-type]
+        for msg in messages
+        if msg["role"] == "system"  # type: ignore[typeddict-item]
+    ]
+    system: str = "\n\n".join(p for p in system_parts if p)
+
+    parts: list[str] = []
+    system_pending = bool(system)
+    for msg in messages:
+        role: str = msg["role"]  # type: ignore[typeddict-item]
+        content: str = msg.get("content", "") or ""  # type: ignore[arg-type]
+        if role == "system":
+            continue
+        if role == "user":
+            if system_pending:
+                content = f"{system}\n\n{content}"
+                system_pending = False
+            parts.append(f"<start_of_turn>user\n{content}<end_of_turn>\n")
+        elif role == "assistant":
+            parts.append(f"<start_of_turn>model\n{content}<end_of_turn>\n")
+
+    # No user turn yet (system-only) — open one so the folded system still lands.
+    if system_pending:
+        parts.append(f"<start_of_turn>user\n{system}<end_of_turn>\n")
+
+    parts.append("<start_of_turn>model\n")
+    return ChatFormatterResponse(prompt="".join(parts), stop="<end_of_turn>")
 
 
 # ---------------------------------------------------------------------------
@@ -68,5 +122,9 @@ def _format_gemma4(
 
 # Register on import
 _registry = LlamaChatCompletionHandlerRegistry()
-_handler = chat_formatter_to_chat_completion_handler(_format_gemma4)
-_registry.register_chat_completion_handler("gemma4", _handler)
+_registry.register_chat_completion_handler(
+    "gemma2", chat_formatter_to_chat_completion_handler(_format_gemma2)
+)
+_registry.register_chat_completion_handler(
+    "gemma4", chat_formatter_to_chat_completion_handler(_format_gemma4)
+)
