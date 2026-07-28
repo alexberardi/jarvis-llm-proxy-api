@@ -48,7 +48,13 @@ gguf>=0.19.0
 mistral_common>=1.0.0  # Unconditional import in vendored convert_hf_to_gguf.py
 
 # Embeddings (CPU-based, independent of chat model backend)
-sentence-transformers>=2.2.0
+# <5.4: sentence-transformers 5.4.0+ hard-imports torchcodec (multimodal
+# audio/video support), which needs FFmpeg shared libs our images don't
+# ship — `import sentence_transformers` then raises and /v1/embeddings
+# 500s (2026-07-27 prod: killed CC memory recall's vector search).
+# Bisected live in the dev-cuda container: 5.3.0 imports clean, 5.4.0+
+# does not. To lift the cap, add ffmpeg to the images first.
+sentence-transformers>=2.2.0,<5.4
 
 # Platform-specific ML libraries are installed separately:
 # - llama-cpp-python 0.3.16 (built against llama.cpp commit 4227c9b)
