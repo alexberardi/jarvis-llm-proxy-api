@@ -601,6 +601,8 @@ async def model_chat_stream(
             if req.adapter_settings and req.adapter_settings.enabled
             else None
         ),
+        # None here → the backend falls back to the model.<slot>.reasoning_budget setting.
+        reasoning_budget=req.reasoning_budget,
     )
 
     request_id = x_request_id or uuid.uuid4().hex

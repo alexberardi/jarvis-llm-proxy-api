@@ -108,6 +108,21 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_LIVE_REST_MODEL_URL",
         requires_reload=True,
     ),
+    SettingDefinition(
+        key="model.live.reasoning_budget",
+        category="model.live",
+        value_type="string",
+        default="",
+        description=(
+            "Thinking token budget for the LIVE model on a reasoning-capable "
+            "backend (e.g. Qwen3.5 via llama-server/REST): 0 = off (fast voice), "
+            "-1 = unrestricted, N = cap. Blank falls back to "
+            "model.main.reasoning_budget, then the server's own --reasoning-budget. "
+            "A request may override it per-turn."
+        ),
+        env_fallback="JARVIS_LIVE_REASONING_BUDGET",
+        requires_reload=True,
+    ),
     # ==================== model.background ====================
     SettingDefinition(
         key="model.background.name",

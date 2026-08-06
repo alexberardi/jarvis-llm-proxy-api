@@ -93,6 +93,9 @@ class ChatCompletionRequest(APIModel):
     # Jarvis extensions (OpenAI-compatible: extra fields are allowed)
     include_date_context: Optional[bool] = None  # If true, extract date keys from input
     adapter_settings: Optional[AdapterSettings] = None  # Per-request LoRA adapter selection
+    # Thinking budget for reasoning models: 0=off, -1=unrestricted, N=cap. Omitted →
+    # falls back to the model.<slot>.reasoning_budget setting (see GenerationParams).
+    reasoning_budget: Optional[int] = None
 
 
 class ChatCompletionChoice(APIModel):
