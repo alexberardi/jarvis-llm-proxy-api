@@ -109,7 +109,7 @@ class TestSyncBridgeLoopStability:
 
         backend = self._backend()
 
-        async def _fake_chat(dict_messages, temperature):
+        async def _fake_chat(dict_messages, temperature, max_tokens=None, reasoning_budget=None):
             loops.append(id(_asyncio.get_running_loop()))
             return "ok"
 
