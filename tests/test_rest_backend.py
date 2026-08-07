@@ -176,3 +176,55 @@ class TestSyncBridgeLoopStability:
         assert bg is not None, "sync caller bypassed the dedicated loop"
         assert not bg.is_closed()
         assert loops == [id(bg), id(bg)], f"sync caller alternated: {loops}"
+
+
+class TestRestClientReasoningBudget:
+    """model.<slot>.reasoning_budget -> chat_template_kwargs enable_thinking.
+
+    llama.cpp server only suppresses thinking via the ``enable_thinking`` chat
+    template kwarg (not the ``--reasoning-budget`` flag / a reasoning_budget
+    request field on current builds), so RestClient translates the DB setting
+    into that kwarg on every request.
+    """
+
+    def test_zero_disables_thinking(self):
+        with _patch_settings({"model.live.reasoning_budget": "0"}), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            client = RestClient(base_url="http://llama-server:8080", model_type="live")
+        assert client._thinking_kwargs() == {"enable_thinking": False}
+
+    def test_unset_leaves_model_default(self):
+        with _patch_settings({}), patch.dict(os.environ, {}, clear=True):
+            client = RestClient(base_url="http://llama-server:8080", model_type="live")
+        assert client._thinking_kwargs() is None
+
+    def test_nonzero_enables_thinking(self):
+        with _patch_settings({"model.live.reasoning_budget": "-1"}), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            client = RestClient(base_url="http://llama-server:8080", model_type="live")
+        assert client._thinking_kwargs() == {"enable_thinking": True}
+
+    def test_background_slot_reads_background_budget(self):
+        with _patch_settings({"model.background.reasoning_budget": "0"}), patch.dict(
+            os.environ, {}, clear=True
+        ):
+            client = RestClient(base_url="http://host:8080", model_type="background")
+        assert client._thinking_kwargs() == {"enable_thinking": False}
+
+
+class TestRestClientGenericOpenAIParse:
+    """provider='generic' pointed at an OpenAI-compatible server (llama-server)
+    must extract choices[0].message.content, not str(response_data)."""
+
+    def test_generic_provider_extracts_openai_choices_content(self):
+        with _patch_settings({}), patch.dict(os.environ, {}, clear=True):
+            client = RestClient(base_url="http://llama-server:8080", model_type="live")
+        assert client.provider == "generic"
+        resp = {
+            "choices": [{"message": {"role": "assistant", "content": "Hello there."}}],
+            "usage": {"total_tokens": 3},
+        }
+        assert client._parse_response_for_provider(resp) == "Hello there."
+        assert client.last_usage == {"total_tokens": 3}

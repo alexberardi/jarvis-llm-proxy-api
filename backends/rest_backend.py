@@ -75,7 +75,19 @@ class RestClient(LLMBackendBase):
         self.timeout = get_int_setting(
             "rest.timeout_seconds", "JARVIS_REST_TIMEOUT", 60
         )
-        
+
+        # Reasoning/thinking control per slot: model.<slot>.reasoning_budget
+        # ("0" disables thinking, "-1"/N enables it, "" = leave the model default).
+        # The current llama.cpp server honors this ONLY via the chat template kwarg
+        # ``enable_thinking`` — NOT via a ``reasoning_budget`` request field or the
+        # ``--reasoning-budget`` launch flag — so we translate the setting into
+        # ``chat_template_kwargs`` on every request (see _thinking_kwargs).
+        _rb_slot = "background" if model_type == "background" else "live"
+        self.reasoning_budget = (
+            get_setting(f"model.{_rb_slot}.reasoning_budget", None, "")
+            or get_setting("model.main.reasoning_budget", None, "")
+        )
+
         logger.info(f"🌐 Initialized REST backend for {self.provider}")
         logger.debug(f"🔗 Base URL: {self.base_url}")
         logger.debug(f"🔑 Auth type: {self.auth_type}")
@@ -155,7 +167,16 @@ class RestClient(LLMBackendBase):
         else:
             # Generic endpoint
             return "/v1/chat/completions"
-    
+
+    def _thinking_kwargs(self) -> Optional[Dict[str, Any]]:
+        """Translate the ``reasoning_budget`` slot setting into the OpenAI
+        ``chat_template_kwargs`` the llama.cpp server honors. Returns None when
+        unset (leave the model/template default)."""
+        rb = str(self.reasoning_budget).strip()
+        if rb == "":
+            return None
+        return {"enable_thinking": rb not in ("0", "false", "off", "no")}
+
     def _parse_response_for_provider(self, response_data: Dict[str, Any]) -> str:
         """Parse response according to provider format"""
         if self.provider == "openai" or self.provider == "lmstudio":
@@ -182,6 +203,19 @@ class RestClient(LLMBackendBase):
                 self._estimate_usage(content)
                 return content
         
+        # OpenAI chat-completions shape ({"choices":[{"message":{"content":...}}]}).
+        # provider="generic" pointed at an OpenAI-compatible server (e.g. the
+        # llama.cpp / llama-server sidecar) lands here — without this it fell to the
+        # str(response_data) last resort and returned the ENTIRE response dict as the
+        # assistant text.
+        choices = response_data.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict) and message.get("content") is not None:
+                if "usage" in response_data:
+                    self.last_usage = response_data["usage"]
+                return message["content"]
+
         # Generic fallback
         if "content" in response_data:
             return response_data["content"]
@@ -215,6 +249,9 @@ class RestClient(LLMBackendBase):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        _tk = self._thinking_kwargs()
+        if _tk is not None:
+            payload["chat_template_kwargs"] = _tk
 
         endpoint = self._get_endpoint_for_provider()
         url = urljoin(self.base_url, endpoint)
@@ -248,6 +285,9 @@ class RestClient(LLMBackendBase):
             payload["tool_choice"] = params.tool_choice
         if params.max_tokens is not None:
             payload["max_tokens"] = params.max_tokens
+        _tk = self._thinking_kwargs()
+        if _tk is not None:
+            payload["chat_template_kwargs"] = _tk
 
         endpoint = self._get_endpoint_for_provider()
         url = urljoin(self.base_url, endpoint)
