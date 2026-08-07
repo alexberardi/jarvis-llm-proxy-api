@@ -375,8 +375,13 @@ def _send_callback(
         metadata=metadata,
     )
 
-    # Dispatch by callback type
-    if cb_type == "internal":
+    # Dispatch by callback type. "internal" is the default (empty auth_type);
+    # "bearer" is what CC's async-job enqueues set (auth_type=bearer + token) so
+    # the fail-closed /…/callback endpoints authenticate. Both must POST — the
+    # bearer header is applied below when a token is present. (Was "internal"-only,
+    # so a real bearer callback hit the unsupported branch and never posted —
+    # every memory-extraction/deep-research/etc. callback silently dropped.)
+    if cb_type in ("internal", "bearer"):
         # Apply bearer auth if provided
         if auth_type == "bearer" and auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
