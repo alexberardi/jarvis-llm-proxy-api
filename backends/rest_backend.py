@@ -75,7 +75,23 @@ class RestClient(LLMBackendBase):
         self.timeout = get_int_setting(
             "rest.timeout_seconds", "JARVIS_REST_TIMEOUT", 60
         )
-        
+
+        # Default thinking budget for reasoning models (e.g. Qwen3.5 served via
+        # llama-server) — used ONLY when a request omits reasoning_budget. Per-slot
+        # with a model.main fallback. 0 = off (immediate end of thinking — the fast
+        # voice default), -1 = unrestricted, N = token cap. Blank/unset → None: send
+        # nothing and let the server's own --reasoning-budget launch flag apply.
+        # Explicit empty-check (NOT `or`): "0" is a real value (off), not "unset".
+        _rb = get_setting(f"model.{self.model_type}.reasoning_budget", "", "")
+        if str(_rb).strip() == "":
+            _rb = get_setting("model.main.reasoning_budget", "JARVIS_REST_REASONING_BUDGET", "")
+        try:
+            self._default_reasoning_budget: Optional[int] = (
+                int(_rb) if str(_rb).strip() not in ("", "None") else None
+            )
+        except (TypeError, ValueError):
+            self._default_reasoning_budget = None
+
         logger.info(f"🌐 Initialized REST backend for {self.provider}")
         logger.debug(f"🔗 Base URL: {self.base_url}")
         logger.debug(f"🔑 Auth type: {self.auth_type}")
@@ -248,6 +264,7 @@ class RestClient(LLMBackendBase):
             payload["tool_choice"] = params.tool_choice
         if params.max_tokens is not None:
             payload["max_tokens"] = params.max_tokens
+        self._apply_reasoning(payload, params.reasoning_budget)
 
         endpoint = self._get_endpoint_for_provider()
         url = urljoin(self.base_url, endpoint)
@@ -281,24 +298,59 @@ class RestClient(LLMBackendBase):
             "total_tokens": estimated_tokens
         }
     
+    def _apply_reasoning(self, payload: Dict[str, Any], req_budget: Optional[int]) -> None:
+        """Apply the effective thinking/reasoning control to an OpenAI-style payload.
+
+        Precedence: the per-request budget wins, else the slot default from
+        settings (blank → None → leave the server on its own default).
+
+        IMPORTANT (Qwen3.5 on llama-server): the `--reasoning-budget 0` launch flag
+        AND a `reasoning_budget` request field are BOTH ignored by this model — it
+        keeps emitting a <think> block regardless (measured 2026-08-04). The ONLY
+        thing that actually suppresses thinking is the chat template's
+        `enable_thinking` kwarg. So we map budget==0 → enable_thinking=false (the
+        fast voice default) and any other value → enable_thinking=true. We still
+        forward `reasoning_budget` for OpenAI servers that DO honor it (a harmless
+        unknown field where they don't). N>0 (cap) currently degrades to "thinking
+        on, uncapped" — acceptable, our only real use is 0=off for voice.
+        """
+        rb = req_budget if req_budget is not None else self._default_reasoning_budget
+        if rb is None:
+            return
+        payload["chat_template_kwargs"] = {"enable_thinking": rb != 0}
+        payload["reasoning_budget"] = rb
+
     async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
         """Chat method with temperature support"""
         return await self.chat_with_temperature(messages, temperature)
-    
-    async def chat_with_temperature(self, messages: List[Dict[str, str]], temperature: float = 0.7) -> str:
+
+    async def chat_with_temperature(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        reasoning_budget: Optional[int] = None,
+    ) -> str:
         """Send chat request with temperature control"""
         start_time = time.time()
-        
+
         # Format messages for the provider
         formatted_data = self._format_messages_for_provider(messages)
-        
+
         # Add temperature and other parameters
         if self.request_format == "openai":
             formatted_data["temperature"] = temperature
+            if max_tokens is not None:
+                formatted_data["max_tokens"] = max_tokens
+            self._apply_reasoning(formatted_data, reasoning_budget)
         elif self.request_format == "ollama":
             formatted_data["options"] = {"temperature": temperature}
+            if max_tokens is not None:
+                formatted_data["options"]["num_predict"] = max_tokens
         elif self.request_format == "chatml":
             formatted_data["temperature"] = temperature
+            if max_tokens is not None:
+                formatted_data["max_tokens"] = max_tokens
         
         # Get endpoint
         endpoint = self._get_endpoint_for_provider()
@@ -407,7 +459,12 @@ class RestClient(LLMBackendBase):
         async def _run() -> ChatResult:
             if params.tools:
                 return await self._chat_completion_with_tools(dict_messages, params)
-            content = await self.chat_with_temperature(dict_messages, params.temperature)
+            content = await self.chat_with_temperature(
+                dict_messages,
+                params.temperature,
+                max_tokens=params.max_tokens,
+                reasoning_budget=params.reasoning_budget,
+            )
             return ChatResult(
                 content=content,
                 usage=self.last_usage,

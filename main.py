@@ -100,6 +100,32 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Database pre-warm failed (non-fatal): {e}")
 
+    # Pre-warm the embedding model so the first memory-recall request never pays
+    # the ~4s cold load on the voice hot path. It's a lazy singleton otherwise, and
+    # because voice turns are sporadic the encoder kept getting hit cold — adding
+    # ~6.5s (cold load + first-embed warmup) before the chat model was even called.
+    # It's a single shared ~80MB CPU encoder (all-MiniLM-L6-v2), tenant-agnostic
+    # (isolation lives in the pgvector rows, not the model), so one warm instance
+    # serves every household/node. Warmed in a daemon thread so startup + /health
+    # stay instant; by the time the first real recall lands it's already resident.
+    try:
+        import threading as _threading
+
+        def _warm_embeddings() -> None:
+            try:
+                from managers.embedding_manager import EmbeddingManager
+
+                EmbeddingManager.get_instance()._ensure_loaded()
+                logger.info("Embedding model pre-warmed at startup")
+            except Exception as e:  # noqa: BLE001 — non-fatal, falls back to lazy load
+                logger.warning(f"Embedding pre-warm failed (non-fatal): {e}")
+
+        _threading.Thread(
+            target=_warm_embeddings, name="embed-warmup", daemon=True
+        ).start()
+    except Exception as e:
+        logger.warning(f"Embedding pre-warm thread failed to start (non-fatal): {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():

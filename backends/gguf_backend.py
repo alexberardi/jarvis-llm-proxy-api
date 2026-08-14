@@ -669,6 +669,80 @@ class GGUFClient(LLMBackendBase):
         if hasattr(self, 'power_metrics'):
             self.power_metrics.stop_monitoring()
 
+    @staticmethod
+    def _apply_no_think_prefill(
+        legacy_messages: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        r"""Force a reasoning model (Qwen3.5) to SKIP its <think> block by seeding
+        the assistant turn with an already-closed, empty one.
+
+        ══════════════════════════════════════════════════════════════════════════
+        WHY THIS EXISTS — read this before "cleaning it up" (it is load-bearing)
+        ══════════════════════════════════════════════════════════════════════════
+        Qwen3.5 is a *reasoning* model. Its chat template opens a `<think>\n` block
+        on EVERY generation and the model fills it with a multi-hundred-token
+        "Thinking Process:" monologue before it answers. On the VOICE hot path that
+        is catastrophic on two fronts:
+          1. Latency — it's the dominant cost (several seconds of hidden decode,
+             generated twice when the force-tool-calls guard retries), and
+          2. Silence — if the think block runs past max_tokens, the assistant
+             message comes back EMPTY, so the user hears NOTHING at all.
+
+        The documented cure is llama.cpp's `--reasoning-budget 0` (optionally with
+        `--chat-template-kwargs '{"enable_thinking":false}'`). BUT those are
+        **llama-server** flags. We serve in-process via llama-cpp-python, and its
+        `create_chat_completion` (verified on 0.3.34) exposes NEITHER a
+        reasoning-budget NOR a chat_template_kwargs / enable_thinking parameter —
+        there is simply no knob to flip. And the soft `/no_think` control token that
+        works on Qwen3-8B is *unreliable* on Qwen3.5 (upstream: ggml-org/llama.cpp
+        issue #20182) — the model cheerfully ignores it and thinks anyway.
+
+        What DOES reliably work (measured directly against our loaded 9B): seed the
+        assistant turn with an empty, already-closed think block —
+        `<think>\n\n</think>\n\n` — which is EXACTLY what Qwen's own
+        `enable_thinking=false` template branch emits. Given a system prompt that
+        firmly pins the output format (ours always does: the JSON
+        `{"message":...,"tool_calls":[...]}` contract), the model continues straight
+        into the answer with ZERO reasoning. Measured on the live 9B for
+        "what are my dogs named?": 126 → 13 completion tokens, 0 think tokens,
+        consistent across direct-answer AND tool queries.
+
+        We deliberately keep the prefill FORMAT-AGNOSTIC (empty block, no `{`
+        anchor): a `{` anchor also suppresses thinking but couples this server to
+        the JSON output shape and pushed the model toward message-only replies
+        (hurting tool calls). The empty block leaves tool-calling free and relies on
+        the caller's format directive to anchor the answer — which our prompts
+        always provide.
+
+        SELF-GATING via `/no_think`: ONLY our Qwen3-family prompt providers append
+        `/no_think` to the user turn (they do so whenever `model.include_thinking`
+        is off). Non-thinking models (Llama, Mistral, …) never carry that token, so
+        keying off its presence makes this a strict no-op for every model except the
+        exact one that needs it — no per-model config, no new request field, no
+        cross-service plumbing. The empty `<think></think>` that comes back in the
+        content is removed by the prompt provider's existing think-stripper before
+        it can reach TTS.
+
+        Escalation path if this ever proves flaky: serve the 9B via llama-server with
+        `--reasoning-budget 0` (guaranteed, but a bigger serving-architecture change).
+        ══════════════════════════════════════════════════════════════════════════
+        """
+        if not legacy_messages:
+            return legacy_messages
+        # Only Qwen3 providers emit `/no_think`; its presence == "caller wants no
+        # chain-of-thought". Safe, self-gating, model-agnostic.
+        wants_no_think = any(
+            m.get("role") == "user" and "/no_think" in (m.get("content") or "")
+            for m in legacy_messages
+        )
+        if not wants_no_think:
+            return legacy_messages
+        # Idempotent: never stack a second prefill (e.g. if a caller already primed).
+        last = legacy_messages[-1]
+        if last.get("role") == "assistant" and "</think>" in (last.get("content") or ""):
+            return legacy_messages
+        return [*legacy_messages, {"role": "assistant", "content": "<think>\n\n</think>\n\n"}]
+
     def generate_text_chat(
         self,
         model_cfg: Any,
@@ -688,6 +762,9 @@ class GGUFClient(LLMBackendBase):
                 part.text for part in msg.content if isinstance(part, TextPart)
             )
             legacy_messages.append({"role": msg.role, "content": text_content})
+
+        # Reasoning-suppression prefill for Qwen3.5 (see _apply_no_think_prefill).
+        legacy_messages = self._apply_no_think_prefill(legacy_messages)
 
         effective_max_tokens = params.max_tokens or self.max_tokens
 
@@ -793,6 +870,9 @@ class GGUFClient(LLMBackendBase):
                 part.text for part in msg.content if isinstance(part, TextPart)
             )
             legacy_messages.append({"role": msg.role, "content": text_content})
+
+        # Reasoning-suppression prefill for Qwen3.5 (see _apply_no_think_prefill).
+        legacy_messages = self._apply_no_think_prefill(legacy_messages)
 
         effective_max_tokens: int = params.max_tokens or self.max_tokens
 
