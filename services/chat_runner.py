@@ -595,6 +595,8 @@ async def run_chat_completion(
         adapter_settings=adapter_settings_dict,
         tools=tools_list,
         tool_choice=tool_choice,
+        # None here → the backend falls back to the model.<slot>.reasoning_budget setting.
+        reasoning_budget=req.reasoning_budget,
     )
 
     try:
