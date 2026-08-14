@@ -21,4 +21,4 @@ trl>=0.7.0
 xformers  # Memory efficient attention (optional)
 
 # Tokenizers for fast processing
-tokenizers>=0.13.0
+tokenizers>=0.23.1
