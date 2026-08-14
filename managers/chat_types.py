@@ -41,6 +41,12 @@ class GenerationParams:
     adapter_settings: Optional[dict] = None
     tools: Optional[list] = None  # OpenAI-format tool definitions for native tool calling
     tool_choice: Optional[Any] = None  # "auto", "none", or {"type": "function", "function": {"name": "..."}}
+    # Thinking/reasoning token budget for reasoning models (Qwen3.5 etc.): 0 = off
+    # (immediate end of thinking), -1 = unrestricted, N = cap. None here means "not
+    # specified on the request" → the resolver falls back to the model.<slot>.reasoning_budget
+    # setting. On the REST/llama-server path it maps to `reasoning_budget`; on the
+    # in-process llama.cpp path 0 drives the empty-<think> prefill (see GGUFClient).
+    reasoning_budget: Optional[int] = None
 
 
 @dataclass

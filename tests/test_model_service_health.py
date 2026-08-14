@@ -227,3 +227,65 @@ def test_reload_onto_broken_config_returns_503_degraded(model_service, monkeypat
     assert body["status"] == "degraded"
     assert body["slots"]["live"]["status"] == "failed"
     assert "broken model config" in body["slots"]["live"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# /internal/model/engine  (allows_caching → command-center warmup prime)
+# ---------------------------------------------------------------------------
+
+
+def _force_engine(ms, monkeypatch, engine: str):
+    """Force the resolved inference engine name the endpoint reports.
+
+    No model is loaded in the fixture, so model_manager.live_model is None and
+    get_engine_info falls back to the inference.general.engine setting.
+    """
+    monkeypatch.setenv("MODEL_SERVICE_TOKEN", "test-token")
+    monkeypatch.setattr(
+        ms,
+        "get_setting",
+        lambda key, env_fallback, default, value_type="string": (
+            engine if key == "inference.general.engine" else default
+        ),
+    )
+
+
+def test_engine_info_rest_allows_caching(model_service, monkeypatch):
+    """REST proxying to the llama-server sidecar supports prefix caching, so the
+    engine MUST report allows_caching=True. Otherwise command-center skips the
+    warmup prime and every voice turn pays a full cold prefill (the 2026-08 prod
+    latency bug)."""
+    ms = model_service
+    _force_engine(ms, monkeypatch, "rest")
+    with TestClient(ms.app) as client:
+        resp = client.get(
+            "/internal/model/engine", headers={"X-Internal-Token": "test-token"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inference_engine"] == "rest"
+    assert body["allows_caching"] is True
+
+
+def test_engine_info_llama_cpp_allows_caching(model_service, monkeypatch):
+    ms = model_service
+    _force_engine(ms, monkeypatch, "llama_cpp")
+    with TestClient(ms.app) as client:
+        resp = client.get(
+            "/internal/model/engine", headers={"X-Internal-Token": "test-token"}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["allows_caching"] is True
+
+
+def test_engine_info_transformers_no_caching(model_service, monkeypatch):
+    """A backend without prefix caching (transformers) must still report
+    allows_caching=False so CC doesn't waste a warmup call."""
+    ms = model_service
+    _force_engine(ms, monkeypatch, "transformers")
+    with TestClient(ms.app) as client:
+        resp = client.get(
+            "/internal/model/engine", headers={"X-Internal-Token": "test-token"}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["allows_caching"] is False

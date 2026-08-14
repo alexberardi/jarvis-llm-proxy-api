@@ -601,6 +601,8 @@ async def model_chat_stream(
             if req.adapter_settings and req.adapter_settings.enabled
             else None
         ),
+        # None here → the backend falls back to the model.<slot>.reasoning_budget setting.
+        reasoning_budget=req.reasoning_budget,
     )
 
     request_id = x_request_id or uuid.uuid4().hex
@@ -776,9 +778,14 @@ async def get_engine_info(x_internal_token: str | None = Header(default=None)):
         inference_engine = model_manager.live_model.inference_engine
 
     # llama.cpp and MLX benefit from warmup messages (prefix caching reuses KV cache for matching prefixes)
+    # REST proxying to a llama.cpp server (our llama-server sidecar) benefits too: the remote caches the
+    # prompt prefix, so command-center's warmup prefill primes it and the real voice turn reuses it. Before
+    # this, "rest" reported allows_caching=False → CC skipped the prime → every voice turn paid a full cold
+    # prefill (~1.6s on the ~9-10k-token voice prompt). Enabling warmup for a non-caching REST target only
+    # costs one harmless max_tokens=1 call on conversation/start.
     # vLLM has automatic prefix caching but doesn't benefit from explicit warmup messages
     # transformers has no prefix caching optimization
-    allows_caching = inference_engine in ("llama_cpp", "mlx")
+    allows_caching = inference_engine in ("llama_cpp", "mlx", "rest")
 
     return {
         "inference_engine": inference_engine,
