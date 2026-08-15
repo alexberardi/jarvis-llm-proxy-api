@@ -12,7 +12,7 @@ dependencies = [
     "python-dotenv",
     # <5.4: 5.4.0+ hard-imports torchcodec → needs FFmpeg the images lack
     # → import error → /v1/embeddings 500 (see requirements-base.txt).
-    "sentence-transformers>=2.2.0,<5.4",
+    "sentence-transformers>=5.7.0",
 ]
 
 [project.optional-dependencies]
