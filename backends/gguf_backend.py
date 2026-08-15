@@ -672,6 +672,7 @@ class GGUFClient(LLMBackendBase):
     @staticmethod
     def _apply_no_think_prefill(
         legacy_messages: List[Dict[str, str]],
+        reasoning_budget: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         r"""Force a reasoning model (Qwen3.5) to SKIP its <think> block by seeding
         the assistant turn with an already-closed, empty one.
@@ -723,6 +724,12 @@ class GGUFClient(LLMBackendBase):
         content is removed by the prompt provider's existing think-stripper before
         it can reach TTS.
 
+        A per-request `reasoning_budget=0` triggers the same prefill — that is the
+        backend-agnostic "thinking off" contract (queue jobs and REST callers use
+        it), and on this in-process path the prefill is the only mechanism that
+        actually implements it. Any other budget value is ignored here (no way to
+        cap thinking tokens through create_chat_completion).
+
         Escalation path if this ever proves flaky: serve the 9B via llama-server with
         `--reasoning-budget 0` (guaranteed, but a bigger serving-architecture change).
         ══════════════════════════════════════════════════════════════════════════
@@ -730,8 +737,9 @@ class GGUFClient(LLMBackendBase):
         if not legacy_messages:
             return legacy_messages
         # Only Qwen3 providers emit `/no_think`; its presence == "caller wants no
-        # chain-of-thought". Safe, self-gating, model-agnostic.
-        wants_no_think = any(
+        # chain-of-thought". Safe, self-gating, model-agnostic. reasoning_budget=0
+        # is the explicit request-level equivalent.
+        wants_no_think = reasoning_budget == 0 or any(
             m.get("role") == "user" and "/no_think" in (m.get("content") or "")
             for m in legacy_messages
         )
@@ -764,7 +772,7 @@ class GGUFClient(LLMBackendBase):
             legacy_messages.append({"role": msg.role, "content": text_content})
 
         # Reasoning-suppression prefill for Qwen3.5 (see _apply_no_think_prefill).
-        legacy_messages = self._apply_no_think_prefill(legacy_messages)
+        legacy_messages = self._apply_no_think_prefill(legacy_messages, params.reasoning_budget)
 
         effective_max_tokens = params.max_tokens or self.max_tokens
 
@@ -782,7 +790,7 @@ class GGUFClient(LLMBackendBase):
                     messages=legacy_messages,
                     temperature=params.temperature,
                     max_tokens=effective_max_tokens,
-                    top_p=self.top_p,
+                    top_p=params.top_p if params.top_p is not None else self.top_p,
                     # Pass response_format for JSON support
                     response_format=params.response_format,
                 )
@@ -808,11 +816,11 @@ class GGUFClient(LLMBackendBase):
                     "messages": legacy_messages,  # type: ignore
                     "temperature": params.temperature,
                     "max_tokens": effective_max_tokens,
-                    "top_p": self.top_p,
+                    "top_p": params.top_p if params.top_p is not None else self.top_p,
                     "top_k": self.top_k,
                     "repeat_penalty": self.repeat_penalty,
                     "stream": False,
-                    "seed": random.randint(0, 2**32 - 1),
+                    "seed": params.seed if params.seed is not None else random.randint(0, 2**32 - 1),
                     "mirostat_mode": self.mirostat_mode,
                     "mirostat_tau": self.mirostat_tau,
                     "mirostat_eta": self.mirostat_eta,
@@ -872,7 +880,7 @@ class GGUFClient(LLMBackendBase):
             legacy_messages.append({"role": msg.role, "content": text_content})
 
         # Reasoning-suppression prefill for Qwen3.5 (see _apply_no_think_prefill).
-        legacy_messages = self._apply_no_think_prefill(legacy_messages)
+        legacy_messages = self._apply_no_think_prefill(legacy_messages, params.reasoning_budget)
 
         effective_max_tokens: int = params.max_tokens or self.max_tokens
 
@@ -886,12 +894,12 @@ class GGUFClient(LLMBackendBase):
                 "messages": legacy_messages,
                 "temperature": params.temperature,
                 "max_tokens": effective_max_tokens,
-                "top_p": self.top_p,
+                "top_p": params.top_p if params.top_p is not None else self.top_p,
                 "top_k": self.top_k,
                 "repeat_penalty": self.repeat_penalty,
                 "stream": True,
                 # Fresh per-request seed — see non-streaming path above.
-                "seed": random.randint(0, 2**32 - 1),
+                "seed": params.seed if params.seed is not None else random.randint(0, 2**32 - 1),
                 "mirostat_mode": self.mirostat_mode,
                 "mirostat_tau": self.mirostat_tau,
                 "mirostat_eta": self.mirostat_eta,

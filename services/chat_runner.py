@@ -589,7 +589,9 @@ async def run_chat_completion(
 
     params = GenerationParams(
         temperature=req.temperature or 0.7,
+        top_p=req.top_p,
         max_tokens=req.max_tokens,
+        seed=req.seed,
         stream=req.stream or False,
         response_format=response_format_dict,
         adapter_settings=adapter_settings_dict,

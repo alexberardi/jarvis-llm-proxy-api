@@ -594,7 +594,9 @@ async def model_chat_stream(
     normalized = normalize_messages(req.messages)
     params = GenerationParams(
         temperature=req.temperature or 0.7,
+        top_p=req.top_p,
         max_tokens=req.max_tokens,
+        seed=req.seed,
         stream=True,
         adapter_settings=(
             req.adapter_settings.model_dump()

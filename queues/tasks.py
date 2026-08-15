@@ -119,9 +119,13 @@ def _process_chat_job(payload: Dict[str, Any]) -> Dict[str, Any]:
             model="background",
             messages=request_body.get("messages") or [],
             temperature=sampling.get("temperature", request_body.get("temperature", 0.7)),
+            top_p=sampling.get("top_p"),
             max_tokens=sampling.get("max_tokens") or request_body.get("max_tokens"),
+            seed=sampling.get("seed"),
             stream=False,
             response_format=response_format,
+            # None → the model.background.reasoning_budget setting governs.
+            reasoning_budget=request_body.get("reasoning_budget"),
         )
 
         model_service_url = get_setting("model_service.url", "MODEL_SERVICE_URL", "")

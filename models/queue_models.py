@@ -51,6 +51,9 @@ class QueueRequest(BaseModel):
     response_format: Optional[ResponseFormat] = None
     sampling: Optional[SamplingSettings] = None
     timeouts: Optional[TimeoutSettings] = None
+    # Thinking budget for reasoning models: 0=off, -1=unrestricted, N=cap.
+    # None → the model.background.reasoning_budget setting governs.
+    reasoning_budget: Optional[int] = None
 
 
 class AdapterTrainRequest(BaseModel):

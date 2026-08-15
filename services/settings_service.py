@@ -179,6 +179,29 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_BACKGROUND_REST_MODEL_URL",
         requires_reload=True,
     ),
+    SettingDefinition(
+        key="model.background.rest_model_name",
+        category="model.background",
+        value_type="string",
+        default="",
+        description="Model name sent to the background REST backend (overrides model.background.name in requests)",
+        env_fallback="JARVIS_REST_BACKGROUND_MODEL_NAME",
+        requires_reload=True,
+    ),
+    SettingDefinition(
+        key="model.background.reasoning_budget",
+        category="model.background",
+        value_type="string",
+        default="",
+        description=(
+            "Thinking token budget for the BACKGROUND model on a reasoning-capable "
+            "backend: 0 = off, -1 = unrestricted, N = cap. Blank falls back to "
+            "model.main.reasoning_budget, then the server's own --reasoning-budget. "
+            "A queue job may override it per-job via reasoning_budget."
+        ),
+        env_fallback="JARVIS_BACKGROUND_REASONING_BUDGET",
+        requires_reload=True,
+    ),
     # ==================== model.main (legacy, used as fallback) ====================
     SettingDefinition(
         key="model.main.name",

@@ -264,6 +264,10 @@ class RestClient(LLMBackendBase):
             payload["tool_choice"] = params.tool_choice
         if params.max_tokens is not None:
             payload["max_tokens"] = params.max_tokens
+        if params.top_p is not None:
+            payload["top_p"] = params.top_p
+        if params.seed is not None:
+            payload["seed"] = params.seed
         self._apply_reasoning(payload, params.reasoning_budget)
 
         endpoint = self._get_endpoint_for_provider()
@@ -330,6 +334,8 @@ class RestClient(LLMBackendBase):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         reasoning_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        seed: Optional[int] = None,
     ) -> str:
         """Send chat request with temperature control"""
         start_time = time.time()
@@ -342,6 +348,10 @@ class RestClient(LLMBackendBase):
             formatted_data["temperature"] = temperature
             if max_tokens is not None:
                 formatted_data["max_tokens"] = max_tokens
+            if top_p is not None:
+                formatted_data["top_p"] = top_p
+            if seed is not None:
+                formatted_data["seed"] = seed
             self._apply_reasoning(formatted_data, reasoning_budget)
         elif self.request_format == "ollama":
             formatted_data["options"] = {"temperature": temperature}
@@ -464,6 +474,8 @@ class RestClient(LLMBackendBase):
                 params.temperature,
                 max_tokens=params.max_tokens,
                 reasoning_budget=params.reasoning_budget,
+                top_p=params.top_p,
+                seed=params.seed,
             )
             return ChatResult(
                 content=content,
