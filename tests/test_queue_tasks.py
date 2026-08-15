@@ -73,3 +73,49 @@ def test_in_process_fallback_loads_models_before_first_job(
     assert envelope["result"]["content"]
     assert fresh_unloaded_manager.model_states["background"]["status"] == "ready"
     assert fresh_unloaded_manager.background_model is not None
+
+
+def test_job_forwards_reasoning_budget_and_sampling(
+    fresh_unloaded_manager, monkeypatch
+):
+    """reasoning_budget / sampling.top_p / sampling.seed from the job payload must
+    reach the ChatCompletionRequest the worker builds (they were previously
+    dropped by the temperature/max_tokens-only whitelist)."""
+    import services.chat_runner as chat_runner
+    import queues.tasks as tasks
+
+    # No model service configured → the in-process branch.
+    monkeypatch.setattr(tasks, "get_setting", lambda key, env_fallback, default: "")
+
+    captured = {}
+
+    async def _fake_run(manager, req, allow_images=False):
+        captured["req"] = req
+
+        class _R:
+            content = "ok"
+
+        return _R()
+
+    monkeypatch.setattr(chat_runner, "run_chat_completion", _fake_run)
+
+    payload = {
+        "job_id": "job-2",
+        "job_type": "chat",
+        "request": {
+            "messages": [{"role": "user", "content": "hello"}],
+            "sampling": {"temperature": 0.0, "top_p": 0.9, "seed": 7},
+            "reasoning_budget": 0,
+        },
+        "callback": {},
+    }
+
+    envelope = tasks._process_chat_job(payload)
+
+    assert envelope["status"] == "succeeded", envelope.get("error")
+    req = captured["req"]
+    assert req.model == "background"
+    assert req.reasoning_budget == 0
+    assert req.top_p == 0.9
+    assert req.seed == 7
+    assert req.temperature == 0.0

@@ -182,7 +182,8 @@ class VLLMClient(LLMBackendBase):
     def generate(self, messages: List[Dict[str, str]], max_tokens: int = None, temperature: float = 0.7,
                  top_p: float = 0.9, stop: List[str] = None, stream: bool = False,
                  response_format: Optional[Dict[str, Any]] = None,
-                 lora_request: Optional[LoRARequest] = None) -> Union[str, Any]:
+                 lora_request: Optional[LoRARequest] = None,
+                 seed: Optional[int] = None) -> Union[str, Any]:
         """Generate response using vLLM
 
         Args:
@@ -220,6 +221,8 @@ class VLLMClient(LLMBackendBase):
             "max_tokens": max_tokens,
             "stop": stop_tokens,
         }
+        if seed is not None:
+            sampling_kwargs["seed"] = seed
         if structured_outputs is not None:
             sampling_kwargs["structured_outputs"] = structured_outputs
         sampling_params = SamplingParams(**sampling_kwargs)
@@ -324,7 +327,9 @@ class VLLMClient(LLMBackendBase):
         response_text, usage = self.generate(
             messages=legacy_messages,
             temperature=params.temperature,
+            top_p=params.top_p if params.top_p is not None else 0.9,
             max_tokens=params.max_tokens,
+            seed=params.seed,
             response_format=params.response_format,
             lora_request=per_request_lora,
         )

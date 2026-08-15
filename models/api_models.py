@@ -85,7 +85,9 @@ class ChatCompletionRequest(APIModel):
     model: str
     messages: List[Message]
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    seed: Optional[int] = None
     stream: Optional[bool] = None
     response_format: Optional[ResponseFormat] = None
     tools: Optional[List[ToolDefinition]] = None

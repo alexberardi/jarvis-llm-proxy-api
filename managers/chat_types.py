@@ -34,7 +34,11 @@ class NormalizedMessage:
 @dataclass
 class GenerationParams:
     temperature: float = 0.7
+    # None → backend default (inference.general.top_p for GGUF, server default for REST)
+    top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    # None → fresh random seed per request (GGUF) / server default (REST)
+    seed: Optional[int] = None
     stream: bool = False
     response_format: Optional[dict] = None  # For JSON output: {"type": "json_object"}
     # Per-request adapter settings: {"hash": str, "scale": float, "enabled": bool}

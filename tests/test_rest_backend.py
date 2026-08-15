@@ -109,7 +109,10 @@ class TestSyncBridgeLoopStability:
 
         backend = self._backend()
 
-        async def _fake_chat(dict_messages, temperature, max_tokens=None, reasoning_budget=None):
+        async def _fake_chat(
+            dict_messages, temperature, max_tokens=None, reasoning_budget=None,
+            top_p=None, seed=None,
+        ):
             loops.append(id(_asyncio.get_running_loop()))
             return "ok"
 
@@ -176,3 +179,127 @@ class TestSyncBridgeLoopStability:
         assert bg is not None, "sync caller bypassed the dedicated loop"
         assert not bg.is_closed()
         assert loops == [id(bg), id(bg)], f"sync caller alternated: {loops}"
+
+
+class TestReasoningBudgetResolution:
+    """Per-slot reasoning-budget defaults + how requests reach the payload.
+
+    The background slot reads ``model.background.reasoning_budget`` (declared in
+    SETTINGS_DEFINITIONS as of the Qwen3.8 background-model work); the live slot
+    must never inherit the background value.
+    """
+
+    def test_background_slot_reads_its_declared_setting(self):
+        values = {"model.background.reasoning_budget": "-1"}
+        with _patch_settings(values), patch.dict(os.environ, {}, clear=True):
+            client = RestClient("http://example.invalid/v1", model_type="background")
+        assert client._default_reasoning_budget == -1
+
+    def test_live_slot_not_polluted_by_background_budget(self):
+        values = {
+            "model.background.reasoning_budget": "-1",
+            "model.live.reasoning_budget": "0",
+        }
+        with _patch_settings(values), patch.dict(os.environ, {}, clear=True):
+            live = RestClient("http://example.invalid/v1", model_type="live")
+            bg = RestClient("http://example.invalid/v1", model_type="background")
+        assert live._default_reasoning_budget == 0
+        assert bg._default_reasoning_budget == -1
+
+    def test_env_fallback_when_slot_setting_blank(self):
+        with _patch_settings({}), patch.dict(
+            os.environ, {"JARVIS_REST_REASONING_BUDGET": "-1"}, clear=True
+        ):
+            client = RestClient("http://example.invalid/v1", model_type="background")
+        assert client._default_reasoning_budget == -1
+
+    def test_apply_reasoning_zero_disables_thinking(self):
+        with _patch_settings({}), patch.dict(os.environ, {}, clear=True):
+            client = RestClient("http://example.invalid/v1")
+        payload = {}
+        client._apply_reasoning(payload, 0)
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+        assert payload["reasoning_budget"] == 0
+
+    def test_apply_reasoning_unset_sends_nothing(self):
+        with _patch_settings({}), patch.dict(os.environ, {}, clear=True):
+            client = RestClient("http://example.invalid/v1")
+        payload = {}
+        client._apply_reasoning(payload, None)
+        assert payload == {}
+
+
+class TestSamplingParamsReachPayload:
+    """Per-request top_p / seed / reasoning_budget must land in the OpenAI-style
+    payload (they were previously dropped at GenerationParams construction)."""
+
+    def _client_with_captured_post(self, captured):
+        import asyncio as _asyncio
+
+        with _patch_settings({}), patch.dict(os.environ, {}, clear=True):
+            client = RestClient("http://example.invalid/v1", model_type="background")
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "choices": [
+                        {"message": {"content": "ok"}, "finish_reason": "stop"}
+                    ]
+                }
+
+        class _FakePoster:
+            async def post(self, url, json=None, headers=None):
+                captured["payload"] = json
+                return _FakeResponse()
+
+        client.client = _FakePoster()
+        return client, _asyncio
+
+    def test_tools_path_forwards_top_p_seed_and_budget(self):
+        captured = {}
+        client, _asyncio = self._client_with_captured_post(captured)
+        params = GenerationParams(
+            temperature=0.3,
+            top_p=0.42,
+            seed=7,
+            reasoning_budget=-1,
+            tools=[{"type": "function", "function": {"name": "noop"}}],
+        )
+        _asyncio.run(client._chat_completion_with_tools([{"role": "user", "content": "hi"}], params))
+
+        payload = captured["payload"]
+        assert payload["top_p"] == 0.42
+        assert payload["seed"] == 7
+        assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+        assert payload["reasoning_budget"] == -1
+
+    def test_plain_path_forwards_top_p_and_seed(self):
+        captured = {}
+        client, _asyncio = self._client_with_captured_post(captured)
+        _asyncio.run(
+            client.chat_with_temperature(
+                [{"role": "user", "content": "hi"}],
+                0.3,
+                top_p=0.9,
+                seed=11,
+                reasoning_budget=0,
+            )
+        )
+        payload = captured["payload"]
+        assert payload["top_p"] == 0.9
+        assert payload["seed"] == 11
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_omitted_params_stay_out_of_payload(self):
+        captured = {}
+        client, _asyncio = self._client_with_captured_post(captured)
+        _asyncio.run(
+            client.chat_with_temperature([{"role": "user", "content": "hi"}], 0.3)
+        )
+        payload = captured["payload"]
+        assert "top_p" not in payload
+        assert "seed" not in payload
+        assert "chat_template_kwargs" not in payload

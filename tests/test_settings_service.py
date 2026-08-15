@@ -468,3 +468,23 @@ class TestDiscoverInstalledModelPaths:
         assert MODEL_PATH_SETTING_KEYS == frozenset(
             {"model.live.name", "model.background.name", "model.main.name"}
         )
+
+
+class TestBackgroundSlotDeclarations:
+    """Keys the REST backend reads per-slot MUST be declared — the settings client
+    returns the caller default for undeclared keys before ever querying the DB,
+    which silently no-ops any DB write (the model.background.reasoning_budget trap,
+    found during the Qwen3.8 background-model work)."""
+
+    def _defs(self):
+        return {d.key: d for d in SETTINGS_DEFINITIONS}
+
+    def test_background_reasoning_budget_is_declared(self):
+        defs = self._defs()
+        assert "model.background.reasoning_budget" in defs
+        assert defs["model.background.reasoning_budget"].requires_reload is True
+
+    def test_background_rest_model_name_is_declared(self):
+        defs = self._defs()
+        assert "model.background.rest_model_name" in defs
+        assert defs["model.background.rest_model_name"].requires_reload is True

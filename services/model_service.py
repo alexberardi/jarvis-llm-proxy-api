@@ -24,7 +24,7 @@ from services.streaming import ClosingStreamingResponse
 from services.date_keys import extract_date_keys_fast, build_date_hint_message
 from services.date_key_matcher import extract_date_keys as extract_date_keys_regex
 from api.settings_routes import router as settings_router
-from services.settings_helpers import get_setting
+from services.settings_helpers import get_setting, resolve_slot_reasoning_budget
 
 load_dotenv()
 
@@ -594,15 +594,22 @@ async def model_chat_stream(
     normalized = normalize_messages(req.messages)
     params = GenerationParams(
         temperature=req.temperature or 0.7,
+        top_p=req.top_p,
         max_tokens=req.max_tokens,
+        seed=req.seed,
         stream=True,
         adapter_settings=(
             req.adapter_settings.model_dump()
             if req.adapter_settings and req.adapter_settings.enabled
             else None
         ),
-        # None here → the backend falls back to the model.<slot>.reasoning_budget setting.
-        reasoning_budget=req.reasoning_budget,
+        # Request value wins; else resolve the REQUESTED slot's setting (see
+        # chat_runner — the shared-instance default is keyed to "live").
+        reasoning_budget=(
+            req.reasoning_budget
+            if req.reasoning_budget is not None
+            else resolve_slot_reasoning_budget(req.model)
+        ),
     )
 
     request_id = x_request_id or uuid.uuid4().hex
