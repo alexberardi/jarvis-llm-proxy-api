@@ -24,12 +24,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Build-time dependencies (git needed for pip git+ installs)
+# Build-time dependencies (git needed for pip git+ installs).
+#
+# python3.11 comes from the DEADSNAKES PPA, not jammy's archive: Ubuntu
+# 22.04 froze its python3.11 package at 3.11.0rc1 (a 2022 release
+# candidate), which lacks sys.get_int_max_str_digits — torch >=2.13's
+# dynamo polyfills reference it unconditionally at import, which killed
+# `import sentence_transformers` and 500'd /v1/embeddings on prod
+# (2026-08-15: CC memory recall + the embedding sweep both died).
+# Deadsnakes ships current 3.11.x (verified 3.11.15 has the API).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3.11 \
     python3.11-dev \
     python3.11-venv \
+    python3.11-distutils \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -77,10 +89,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Runtime system dependencies
 # gcc is required by torch inductor / triton for JIT CUDA graph compilation
+# python3.11 from deadsnakes — jammy's is 3.11.0rc1; see the builder stage
+# comment for the full story. Both stages MUST use the same source or the
+# dist-packages copied from the builder run on a mismatched interpreter.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
     python3.11-dev \
+    python3.11-distutils \
     libgomp1 \
     curl \
     gcc \
