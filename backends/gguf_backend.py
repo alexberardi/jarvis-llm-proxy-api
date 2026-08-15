@@ -791,6 +791,7 @@ class GGUFClient(LLMBackendBase):
                     temperature=params.temperature,
                     max_tokens=effective_max_tokens,
                     top_p=params.top_p if params.top_p is not None else self.top_p,
+                    seed=params.seed,
                     # Pass response_format for JSON support
                     response_format=params.response_format,
                 )

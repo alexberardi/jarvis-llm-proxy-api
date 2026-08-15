@@ -21,6 +21,7 @@ from managers.chat_types import (
     ChatResult,
 )
 from models.api_models import Message, ChatCompletionRequest
+from services.settings_helpers import resolve_slot_reasoning_budget
 
 
 # JSON system message to inject when response_format is json_object
@@ -470,9 +471,14 @@ Return the corrected, complete JSON:"""
 
     retry_params = GenerationParams(
         temperature=max(0.3, params.temperature - 0.2),
+        top_p=params.top_p,
         max_tokens=retry_max_tokens,
+        seed=params.seed,
         stream=params.stream,
         response_format=params.response_format,
+        # Preserve the thinking contract on retry: losing a 0 here would let the
+        # repair pass think, which is slower AND more likely to re-break the JSON.
+        reasoning_budget=params.reasoning_budget,
     )
 
     for attempt in range(max_retries):
@@ -597,8 +603,15 @@ async def run_chat_completion(
         adapter_settings=adapter_settings_dict,
         tools=tools_list,
         tool_choice=tool_choice,
-        # None here → the backend falls back to the model.<slot>.reasoning_budget setting.
-        reasoning_budget=req.reasoning_budget,
+        # Request value wins; else resolve the REQUESTED slot's setting here — the
+        # backend instance's own default is keyed on the slot it was built for,
+        # which is "live" whenever the slots share one instance, so background
+        # requests would otherwise never see model.background.reasoning_budget.
+        reasoning_budget=(
+            req.reasoning_budget
+            if req.reasoning_budget is not None
+            else resolve_slot_reasoning_budget(req.model)
+        ),
     )
 
     try:
