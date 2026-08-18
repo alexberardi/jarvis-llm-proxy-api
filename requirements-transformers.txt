@@ -2,7 +2,7 @@
 # Install with: pip install -r requirements-base.txt -r requirements-transformers.txt
 
 # Core transformers libraries
-transformers>=4.30.0
+transformers>=5.15.0
 torch>=2.13.0
 accelerate>=1.14.0
 
