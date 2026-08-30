@@ -3,6 +3,7 @@ import httpx
 import json
 import logging
 import os
+import queue
 import threading
 import time
 from typing import List, Dict, Any, Optional
@@ -13,6 +14,35 @@ from backends.base import LLMBackendBase
 from services.settings_helpers import get_int_setting, get_setting
 
 logger = logging.getLogger("uvicorn")
+
+
+def _merge_tool_call_deltas(
+    acc: Optional[List[Dict[str, Any]]], deltas: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Fold streamed OpenAI tool_call fragments into whole tool calls.
+
+    Streamed tool calls arrive split across frames and keyed by ``index``: the
+    name usually lands once, the JSON arguments accumulate a few characters at
+    a time. Concatenating in arrival order without honouring ``index`` corrupts
+    parallel tool calls into one, so merge per index.
+    """
+    merged = list(acc or [])
+    for d in deltas:
+        idx = d.get("index", 0)
+        while len(merged) <= idx:
+            merged.append({"id": None, "type": "function",
+                           "function": {"name": None, "arguments": ""}})
+        slot = merged[idx]
+        if d.get("id"):
+            slot["id"] = d["id"]
+        if d.get("type"):
+            slot["type"] = d["type"]
+        fn = d.get("function") or {}
+        if fn.get("name"):
+            slot["function"]["name"] = fn["name"]
+        if fn.get("arguments"):
+            slot["function"]["arguments"] += fn["arguments"]
+    return merged
 
 
 class RestClient(LLMBackendBase):
@@ -438,6 +468,147 @@ class RestClient(LLMBackendBase):
                 "backend": "rest",
                 "provider": self.provider
             }
+
+    def generate_text_chat_stream(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> Any:
+        """Stream a chat completion token-by-token over the REST API.
+
+        Yields ``{"delta": "..."}`` per token and one terminal
+        ``{"done": True, "content", "usage", "tool_calls", "finish_reason"}``.
+
+        Added 2026-08-30. Prod moved ``live`` onto the llama-server sidecars on
+        08-27 (42543fc), which routes generation through this backend — and this
+        backend had no streaming, so every phone-call turn died on
+
+            POST /internal/model/chat/stream -> 501
+
+        Voice was unaffected (it uses the non-streaming path), so the only
+        symptom was the caller's "trouble hearing that" fallback, which made a
+        transport failure look like an audio one.
+
+        MUST stay a plain generator function: model_service gates streaming on
+        ``inspect.isgeneratorfunction`` precisely because ``base.py`` defines a
+        non-generator stub, so ``hasattr`` is always true. A coroutine, or a
+        function returning an iterator, silently reads as "no streaming".
+
+        The async body is pumped over the dedicated background loop through a
+        queue rather than iterated directly: ``self.client`` and its connection
+        pool bind to the loop they are first used on, and a throwaway loop
+        poisons the pooled connection for the next call (see the sync-bridge
+        note in ``generate_text_chat``).
+        """
+        dict_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            text_parts = [p.text for p in msg.content if isinstance(p, TextPart)]
+            dict_messages.append({"role": msg.role, "content": " ".join(text_parts)})
+
+        payload: Dict[str, Any] = {
+            "model": self.model_name,
+            "messages": dict_messages,
+            "temperature": params.temperature if params.temperature is not None else 0.7,
+            "stream": True,
+        }
+        if params.max_tokens is not None:
+            payload["max_tokens"] = params.max_tokens
+        if params.top_p is not None:
+            payload["top_p"] = params.top_p
+        if params.seed is not None:
+            payload["seed"] = params.seed
+        if params.tools:
+            payload["tools"] = params.tools
+            if params.tool_choice is not None:
+                payload["tool_choice"] = params.tool_choice
+
+        url = urljoin(self.base_url, self._get_endpoint_for_provider())
+        q: "queue.Queue[Any]" = queue.Queue(maxsize=256)
+        _DONE = object()
+
+        async def _pump() -> None:
+            try:
+                async with self.client.stream(
+                    "POST", url, json=payload, headers=self.headers
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        q.put(("line", line))
+            except Exception as exc:  # noqa: BLE001 — re-raised on the sync side
+                q.put(("error", exc))
+            finally:
+                q.put(_DONE)
+
+        future = asyncio.run_coroutine_threadsafe(_pump(), self._get_background_loop())
+
+        full_content = ""
+        finish_reason = "stop"
+        usage: Dict[str, Any] = {}
+        tool_calls: Optional[List[Dict[str, Any]]] = None
+        started = time.time()
+
+        try:
+            while True:
+                item = q.get()
+                if item is _DONE:
+                    break
+                kind, value = item
+                if kind == "error":
+                    raise value
+
+                line = (value or "").strip()
+                # SSE framing: skip keep-alives (":"), event lines, and blanks.
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    # A single malformed frame must not kill an in-flight call.
+                    logger.debug("REST stream: skipping malformed SSE frame")
+                    continue
+
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+
+                content_piece = delta.get("content")
+                if content_piece:
+                    full_content += content_piece
+                    yield {"delta": content_piece}
+
+                if delta.get("tool_calls"):
+                    tool_calls = _merge_tool_call_deltas(tool_calls, delta["tool_calls"])
+
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+        finally:
+            # The pump owns the response context manager; make sure a consumer
+            # that abandons the generator early doesn't leave it running.
+            future.cancel()
+
+        self.last_usage = usage
+        elapsed = time.time() - started
+        comp = usage.get("completion_tokens", 0)
+        tok_s = comp / elapsed if elapsed > 0 and comp else 0
+        logger.info(
+            f"⏱️  REST stream {comp} completion tokens in {elapsed:.2f}s ({tok_s:.0f} tok/s)"
+        )
+
+        yield {
+            "done": True,
+            "content": full_content,
+            "usage": usage,
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+        }
 
     def generate_text_chat(
         self,
