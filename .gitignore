@@ -298,3 +298,11 @@ scripts/vendor/llama.cpp/
 
 # Generated env-var inventory (scripts output, not config)
 env.generated
+
+# Per-host .env profiles (e.g. .env.local / .env.mac used by scripts/jarvis-profile).
+# These hold REAL tokens, DB passwords and the shared MQTT credential. The
+# existing patterns miss them: `*.env` only matches files ENDING in .env, so
+# `.env.mac` was untracked-but-not-ignored — one `git add .` from publishing
+# secrets to a public repo.
+.env.*
+!.env.example
