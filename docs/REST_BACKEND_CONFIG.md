@@ -54,6 +54,8 @@ JARVIS_REST_AUTH_TOKEN=your_anthropic_api_key
 JARVIS_REST_REQUEST_FORMAT=openai
 ```
 
+With `JARVIS_REST_PROVIDER=anthropic` the key is always sent as `x-api-key` together with `anthropic-version: 2023-06-01` regardless of `JARVIS_REST_AUTH_TYPE` (the Messages API rejects `Authorization: Bearer`), and `max_tokens` — which Anthropic requires on every request — defaults to 4096 when the request omits it.
+
 ### Ollama (Local)
 
 ```bash
