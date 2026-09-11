@@ -7,7 +7,8 @@ Both directions are pure functions so they can be pinned without a socket:
 - OUT: OpenAI tools / tool_choice / messages -> Anthropic request payload
   (system hoisted out of ``messages``, ``tool_calls`` -> ``tool_use`` blocks,
   ``role: "tool"`` -> a user ``tool_result`` block, consecutive same-role
-  messages merged, ``max_tokens`` always present, ``top_p``/``seed`` dropped).
+  messages merged, ``max_tokens`` always present, every sampling knob and
+  ``seed`` dropped, thinking disabled).
 - IN: Anthropic content blocks / stop_reason / usage -> the OpenAI-normalized
   ``ChatResult`` downstream (``services/response_helpers.py`` and the
   command-center service) already understands.
@@ -16,6 +17,7 @@ Both directions are pure functions so they can be pinned without a socket:
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -90,6 +92,11 @@ class TestToolChoiceTranslation:
             "type": "tool",
             "name": "set_timer",
         }
+
+    def test_nameless_tool_object_becomes_any(self) -> None:
+        # ``{"type": "tool"}`` with no name is not a legal Anthropic tool_choice.
+        assert openai_tool_choice_to_anthropic({"type": "tool"}) == {"type": "any"}
+        assert openai_tool_choice_to_anthropic({"type": "tool", "name": ""}) == {"type": "any"}
 
     def test_none_value_is_omitted(self) -> None:
         assert openai_tool_choice_to_anthropic(None) is None
@@ -218,14 +225,45 @@ class TestMessageTranslation:
         ]
 
     def test_missing_tool_call_fields_do_not_explode(self) -> None:
-        # NormalizedMessage -> dict conversion upstream can drop tool_calls /
-        # tool_call_id entirely; the translation must survive their absence.
+        # NormalizedMessage -> dict conversion upstream can drop the tool-call
+        # id; an assistant tool_use still translates, with a generated id.
         _, messages = openai_messages_to_anthropic(
-            [{"role": "assistant", "content": "plain"}, {"role": "tool", "content": "orphan"}]
+            [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": "plain",
+                    "tool_calls": [{"function": {"name": "one", "arguments": "{}"}}],
+                },
+            ]
         )
 
-        assert messages[0]["content"] == [{"type": "text", "text": "plain"}]
-        assert messages[1]["content"][0]["type"] == "tool_result"
+        assert messages[1]["content"][0] == {"type": "text", "text": "plain"}
+        block = messages[1]["content"][1]
+        assert block["type"] == "tool_use"
+        assert block["name"] == "one"
+        assert block["id"], "a tool_use block with an empty id is a 400"
+
+    def test_orphan_tool_result_without_an_id_raises(self) -> None:
+        # ``tool_use_id: ""`` is a 400 from the API; fail loudly instead of
+        # shipping a request that cannot succeed.
+        with pytest.raises(ValueError, match="tool_call_id"):
+            openai_messages_to_anthropic(
+                [{"role": "user", "content": "go"}, {"role": "tool", "content": "orphan"}]
+            )
+
+    def test_leading_assistant_messages_are_dropped(self) -> None:
+        # The Messages API requires the first message to be ``user``.
+        _, messages = openai_messages_to_anthropic(
+            [
+                {"role": "assistant", "content": "hello there"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ack"},
+            ]
+        )
+
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == [{"type": "text", "text": "hi"}]
 
 
 class TestPayload:
@@ -246,17 +284,69 @@ class TestPayload:
 
         assert payload["max_tokens"] == 128
 
-    def test_top_p_and_seed_are_dropped_and_no_openai_only_keys_leak(self) -> None:
+    def test_sampling_params_are_dropped_and_no_openai_only_keys_leak(self) -> None:
         params = GenerationParams(temperature=0.3, top_p=0.9, seed=11, reasoning_budget=0)
         payload = build_anthropic_payload(
             "claude-sonnet-5", [{"role": "user", "content": "hi"}], params, False
         )
 
-        assert payload["temperature"] == 0.3
-        assert "top_p" not in payload, "newer Claude models reject temperature + top_p"
+        # Current Claude models 400 on temperature/top_p/top_k outright.
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert "top_k" not in payload
         assert "seed" not in payload
         assert "chat_template_kwargs" not in payload
         assert "reasoning_budget" not in payload
+
+    def test_thinking_is_disabled_by_default(self) -> None:
+        payload = build_anthropic_payload(
+            "claude-sonnet-5", [{"role": "user", "content": "hi"}], GenerationParams(), False
+        )
+
+        # Adaptive thinking is the default otherwise, and thinking blocks would
+        # then have to be replayed verbatim on the tool-result round trip.
+        assert payload["thinking"] == {"type": "disabled"}
+
+    @pytest.mark.parametrize(
+        "model",
+        ["claude-fable-5", "CLAUDE-FABLE-5.1", "claude-mythos-5.1", "us.anthropic.claude-fable-5"],
+    )
+    def test_thinking_is_omitted_on_fable_and_mythos(self, model) -> None:
+        # Thinking is always on there; ``disabled`` is a 400.
+        payload = build_anthropic_payload(
+            model, [{"role": "user", "content": "hi"}], GenerationParams(), False
+        )
+
+        assert "thinking" not in payload
+
+    def test_default_max_tokens_override_is_honoured(self) -> None:
+        payload = build_anthropic_payload(
+            "claude-sonnet-5",
+            [{"role": "user", "content": "hi"}],
+            GenerationParams(),
+            False,
+            default_max_tokens=777,
+        )
+
+        assert payload["max_tokens"] == 777
+
+    def test_explicit_max_tokens_beats_the_default_override(self) -> None:
+        payload = build_anthropic_payload(
+            "claude-sonnet-5",
+            [{"role": "user", "content": "hi"}],
+            GenerationParams(max_tokens=128),
+            False,
+            default_max_tokens=777,
+        )
+
+        assert payload["max_tokens"] == 128
+
+    def test_empty_message_list_raises(self) -> None:
+        with pytest.raises(ValueError, match="at least one user/assistant message"):
+            build_anthropic_payload(
+                "claude-sonnet-5", [{"role": "system", "content": "be terse"}],
+                GenerationParams(), False,
+            )
 
     def test_system_is_hoisted_and_stream_flag_is_set(self) -> None:
         payload = build_anthropic_payload(
@@ -297,14 +387,51 @@ class TestStopReasonMapping:
         [
             ("tool_use", "tool_calls"),
             ("max_tokens", "length"),
+            ("model_context_window_exceeded", "length"),
+            ("refusal", "content_filter"),
             ("end_turn", "stop"),
             ("stop_sequence", "stop"),
+            ("pause_turn", "stop"),
             ("something_new", "stop"),
             (None, "stop"),
         ],
     )
     def test_mapping(self, stop_reason, expected) -> None:
         assert map_stop_reason(stop_reason) == expected
+
+    def test_refusal_is_logged_with_details(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING):
+            result = parse_anthropic_message(
+                {
+                    "content": [],
+                    "stop_reason": "refusal",
+                    "stop_details": {"type": "safety"},
+                }
+            )
+
+        assert result.finish_reason == "content_filter"
+        assert any("refusal" in r.message and "safety" in r.message for r in caplog.records)
+
+    def test_pause_turn_is_logged(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING):
+            parse_anthropic_message({"content": [], "stop_reason": "pause_turn"})
+
+        assert any("pause_turn" in r.message for r in caplog.records)
+
+    def test_stream_refusal_is_logged(self, caplog) -> None:
+        acc = AnthropicStreamAccumulator()
+        acc.feed(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "refusal", "stop_details": {"type": "safety"}},
+                "usage": {"output_tokens": 0},
+            }
+        )
+        with caplog.at_level(logging.WARNING):
+            result = acc.result()
+
+        assert result["finish_reason"] == "content_filter"
+        assert any("refusal" in r.message for r in caplog.records)
 
 
 class TestUsageNormalization:
@@ -321,6 +448,28 @@ class TestUsageNormalization:
         assert usage["prompt_tokens"] == 0
         assert usage["completion_tokens"] == 0
         assert usage["total_tokens"] == 0
+
+    def test_cache_tokens_count_towards_prompt_tokens(self) -> None:
+        # Cached reads/writes are billed input; leaving them out understates
+        # prompt_tokens by the whole cached prefix.
+        usage = normalize_usage(
+            {
+                "input_tokens": 25,
+                "output_tokens": 17,
+                "cache_read_input_tokens": 1000,
+                "cache_creation_input_tokens": 40,
+            }
+        )
+
+        assert usage["prompt_tokens"] == 1065
+        assert usage["completion_tokens"] == 17
+        assert usage["total_tokens"] == 1082
+
+    def test_missing_cache_keys_default_to_zero(self) -> None:
+        usage = normalize_usage({"input_tokens": 3, "output_tokens": 4})
+
+        assert usage["prompt_tokens"] == 3
+        assert usage["total_tokens"] == 7
 
     def test_raw_anthropic_keys_are_not_the_only_keys(self) -> None:
         usage = normalize_usage({"input_tokens": 1, "output_tokens": 2})
@@ -462,6 +611,29 @@ class TestStreamAccumulator:
         assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {"minutes": 5}
         # A tool_use block with no input_json_delta means "no arguments".
         assert json.loads(result["tool_calls"][1]["function"]["arguments"]) == {}
+
+    def test_message_start_cache_tokens_count_towards_prompt_tokens(self) -> None:
+        acc = AnthropicStreamAccumulator()
+        acc.feed(
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 25,
+                        "cache_read_input_tokens": 1000,
+                        "cache_creation_input_tokens": 40,
+                    }
+                },
+            }
+        )
+        acc.feed(
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 17}}
+        )
+
+        usage = acc.result()["usage"]
+        assert usage["prompt_tokens"] == 1065
+        assert usage["total_tokens"] == 1082
 
     def test_ping_is_ignored(self) -> None:
         acc = AnthropicStreamAccumulator()

@@ -60,6 +60,9 @@ def _client(model: str, api_key: str) -> RestClient:
     client.provider = "anthropic"
     client.auth_type = "api_key"
     client.auth_token = api_key
+    # __init__ silently overrides model_name from JARVIS_REST_MODEL_NAME /
+    # model.main.rest_model_name, so pin it back to what was asked for.
+    client.model_name = model
     # Headers are computed in __init__, before these overrides.
     client.headers = client._setup_headers()
     return client
@@ -132,15 +135,22 @@ def check_tool_result_round_trip(client: RestClient) -> Dict[str, Any]:
     if not calls:
         return _report("tool_result_round_trip", False, "first turn produced no tool call")
 
-    # NOTE: NormalizedMessage carries only role + content parts, so the
-    # assistant turn and the tool result are handed to the translation layer as
-    # raw dicts through the private tool path.
+    # NOTE: this calls the private ``_chat_completion_with_tools`` directly
+    # because NormalizedMessage (managers/chat_types.py) carries only role +
+    # content parts — it drops ``tool_calls`` and ``tool_call_id`` — so the
+    # round trip is NOT reachable through the public /v1/chat/completions yet.
+    # The assistant turn and the tool results go in as raw dicts instead.
     dict_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": "You control timers. Use the tools you are given."},
         {"role": "user", "content": "Set a timer for 5 minutes"},
         {"role": "assistant", "content": first.content, "tool_calls": calls},
-        {"role": "tool", "tool_call_id": calls[0].get("id"), "content": "Timer set"},
     ]
+    # EVERY tool_use block needs a matching tool_result, not just the first:
+    # a parallel-call turn 400s if any of them is left unanswered.
+    for call in calls:
+        dict_messages.append(
+            {"role": "tool", "tool_call_id": call.get("id"), "content": "Timer set"}
+        )
 
     try:
         second = asyncio.run_coroutine_threadsafe(
@@ -178,7 +188,7 @@ def check_streaming_tool_call(client: RestClient) -> Dict[str, Any]:
     done = events[-1]
     deltas = [e["delta"] for e in events if "delta" in e]
     calls = done.get("tool_calls") or []
-    ok = done.get("finish_reason") == "tool_calls" and bool(calls) and (bool(deltas) or bool(calls))
+    ok = done.get("finish_reason") == "tool_calls" and bool(calls)
     return _report(
         "streaming_tool_call",
         ok,

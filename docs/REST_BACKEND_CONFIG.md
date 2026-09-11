@@ -54,7 +54,14 @@ JARVIS_REST_AUTH_TOKEN=your_anthropic_api_key
 JARVIS_REST_REQUEST_FORMAT=openai
 ```
 
-With `JARVIS_REST_PROVIDER=anthropic` the key is always sent as `x-api-key` together with `anthropic-version: 2023-06-01` regardless of `JARVIS_REST_AUTH_TYPE` (the Messages API rejects `Authorization: Bearer`), and `max_tokens` — which Anthropic requires on every request — defaults to 4096 when the request omits it.
+**Notes**
+
+- Only the **translated** paths speak the Messages API: native tool calling (a request with `tools`) and streaming. The plain non-streaming, no-tools request path still sends an OpenAI-shaped body, so it is **not yet supported** for Anthropic.
+- The key is sent as `x-api-key` together with `anthropic-version: 2023-06-01` regardless of `JARVIS_REST_AUTH_TYPE` (the Messages API rejects `Authorization: Bearer`). The one exception is `JARVIS_REST_AUTH_TYPE=custom`, which is passed through on `JARVIS_REST_AUTH_HEADER` for gateways that front Anthropic.
+- `max_tokens` is mandatory on every Messages request; when a request omits it the value falls back to the `inference.general.max_tokens` setting (env fallback `JARVIS_MAX_TOKENS`).
+- `temperature`, `top_p`, `seed` and `reasoning_budget` are **not** forwarded — current Claude models return 400 when a sampling parameter is present, and the other two have no equivalent.
+- Thinking is sent as `{"type": "disabled"}`, because the default is adaptive thinking and thinking blocks would then have to be replayed verbatim on the tool-result round trip. Fable / Mythos models are the exception (thinking is always on there and `disabled` is a 400), so the key is omitted and **tool round trips on those models are not supported yet**.
+- `JARVIS_REST_REQUEST_FORMAT` is ignored on the translated paths — the body shape is decided by the provider.
 
 ### Ollama (Local)
 

@@ -25,6 +25,7 @@ function returning an iterator.
 
 import inspect
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -49,9 +50,16 @@ def _sse(chunks):
 
 
 class _FakeStreamResponse:
-    def __init__(self, lines, status=200):
+    def __init__(self, lines, status=200, body=""):
         self._lines = lines
         self.status_code = status
+        # httpx exposes these on a streamed response; the backend reads the
+        # body before raise_for_status() drops it.
+        self.is_error = status >= 400
+        self.text = body
+
+    async def aread(self):
+        return self.text.encode()
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -68,11 +76,11 @@ class _FakeStreamResponse:
         return False
 
 
-def _client_with_stream(lines, status=200):
+def _client_with_stream(lines, status=200, body=""):
     client = RestClient(base_url="http://llama-server:8080", model_name="live")
 
     def _stream(method, url, **kw):
-        return _FakeStreamResponse(lines, status)
+        return _FakeStreamResponse(lines, status, body)
 
     client.client.stream = _stream  # type: ignore[assignment]
     return client
@@ -156,6 +164,32 @@ class TestStreamingErrors:
         client = _client_with_stream([], status=500)
         with pytest.raises(Exception):
             list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+    def test_error_body_is_logged_before_raise_for_status(self, caplog):
+        # raise_for_status() discards the body, and on a streamed response the
+        # body has not even been read yet — so a provider 400 ("max_tokens:
+        # field required") was invisible. Read and log it first.
+        body = '{"type":"error","error":{"message":"max_tokens: field required"}}'
+        client = _client_with_stream([], status=400, body=body)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(Exception):
+                list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        logged = " ".join(r.message for r in caplog.records)
+        assert "400" in logged
+        assert "max_tokens: field required" in logged
+
+    def test_error_body_log_is_truncated(self, caplog):
+        client = _client_with_stream([], status=400, body="x" * 5000)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(Exception):
+                list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        logged = " ".join(r.message for r in caplog.records)
+        assert "x" * 2000 in logged
+        assert "x" * 2001 not in logged
 
 
 class TestStreamingRequest:
@@ -330,7 +364,9 @@ class TestAnthropicStreamedToolCalls:
 
         body = seen["json"]
         assert body["stream"] is True
-        assert body["max_tokens"] == 4096
+        # Falls back to the `inference.general.max_tokens` setting, not a
+        # second hard-coded ceiling.
+        assert body["max_tokens"] == client._default_max_tokens
         assert body["model"] == "claude-sonnet-5"
         assert body["messages"] == [
             {"role": "user", "content": [{"type": "text", "text": "hi"}]}
@@ -338,6 +374,8 @@ class TestAnthropicStreamedToolCalls:
         assert body["tools"][0]["name"] == "one"
         assert "input_schema" in body["tools"][0]
         assert body["tool_choice"] == {"type": "auto"}
+        assert body["thinking"] == {"type": "disabled"}
+        assert "temperature" not in body
         assert "top_p" not in body
         assert "seed" not in body
         assert seen["url"].endswith("/v1/messages")

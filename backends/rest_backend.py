@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
 from backends.anthropic_format import (
     ANTHROPIC_VERSION,
+    DEFAULT_MAX_TOKENS,
     AnthropicStreamAccumulator,
     build_anthropic_payload,
     parse_anthropic_message,
@@ -112,6 +113,14 @@ class RestClient(LLMBackendBase):
             "rest.timeout_seconds", "JARVIS_REST_TIMEOUT", 60
         )
 
+        # Anthropic REQUIRES max_tokens on every request while OpenAI treats it
+        # as optional, so a request that omits it still needs a number. Use the
+        # same deployment-wide knob every other backend honours rather than a
+        # second hard-coded ceiling.
+        self._default_max_tokens: int = get_int_setting(
+            "inference.general.max_tokens", "JARVIS_MAX_TOKENS", DEFAULT_MAX_TOKENS
+        )
+
         # Default thinking budget for reasoning models (e.g. Qwen3.5 served via
         # llama-server) — used ONLY when a request omits reasoning_budget. Per-slot
         # with a model.main fallback. 0 = off (immediate end of thinking — the fast
@@ -155,10 +164,16 @@ class RestClient(LLMBackendBase):
         # Anthropic authenticates with x-api-key + anthropic-version and rejects
         # `Authorization: Bearer`. The PROVIDER decides this, not auth_type: the
         # documented config for this deployment says auth_type=bearer, and that
-        # has to keep working rather than 401.
-        if self.provider == "anthropic" and self.auth_token:
-            headers["x-api-key"] = self.auth_token
+        # has to keep working rather than 401. The version header is required on
+        # every request, token or not.
+        if self.provider == "anthropic":
             headers["anthropic-version"] = ANTHROPIC_VERSION
+            if self.auth_type == "custom" and self.auth_token:
+                # Escape hatch for a gateway that fronts Anthropic behind its own
+                # header (e.g. `Authorization: <token>`); never both headers.
+                headers[self.auth_header_name] = self.auth_token
+            elif self.auth_token:
+                headers["x-api-key"] = self.auth_token
             return headers
 
         if self.auth_type == "bearer" and self.auth_token:
@@ -310,7 +325,11 @@ class RestClient(LLMBackendBase):
         payload: Dict[str, Any]
         if self.provider == "anthropic":
             payload = build_anthropic_payload(
-                self.model_name, messages, params, stream=False
+                self.model_name,
+                messages,
+                params,
+                stream=False,
+                default_max_tokens=self._default_max_tokens,
             )
         else:
             payload = {
@@ -340,7 +359,7 @@ class RestClient(LLMBackendBase):
         if isinstance(status, int) and status >= 400:
             logger.error(
                 f"❌ {self.provider} tool-call request failed "
-                f"({status}): {getattr(response, 'text', '')}"
+                f"({status}): {str(getattr(response, 'text', ''))[:2000]}"
             )
         response.raise_for_status()
         data = response.json()
@@ -554,7 +573,11 @@ class RestClient(LLMBackendBase):
         is_anthropic = self.provider == "anthropic"
         if is_anthropic:
             payload = build_anthropic_payload(
-                self.model_name, dict_messages, params, stream=True
+                self.model_name,
+                dict_messages,
+                params,
+                stream=True,
+                default_max_tokens=self._default_max_tokens,
             )
         else:
             payload = {
@@ -583,6 +606,16 @@ class RestClient(LLMBackendBase):
                 async with self.client.stream(
                     "POST", url, json=payload, headers=self.headers
                 ) as resp:
+                    # A streamed response has no body until it is read, and
+                    # raise_for_status() then discards it — so a provider's 4xx
+                    # explanation ("max_tokens: field required") was invisible.
+                    if getattr(resp, "is_error", False):
+                        await resp.aread()
+                        logger.error(
+                            f"❌ {self.provider} stream request failed "
+                            f"({getattr(resp, 'status_code', '?')}): "
+                            f"{str(getattr(resp, 'text', ''))[:2000]}"
+                        )
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         q.put(("line", line))

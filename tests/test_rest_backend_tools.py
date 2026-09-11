@@ -13,10 +13,28 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backends.rest_backend import RestClient
 from managers.chat_types import GenerationParams, NormalizedMessage, TextPart
+
+
+class _StubSettings:
+    """Minimal settings-service stub: ``.get(key)`` reads from a dict."""
+
+    def __init__(self, values: dict) -> None:
+        self._values = values
+
+    def get(self, key: str):
+        return self._values.get(key)
+
+
+def _patch_settings(values: dict):
+    """Patch the settings-service singleton ``get_setting`` resolves through."""
+    return patch(
+        "services.settings_helpers._get_settings_service",
+        return_value=_StubSettings(values),
+    )
 
 
 SAMPLE_TOOLS = [
@@ -286,8 +304,9 @@ class TestAnthropicToolPath:
             None, _messages(), GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto")
         )
 
-        # Anthropic REQUIRES max_tokens; omitting it is a 400.
-        assert post.call_args.kwargs["json"]["max_tokens"] == 4096
+        # Anthropic REQUIRES max_tokens; omitting it is a 400. The fallback is
+        # the `inference.general.max_tokens` setting resolved at construction.
+        assert post.call_args.kwargs["json"]["max_tokens"] == client._default_max_tokens
 
     def test_headers_use_x_api_key_not_bearer(self) -> None:
         client = _anthropic_client()
@@ -356,3 +375,85 @@ class TestOpenAIPathUnchangedByAnthropicSupport:
         assert "system" not in sent
         assert client.headers["Authorization"] == "Bearer sk-openai"
         assert "x-api-key" not in client.headers
+
+
+class TestAnthropicHeaders:
+    """`anthropic-version` is unconditional; the key goes in `x-api-key`.
+
+    The Messages API rejects `Authorization: Bearer`, so the PROVIDER decides
+    the auth header rather than `JARVIS_REST_AUTH_TYPE` — except `custom`,
+    which exists so a gateway fronting Anthropic can be given its own header.
+    """
+
+    @staticmethod
+    def _headers(auth_type: str, token: str, header_name: str = "Authorization") -> dict:
+        values = {
+            "rest.provider": "anthropic",
+            "rest.auth_type": auth_type,
+            "rest.auth_token": token,
+            "rest.auth_header_name": header_name,
+        }
+        with _patch_settings(values):
+            return RestClient(base_url="https://api.anthropic.com").headers
+
+    def test_version_header_is_sent_even_without_a_token(self) -> None:
+        headers = self._headers("none", "")
+
+        assert headers["anthropic-version"] == "2023-06-01"
+        assert "x-api-key" not in headers
+
+    def test_custom_auth_is_passed_through_without_x_api_key(self) -> None:
+        headers = self._headers("custom", "gw-token", header_name="X-Gateway-Key")
+
+        assert headers["X-Gateway-Key"] == "gw-token"
+        assert "x-api-key" not in headers
+        assert headers["anthropic-version"] == "2023-06-01"
+
+    def test_bearer_api_key_and_none_all_become_x_api_key(self) -> None:
+        for auth_type in ("bearer", "api_key", "none"):
+            headers = self._headers(auth_type, "sk-ant-test")
+
+            assert headers["x-api-key"] == "sk-ant-test", auth_type
+            assert "Authorization" not in headers, auth_type
+            assert headers["anthropic-version"] == "2023-06-01", auth_type
+
+
+class TestAnthropicMaxTokensSetting:
+    """`max_tokens` is mandatory on the Messages API; the fallback is a setting.
+
+    `inference.general.max_tokens` is the same knob every other backend already
+    honours, so a deployment that lowers it does not silently keep paying for
+    a 4096-token ceiling here.
+    """
+
+    @staticmethod
+    def _anthropic_client(values: dict) -> RestClient:
+        with _patch_settings(values):
+            client = RestClient(
+                base_url="https://api.anthropic.com", model_name="claude-sonnet-5"
+            )
+        client.provider = "anthropic"
+        return client
+
+    def test_setting_supplies_the_default_max_tokens(self) -> None:
+        client = self._anthropic_client({"inference.general.max_tokens": 512})
+        post = _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        client.generate_text_chat(
+            None, _messages(), GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto")
+        )
+
+        assert client._default_max_tokens == 512
+        assert post.call_args.kwargs["json"]["max_tokens"] == 512
+
+    def test_explicit_request_max_tokens_still_wins(self) -> None:
+        client = self._anthropic_client({"inference.general.max_tokens": 512})
+        post = _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        client.generate_text_chat(
+            None,
+            _messages(),
+            GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto", max_tokens=256),
+        )
+
+        assert post.call_args.kwargs["json"]["max_tokens"] == 256
