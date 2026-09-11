@@ -307,6 +307,7 @@ class RestClient(LLMBackendBase):
         Either way the returned ChatResult is OpenAI-shaped, because that is
         what ``services/response_helpers.py`` and command-center understand.
         """
+        payload: Dict[str, Any]
         if self.provider == "anthropic":
             payload = build_anthropic_payload(
                 self.model_name, messages, params, stream=False
@@ -549,9 +550,10 @@ class RestClient(LLMBackendBase):
             text_parts = [p.text for p in msg.content if isinstance(p, TextPart)]
             dict_messages.append({"role": msg.role, "content": " ".join(text_parts)})
 
+        payload: Dict[str, Any]
         is_anthropic = self.provider == "anthropic"
         if is_anthropic:
-            payload: Dict[str, Any] = build_anthropic_payload(
+            payload = build_anthropic_payload(
                 self.model_name, dict_messages, params, stream=True
             )
         else:
