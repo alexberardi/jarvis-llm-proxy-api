@@ -190,3 +190,169 @@ class TestSyncBridgeEventLoop:
         assert result.finish_reason == "tool_calls"
         assert client._bg_loop is not None
         assert client._bg_loop.is_running()
+
+
+ANTHROPIC_TOOL_RESPONSE = {
+    "id": "msg_01",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-5",
+    "content": [
+        {"type": "text", "text": "Setting that now."},
+        {
+            "type": "tool_use",
+            "id": "toolu_01",
+            "name": "set_timer",
+            "input": {"duration_minutes": 5},
+        },
+    ],
+    "stop_reason": "tool_use",
+    "usage": {"input_tokens": 50, "output_tokens": 8},
+}
+
+
+def _anthropic_client() -> RestClient:
+    client = RestClient(
+        base_url="https://api.anthropic.com",
+        model_name="claude-sonnet-5",
+        model_type="live",
+    )
+    client.provider = "anthropic"
+    # Existing deployments were documented with auth_type=bearer; Anthropic
+    # still needs x-api-key, so the provider must win over the auth type.
+    client.auth_type = "bearer"
+    client.auth_token = "sk-ant-test"
+    client.headers = client._setup_headers()
+    return client
+
+
+class TestAnthropicToolPath:
+    """Native tool calling against the Anthropic Messages API.
+
+    `provider=anthropic` routed to `/v1/messages` but still built an OpenAI
+    `/v1/chat/completions` body (tools, tool_choice, seed, choices[] parsing)
+    and still sent `Authorization: Bearer`, so every tool-enabled turn died on
+    a 400 from `raise_for_status()`.
+    """
+
+    def test_posts_to_the_messages_endpoint(self) -> None:
+        client = _anthropic_client()
+        post = _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        params = GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto", max_tokens=256)
+        client.generate_text_chat(None, _messages(), params)
+
+        url = post.call_args.args[0] if post.call_args.args else post.call_args.kwargs["url"]
+        assert url.endswith("/v1/messages")
+
+    def test_payload_is_anthropic_shaped(self) -> None:
+        client = _anthropic_client()
+        post = _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        params = GenerationParams(
+            temperature=0.4,
+            max_tokens=256,
+            top_p=0.9,
+            seed=7,
+            tools=SAMPLE_TOOLS,
+            tool_choice="auto",
+        )
+        client.generate_text_chat(None, _messages(), params)
+
+        sent = post.call_args.kwargs["json"]
+        assert sent["system"] == "You route tools."
+        assert sent["max_tokens"] == 256
+        assert sent["tools"] == [
+            {
+                "name": "set_timer",
+                "description": "Set a countdown timer.",
+                "input_schema": SAMPLE_TOOLS[0]["function"]["parameters"],
+            }
+        ]
+        assert sent["tool_choice"] == {"type": "auto"}
+        assert sent["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": "set a 5 minute timer"}]}
+        ]
+        # OpenAI-only keys must not leak into the Messages API body.
+        assert "seed" not in sent
+        assert "top_p" not in sent
+        assert "chat_template_kwargs" not in sent
+
+    def test_max_tokens_defaults_when_absent(self) -> None:
+        client = _anthropic_client()
+        post = _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        client.generate_text_chat(
+            None, _messages(), GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto")
+        )
+
+        # Anthropic REQUIRES max_tokens; omitting it is a 400.
+        assert post.call_args.kwargs["json"]["max_tokens"] == 4096
+
+    def test_headers_use_x_api_key_not_bearer(self) -> None:
+        client = _anthropic_client()
+
+        assert client.headers["x-api-key"] == "sk-ant-test"
+        assert client.headers["anthropic-version"] == "2023-06-01"
+        assert "Authorization" not in client.headers
+        assert client.headers["Content-Type"] == "application/json"
+
+    def test_result_is_normalized_to_the_openai_shape(self) -> None:
+        client = _anthropic_client()
+        _mock_post(client, ANTHROPIC_TOOL_RESPONSE)
+
+        params = GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto")
+        result = client.generate_text_chat(None, _messages(), params)
+
+        assert result.content == "Setting that now."
+        assert result.finish_reason == "tool_calls"
+        assert result.tool_calls is not None and len(result.tool_calls) == 1
+        call = result.tool_calls[0]
+        assert call["id"] == "toolu_01"
+        assert call["type"] == "function"
+        assert call["function"]["name"] == "set_timer"
+        assert json.loads(call["function"]["arguments"]) == {"duration_minutes": 5}
+        assert result.usage["prompt_tokens"] == 50
+        assert result.usage["completion_tokens"] == 8
+        assert result.usage["total_tokens"] == 58
+
+    def test_plain_text_reply_normalizes_to_stop(self) -> None:
+        client = _anthropic_client()
+        _mock_post(
+            client,
+            {
+                "content": [{"type": "text", "text": "Timer set."}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 9, "output_tokens": 3},
+            },
+        )
+
+        result = client.generate_text_chat(
+            None, _messages(), GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto")
+        )
+
+        assert result.content == "Timer set."
+        assert result.tool_calls is None
+        assert result.finish_reason == "stop"
+
+
+class TestOpenAIPathUnchangedByAnthropicSupport:
+    """The Anthropic branch must not touch the OpenAI request byte-for-byte."""
+
+    def test_openai_payload_and_headers_are_untouched(self) -> None:
+        client = _client()
+        client.auth_type = "bearer"
+        client.auth_token = "sk-openai"
+        client.headers = client._setup_headers()
+        post = _mock_post(client, TOOL_CALL_RESPONSE)
+
+        params = GenerationParams(tools=SAMPLE_TOOLS, tool_choice="auto", max_tokens=256)
+        client.generate_text_chat(None, _messages(), params)
+
+        sent = post.call_args.kwargs["json"]
+        assert sent["tools"] == SAMPLE_TOOLS, "OpenAI keeps the OpenAI tool shape"
+        assert sent["tool_choice"] == "auto"
+        assert sent["messages"][0] == {"role": "system", "content": "You route tools."}
+        assert "system" not in sent
+        assert client.headers["Authorization"] == "Bearer sk-openai"
+        assert "x-api-key" not in client.headers
