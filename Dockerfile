@@ -59,8 +59,29 @@ COPY requirements-base.txt .
 RUN pip install --no-cache-dir -r requirements-base.txt
 
 # Install vLLM from precompiled wheel (no source compilation needed)
+# vLLM is OPT-IN, and off by default.
+#
+# It is the heaviest thing in this image by a wide margin -- it pulls torch,
+# triton and CUDA kernels, several GB -- and nothing in this stack selects it:
+# prod serves GGUF models through the REST backend (llama.cpp), chosen because
+# vLLM had a split-GPU problem on that box. The vllm backends are imported
+# lazily, only when the engine is actually selected, so the package is not
+# needed at import time either.
+#
+# Building it by default was invisible and expensive: install-e2e-quickstart
+# spent ~115 minutes per run compiling it, printing nothing (the jarvis CLI
+# captures compose output), and was killed by the job timeout every night from
+# 2026-09-08. It had never been switched on deliberately.
+#
+# To get it back:  docker build --build-arg INSTALL_VLLM=true ...
+ARG INSTALL_VLLM=false
 COPY requirements-vllm.txt .
-RUN pip install --no-cache-dir -r requirements-vllm.txt
+RUN if [ "$INSTALL_VLLM" = "true" ]; then \
+        echo "installing vLLM (this is the slow layer)" && \
+        pip install --no-cache-dir -r requirements-vllm.txt; \
+    else \
+        echo "skipping vLLM: INSTALL_VLLM=$INSTALL_VLLM (selecting the vllm engine will fail with instructions)"; \
+    fi
 
 # Install llama-cpp-python with prebuilt CUDA 12.4 wheels (for GGUF backend).
 # Pinned: unpinned installs let every CI rebuild silently pick up a new llama.cpp;
