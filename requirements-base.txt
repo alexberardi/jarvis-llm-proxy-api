@@ -20,7 +20,7 @@ boto3>=1.34.0  # S3/MinIO adapter storage
 
 # torch is pinned by vLLM's own dependencies when using the vllm backend.
 # For non-vLLM setups (GGUF, transformers-only), install torch separately.
-torch>=2.13.0
+torch>=2.13.0,<3.0.0  # upper bound: a major must be a decision, not rebuild drift
 
 # Adapter training (always uses transformers + PEFT regardless of inference backend)
 transformers>=4.30.0

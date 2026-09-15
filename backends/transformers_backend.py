@@ -183,7 +183,9 @@ class TransformersClient(LLMBackendBase):
     def _init_vllm(self):
         """Initialize vLLM backend for transformers"""
         try:
-            from .vllm_backend import VLLMClient
+            from .vllm_availability import load_vllm_client
+
+            VLLMClient = load_vllm_client()
             logger.info("🚀 Initializing vLLM backend for Transformers model")
 
             self.vllm_backend = VLLMClient(

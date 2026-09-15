@@ -236,7 +236,9 @@ class ModelManager:
             from backends.transformers_backend import TransformersClient
             return TransformersClient(model_path, chat_format, stop_tokens, context_window)
         elif backend_type == "VLLM":
-            from backends.vllm_backend import VLLMClient
+            from backends.vllm_availability import load_vllm_client
+
+            VLLMClient = load_vllm_client()
             return VLLMClient(model_path, chat_format, stop_tokens, context_window)
         elif backend_type == "REST":
             from backends.rest_backend import RestClient
