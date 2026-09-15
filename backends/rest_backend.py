@@ -10,6 +10,13 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from managers.chat_types import ChatResult, GenerationParams, ImagePart, NormalizedMessage, TextPart
+from backends.anthropic_format import (
+    ANTHROPIC_VERSION,
+    DEFAULT_MAX_TOKENS,
+    AnthropicStreamAccumulator,
+    build_anthropic_payload,
+    parse_anthropic_message,
+)
 from backends.base import LLMBackendBase
 from services.settings_helpers import get_int_setting, get_setting
 
@@ -106,6 +113,14 @@ class RestClient(LLMBackendBase):
             "rest.timeout_seconds", "JARVIS_REST_TIMEOUT", 60
         )
 
+        # Anthropic REQUIRES max_tokens on every request while OpenAI treats it
+        # as optional, so a request that omits it still needs a number. Use the
+        # same deployment-wide knob every other backend honours rather than a
+        # second hard-coded ceiling.
+        self._default_max_tokens: int = get_int_setting(
+            "inference.general.max_tokens", "JARVIS_MAX_TOKENS", DEFAULT_MAX_TOKENS
+        )
+
         # Default thinking budget for reasoning models (e.g. Qwen3.5 served via
         # llama-server) — used ONLY when a request omits reasoning_budget. Per-slot
         # with a model.main fallback. 0 = off (immediate end of thinking — the fast
@@ -145,7 +160,22 @@ class RestClient(LLMBackendBase):
             "Content-Type": "application/json",
             "User-Agent": "Jarvis-LLM-Proxy/1.0"
         }
-        
+
+        # Anthropic authenticates with x-api-key + anthropic-version and rejects
+        # `Authorization: Bearer`. The PROVIDER decides this, not auth_type: the
+        # documented config for this deployment says auth_type=bearer, and that
+        # has to keep working rather than 401. The version header is required on
+        # every request, token or not.
+        if self.provider == "anthropic":
+            headers["anthropic-version"] = ANTHROPIC_VERSION
+            if self.auth_type == "custom" and self.auth_token:
+                # Escape hatch for a gateway that fronts Anthropic behind its own
+                # header (e.g. `Authorization: <token>`); never both headers.
+                headers[self.auth_header_name] = self.auth_token
+            elif self.auth_token:
+                headers["x-api-key"] = self.auth_token
+            return headers
+
         if self.auth_type == "bearer" and self.auth_token:
             headers[self.auth_header_name] = f"Bearer {self.auth_token}"
         elif self.auth_type == "api_key" and self.auth_token:
@@ -274,37 +304,70 @@ class RestClient(LLMBackendBase):
         messages: List[Dict[str, Any]],
         params: GenerationParams,
     ) -> ChatResult:
-        """OpenAI-compatible chat completion that forwards tools/tool_choice and
-        returns STRUCTURED tool_calls + the real finish_reason.
+        """Native tool-calling completion: forwards tools/tool_choice and returns
+        STRUCTURED tool_calls + the real finish_reason.
 
-        This is the native tool-calling path: the model is given the tool
-        schemas via the ``tools`` param and decides which to call, returning
-        ``finish_reason="tool_calls"`` with a structured ``tool_calls`` array.
-        Assumes an OpenAI-style ``/v1/chat/completions`` endpoint
-        (provider=openai/lmstudio/generic).
+        The model is given the tool schemas via the ``tools`` param and decides
+        which to call, returning ``finish_reason="tool_calls"`` with a
+        structured ``tool_calls`` array.
+
+        Two request dialects, ONE result shape:
+
+        - provider=openai/lmstudio/generic -> OpenAI ``/v1/chat/completions``.
+        - provider=anthropic -> the Messages API ``/v1/messages``, whose body
+          and response are translated by ``backends.anthropic_format``. Posting
+          the OpenAI body to ``/v1/messages`` is a hard 400, which is exactly
+          how this used to fail.
+
+        Either way the returned ChatResult is OpenAI-shaped, because that is
+        what ``services/response_helpers.py`` and command-center understand.
         """
-        payload: Dict[str, Any] = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": params.temperature if params.temperature is not None else 0.7,
-            "stream": False,
-            "tools": params.tools,
-        }
-        if params.tool_choice is not None:
-            payload["tool_choice"] = params.tool_choice
-        if params.max_tokens is not None:
-            payload["max_tokens"] = params.max_tokens
-        if params.top_p is not None:
-            payload["top_p"] = params.top_p
-        if params.seed is not None:
-            payload["seed"] = params.seed
-        self._apply_reasoning(payload, params.reasoning_budget)
+        payload: Dict[str, Any]
+        if self.provider == "anthropic":
+            payload = build_anthropic_payload(
+                self.model_name,
+                messages,
+                params,
+                stream=False,
+                default_max_tokens=self._default_max_tokens,
+            )
+        else:
+            payload = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": params.temperature if params.temperature is not None else 0.7,
+                "stream": False,
+                "tools": params.tools,
+            }
+            if params.tool_choice is not None:
+                payload["tool_choice"] = params.tool_choice
+            if params.max_tokens is not None:
+                payload["max_tokens"] = params.max_tokens
+            if params.top_p is not None:
+                payload["top_p"] = params.top_p
+            if params.seed is not None:
+                payload["seed"] = params.seed
+            self._apply_reasoning(payload, params.reasoning_budget)
 
         endpoint = self._get_endpoint_for_provider()
         url = urljoin(self.base_url, endpoint)
         response = await self.client.post(url, json=payload, headers=self.headers)
+        # raise_for_status() drops the body, and a provider's 400 says WHY the
+        # payload was rejected ("max_tokens: field required", an unknown key).
+        # Log it before the exception swallows it.
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and status >= 400:
+            logger.error(
+                f"❌ {self.provider} tool-call request failed "
+                f"({status}): {str(getattr(response, 'text', ''))[:2000]}"
+            )
         response.raise_for_status()
         data = response.json()
+
+        if self.provider == "anthropic":
+            result = parse_anthropic_message(data)
+            self.last_usage = result.usage
+            return result
 
         choices = data.get("choices") or []
         message = choices[0].get("message", {}) if choices else {}
@@ -506,22 +569,33 @@ class RestClient(LLMBackendBase):
             text_parts = [p.text for p in msg.content if isinstance(p, TextPart)]
             dict_messages.append({"role": msg.role, "content": " ".join(text_parts)})
 
-        payload: Dict[str, Any] = {
-            "model": self.model_name,
-            "messages": dict_messages,
-            "temperature": params.temperature if params.temperature is not None else 0.7,
-            "stream": True,
-        }
-        if params.max_tokens is not None:
-            payload["max_tokens"] = params.max_tokens
-        if params.top_p is not None:
-            payload["top_p"] = params.top_p
-        if params.seed is not None:
-            payload["seed"] = params.seed
-        if params.tools:
-            payload["tools"] = params.tools
-            if params.tool_choice is not None:
-                payload["tool_choice"] = params.tool_choice
+        payload: Dict[str, Any]
+        is_anthropic = self.provider == "anthropic"
+        if is_anthropic:
+            payload = build_anthropic_payload(
+                self.model_name,
+                dict_messages,
+                params,
+                stream=True,
+                default_max_tokens=self._default_max_tokens,
+            )
+        else:
+            payload = {
+                "model": self.model_name,
+                "messages": dict_messages,
+                "temperature": params.temperature if params.temperature is not None else 0.7,
+                "stream": True,
+            }
+            if params.max_tokens is not None:
+                payload["max_tokens"] = params.max_tokens
+            if params.top_p is not None:
+                payload["top_p"] = params.top_p
+            if params.seed is not None:
+                payload["seed"] = params.seed
+            if params.tools:
+                payload["tools"] = params.tools
+                if params.tool_choice is not None:
+                    payload["tool_choice"] = params.tool_choice
 
         url = urljoin(self.base_url, self._get_endpoint_for_provider())
         q: "queue.Queue[Any]" = queue.Queue(maxsize=256)
@@ -532,6 +606,16 @@ class RestClient(LLMBackendBase):
                 async with self.client.stream(
                     "POST", url, json=payload, headers=self.headers
                 ) as resp:
+                    # A streamed response has no body until it is read, and
+                    # raise_for_status() then discards it — so a provider's 4xx
+                    # explanation ("max_tokens: field required") was invisible.
+                    if getattr(resp, "is_error", False):
+                        await resp.aread()
+                        logger.error(
+                            f"❌ {self.provider} stream request failed "
+                            f"({getattr(resp, 'status_code', '?')}): "
+                            f"{str(getattr(resp, 'text', ''))[:2000]}"
+                        )
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         q.put(("line", line))
@@ -546,6 +630,10 @@ class RestClient(LLMBackendBase):
         finish_reason = "stop"
         usage: Dict[str, Any] = {}
         tool_calls: Optional[List[Dict[str, Any]]] = None
+        # Anthropic streams typed events (message_start / content_block_* /
+        # message_delta) keyed by block index rather than OpenAI delta chunks,
+        # so the folding lives in a dedicated accumulator.
+        accumulator = AnthropicStreamAccumulator() if is_anthropic else None
         started = time.time()
 
         try:
@@ -571,6 +659,12 @@ class RestClient(LLMBackendBase):
                     logger.debug("REST stream: skipping malformed SSE frame")
                     continue
 
+                if accumulator is not None:
+                    text_delta = accumulator.feed(chunk)
+                    if text_delta:
+                        yield {"delta": text_delta}
+                    continue
+
                 if chunk.get("usage"):
                     usage = chunk["usage"]
                 choices = chunk.get("choices") or []
@@ -593,6 +687,13 @@ class RestClient(LLMBackendBase):
             # The pump owns the response context manager; make sure a consumer
             # that abandons the generator early doesn't leave it running.
             future.cancel()
+
+        if accumulator is not None:
+            result = accumulator.result()
+            full_content = result["content"]
+            usage = result["usage"]
+            tool_calls = result["tool_calls"]
+            finish_reason = result["finish_reason"]
 
         self.last_usage = usage
         elapsed = time.time() - started
