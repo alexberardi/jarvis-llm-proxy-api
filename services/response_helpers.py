@@ -67,6 +67,27 @@ def create_openai_response(
     )
 
 
+# Statuses whose fault is the caller's, not the server's. Anything in 4xx that
+# is not listed here is still an invalid_request_error — what matters is that a
+# 4xx never gets reported as a 5xx.
+_ERROR_TYPE_BY_STATUS = {
+    404: "not_found_error",
+    429: "rate_limit_error",
+}
+
+
+def error_type_for_status(status_code: int) -> str:
+    """Map an HTTP status to the OpenAI error type that describes it.
+
+    5xx is a server fault; everything else is the caller's to fix. Exists so the
+    gateway and the model service cannot disagree about whether something is
+    our problem.
+    """
+    if status_code >= 500:
+        return "internal_server_error"
+    return _ERROR_TYPE_BY_STATUS.get(status_code, "invalid_request_error")
+
+
 def openai_error(error_type: str, message: str, status_code: int = 400):
     """Create an OpenAI-style error response.
 

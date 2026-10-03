@@ -45,6 +45,26 @@ def _merge_tool_call_deltas(
     return merged
 
 
+class BackendHTTPError(Exception):
+    """A model-server error that keeps its HTTP status and body.
+
+    ``RestClient`` used to re-raise ``httpx.HTTPStatusError`` as
+    ``Exception(f"HTTP {code}: {text}")``, which stringifies the status into
+    the message. Nothing downstream could recover it, so every upstream failure
+    became ``internal_server_error`` / 500 — a conversation that outgrew the
+    context window was reported as a broken server, and 5xx retry logic would
+    hammer a request that could never succeed.
+
+    Callers branch on ``.status_code``; ``.upstream_message`` is the model's
+    own body, unwrapped, so detail like ``n_prompt_tokens`` survives.
+    """
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(f"HTTP {status_code}: {message}")
+        self.status_code = status_code
+        self.upstream_message = message
+
+
 class RestClient(LLMBackendBase):
     def __init__(self, base_url: str, model_name: str = "jarvis-llm", model_type: str = "main"):
         """
@@ -432,7 +452,7 @@ class RestClient(LLMBackendBase):
 
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ HTTP error: {e.response.status_code} - {e.response.text}")
-            raise Exception(f"HTTP {e.response.status_code}: {e.response.text}")
+            raise BackendHTTPError(e.response.status_code, e.response.text)
         except httpx.RequestError as e:
             logger.error(f"❌ Request error: {e}")
             raise Exception(f"Request failed: {e}")
