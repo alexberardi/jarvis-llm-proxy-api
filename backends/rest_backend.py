@@ -703,12 +703,31 @@ class RestClient(LLMBackendBase):
         """
         Generate a vision chat response by converting NormalizedMessage to OpenAI format
         and calling the remote API.
-        
-        This method converts NormalizedMessage (which can contain ImagePart) to the
-        OpenAI-style structured content format expected by remote APIs.
+
+        Runs the httpx work on this backend's dedicated background loop, the same
+        loop ``generate_text_chat`` uses. ``chat_runner`` awaits this coroutine
+        directly on the *caller's* loop, so without the bridge the one persistent
+        ``self.client`` would be used from two different loops — the pooled
+        connection carries asyncio primitives bound to the first one and the next
+        call dies with "Event loop is closed" / "bound to a different event loop".
+        That surfaced as intermittent 500s on TEXT requests: whichever call grabbed
+        a connection poisoned by the other loop was the one that failed.
         """
+        bg_loop = self._get_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._generate_vision_chat_on_loop(model_cfg, messages, params), bg_loop
+        )
+        return await asyncio.wrap_future(future)
+
+    async def _generate_vision_chat_on_loop(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """Body of the vision call. Always executed on ``self._bg_loop``."""
         start_time = time.time()
-        
+
         # Convert NormalizedMessage to OpenAI-style messages with structured content
         openai_messages: List[Dict[str, Any]] = []
         for msg in messages:
