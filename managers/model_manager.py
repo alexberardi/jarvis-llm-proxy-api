@@ -338,6 +338,12 @@ class ModelManager:
             live_rest_url = get_setting(
                 "model.main.rest_url", "JARVIS_REST_MODEL_URL", ""
             )
+        # Whether this slot's weights were loaded with a vision projector.
+        # Frozen with the rest of the slot config for the same reason the
+        # other keys are: the registry must describe the loaded weights.
+        live_supports_images = get_setting(
+            "model.live.supports_images", "JARVIS_LIVE_SUPPORTS_IMAGES", False
+        )
 
         # ---- Read background config (with fallback to live settings) ----
         bg_backend = get_setting(
@@ -377,6 +383,9 @@ class ModelManager:
         )
         if not bg_rest_url:
             bg_rest_url = live_rest_url
+        bg_supports_images = get_setting(
+            "model.background.supports_images", "JARVIS_BACKGROUND_SUPPORTS_IMAGES", False
+        )
 
         # ---- Sharing logic ----
         should_share = (
@@ -404,6 +413,7 @@ class ModelManager:
                 "stop_tokens": live_stop_tokens,
                 "context_window": live_context_window,
                 "rest_url": live_rest_url,
+                "supports_images": live_supports_images,
             },
             "background": {
                 "backend_type": bg_backend,
@@ -412,6 +422,7 @@ class ModelManager:
                 "stop_tokens": bg_stop_tokens,
                 "context_window": bg_context_window,
                 "rest_url": bg_rest_url,
+                "supports_images": bg_supports_images,
             },
         }
         self._slots_shared = should_share
@@ -737,10 +748,12 @@ class ModelManager:
         live_model_id = live_cfg.get("model_path") or "jarvis-text-8b"
         live_backend = live_cfg.get("backend_type") or "GGUF"
         live_context = live_cfg.get("context_window") or 4096
+        live_supports_images = bool(live_cfg.get("supports_images", False))
 
         bg_model_id = bg_cfg.get("model_path") or live_model_id
         bg_backend = bg_cfg.get("backend_type") or live_backend
         bg_context = bg_cfg.get("context_window") or live_context
+        bg_supports_images = bool(bg_cfg.get("supports_images", False))
 
         # Register live model
         if self.live_model:
@@ -748,7 +761,7 @@ class ModelManager:
                 model_id=live_model_id,
                 backend_type=live_backend.upper(),
                 backend_instance=self.live_model,
-                supports_images=False,
+                supports_images=live_supports_images,
                 context_length=live_context,
             )
             self.aliases["live"] = live_model_id
@@ -760,7 +773,7 @@ class ModelManager:
                 model_id=bg_model_id,
                 backend_type=bg_backend.upper(),
                 backend_instance=self.background_model,
-                supports_images=False,
+                supports_images=bg_supports_images,
                 context_length=bg_context,
             )
             self.aliases["background"] = bg_model_id
