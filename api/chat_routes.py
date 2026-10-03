@@ -9,8 +9,8 @@ import os
 import uuid
 
 import anyio
-from fastapi import APIRouter, Depends, Header, HTTPException
 import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from auth.app_auth import require_app_auth
 from models.api_models import (
@@ -24,6 +24,40 @@ from services.streaming import ClosingStreamingResponse
 logger = logging.getLogger("uvicorn")
 
 router = APIRouter(tags=["chat"])
+
+# Statuses that mean the model service itself failed, as opposed to the request
+# being wrong. 4xx are the caller's to fix; they must never be reported as 5xx.
+_DEFAULT_ERR_TYPE_BY_STATUS = {
+    400: "invalid_request_error",
+    401: "invalid_request_error",
+    403: "invalid_request_error",
+    404: "not_found_error",
+    409: "invalid_request_error",
+    413: "invalid_request_error",
+    422: "invalid_request_error",
+    429: "rate_limit_error",
+}
+
+
+def _unwrap_model_service_error(resp: "httpx.Response") -> tuple[str, str]:
+    """Pull (error_type, message) out of a model-service failure response.
+
+    The model service answers in the same OpenAI shape we do, so the real type
+    and message are already there under detail.error — we just have to hand them
+    up instead of re-stringifying the whole body into a generic message.
+    Falls back to status-derived type + raw text if the body is unexpected.
+    """
+    err_type = _DEFAULT_ERR_TYPE_BY_STATUS.get(
+        resp.status_code, "internal_server_error" if resp.status_code >= 500 else "invalid_request_error"
+    )
+    try:
+        detail = resp.json().get("detail")
+        error = detail.get("error") if isinstance(detail, dict) else None
+        if isinstance(error, dict):
+            return error.get("type") or err_type, error.get("message") or resp.text
+    except Exception:
+        pass
+    return err_type, f"Model service error {resp.status_code}: {resp.text}"
 
 
 @router.post(
@@ -139,11 +173,15 @@ async def chat_completions(
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=req.model_dump(), headers=headers)
             if resp.status_code != 200:
-                openai_error(
-                    "internal_server_error",
-                    f"Model service error {resp.status_code}: {resp.text}",
-                    500,
-                )
+                # Propagate the model service's own status and error shape.
+                # Flattening everything to 500 reported caller mistakes as
+                # server faults — e.g. posting an image to a non-vision slot
+                # is a 400 invalid_request_error, but the gateway answered 500
+                # with the real body stringified inside the message, so clients
+                # could not distinguish "unsupported" from "broken" and 5xx
+                # retry logic would hammer a request that can never succeed.
+                err_type, message = _unwrap_model_service_error(resp)
+                openai_error(err_type, message, resp.status_code)
             data = resp.json()
             content = data.get("content")
             usage = data.get("usage")
