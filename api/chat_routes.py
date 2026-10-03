@@ -17,27 +17,17 @@ from models.api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from services.response_helpers import create_openai_response, openai_error
+from services.response_helpers import (
+    create_openai_response,
+    error_type_for_status,
+    openai_error,
+)
 from services.settings_helpers import get_float_setting, get_setting
 from services.streaming import ClosingStreamingResponse
 
 logger = logging.getLogger("uvicorn")
 
 router = APIRouter(tags=["chat"])
-
-# Statuses that mean the model service itself failed, as opposed to the request
-# being wrong. 4xx are the caller's to fix; they must never be reported as 5xx.
-_DEFAULT_ERR_TYPE_BY_STATUS = {
-    400: "invalid_request_error",
-    401: "invalid_request_error",
-    403: "invalid_request_error",
-    404: "not_found_error",
-    409: "invalid_request_error",
-    413: "invalid_request_error",
-    422: "invalid_request_error",
-    429: "rate_limit_error",
-}
-
 
 def _unwrap_model_service_error(resp: "httpx.Response") -> tuple[str, str]:
     """Pull (error_type, message) out of a model-service failure response.
@@ -47,9 +37,7 @@ def _unwrap_model_service_error(resp: "httpx.Response") -> tuple[str, str]:
     up instead of re-stringifying the whole body into a generic message.
     Falls back to status-derived type + raw text if the body is unexpected.
     """
-    err_type = _DEFAULT_ERR_TYPE_BY_STATUS.get(
-        resp.status_code, "internal_server_error" if resp.status_code >= 500 else "invalid_request_error"
-    )
+    err_type = error_type_for_status(resp.status_code)
     try:
         detail = resp.json().get("detail")
         error = detail.get("error") if isinstance(detail, dict) else None
