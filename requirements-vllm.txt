@@ -3,4 +3,4 @@
 
 # vLLM - High-performance LLM inference engine (precompiled wheel)
 # Includes guided JSON / structured outputs, torch 2.9.1, triton, etc.
-vllm>=0.25.1
+vllm>=0.25.1,<0.26.0  # pre-1.0: minors break. Bump deliberately, like llama-cpp-python in the Dockerfile

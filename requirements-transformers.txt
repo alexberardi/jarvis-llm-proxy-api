@@ -3,7 +3,7 @@
 
 # Core transformers libraries
 transformers>=4.30.0
-torch>=2.13.0
+torch>=2.13.0,<3.0.0  # upper bound: see requirements-base.txt
 accelerate>=1.14.0
 
 # Quantization support (optional but recommended)

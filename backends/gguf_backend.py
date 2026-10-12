@@ -186,7 +186,9 @@ class GGUFClient(LLMBackendBase):
 
     def _init_vllm(self, model_path: str, chat_format: str, stop_tokens: List[str], context_window: int, n_threads: int, n_gpu_layers: int, verbose: bool, seed: int, n_batch: int, n_ubatch: int, rope_scaling_type: int, mul_mat_q: bool, f16_kv: bool):
         """Initialize vLLM backend (supports both HF models and GGUF files)."""
-        from .vllm_backend import VLLMClient
+        from .vllm_availability import load_vllm_client
+
+        VLLMClient = load_vllm_client()
         self.backend = VLLMClient(model_path, chat_format, stop_tokens, context_window)
         self.inference_engine = "vllm"
 

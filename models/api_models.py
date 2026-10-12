@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union, Literal, Annotated
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class APIModel(BaseModel):
@@ -138,6 +138,10 @@ class ModelInfo(APIModel):
     object: str = "model"
     created: int = 0
     owned_by: str = "jarvis"
+    # Capability flags from the model service. Optional with safe defaults so an
+    # older model service that omits them still validates.
+    supports_images: bool = False
+    context_length: Optional[int] = None
 
 
 class ModelListResponse(APIModel):

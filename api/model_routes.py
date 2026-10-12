@@ -6,8 +6,8 @@ Endpoints for listing available models and getting inference engine information.
 import logging
 import os
 
-from fastapi import APIRouter
 import httpx
+from fastapi import APIRouter
 
 from models.api_models import ModelListResponse
 from services.response_helpers import openai_error
@@ -55,6 +55,10 @@ async def list_models():
                     "object": "model",
                     "created": 0,
                     "owned_by": "jarvis",
+                    # Forwarded so clients can tell which models take images
+                    # instead of discovering it from a 400.
+                    "supports_images": m.get("supports_images", False),
+                    "context_length": m.get("context_length"),
                 }
             )
         return ModelListResponse(object="list", data=models)

@@ -123,6 +123,20 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
         env_fallback="JARVIS_LIVE_REASONING_BUDGET",
         requires_reload=True,
     ),
+    SettingDefinition(
+        key="model.live.supports_images",
+        category="model.live",
+        value_type="bool",
+        default=False,
+        description=(
+            "Set true when the LIVE slot's model was loaded with a vision "
+            "projector (llama-server --mmproj) and can therefore accept image "
+            "content. When false, chat requests carrying an image are rejected "
+            "with 400 before any backend call."
+        ),
+        env_fallback="JARVIS_LIVE_SUPPORTS_IMAGES",
+        requires_reload=True,
+    ),
     # ==================== model.background ====================
     SettingDefinition(
         key="model.background.name",
@@ -200,6 +214,18 @@ SETTINGS_DEFINITIONS: list[SettingDefinition] = [
             "A queue job may override it per-job via reasoning_budget."
         ),
         env_fallback="JARVIS_BACKGROUND_REASONING_BUDGET",
+        requires_reload=True,
+    ),
+    SettingDefinition(
+        key="model.background.supports_images",
+        category="model.background",
+        value_type="bool",
+        default=False,
+        description=(
+            "Set true when the BACKGROUND slot's model was loaded with a vision "
+            "projector and can accept image content on queue jobs."
+        ),
+        env_fallback="JARVIS_BACKGROUND_SUPPORTS_IMAGES",
         requires_reload=True,
     ),
     # ==================== model.main (legacy, used as fallback) ====================

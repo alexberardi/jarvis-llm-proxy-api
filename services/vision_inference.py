@@ -177,7 +177,7 @@ def _unload_vision_model(vision_client) -> None:
 
 def _parse_messages(messages: List[Dict[str, Any]]) -> List:
     """Parse messages into NormalizedMessage format with images."""
-    from managers.chat_types import NormalizedMessage, TextPart, ImagePart
+    from managers.chat_types import ImagePart, NormalizedMessage, TextPart
 
     normalized = []
 
@@ -206,7 +206,10 @@ def _parse_messages(messages: List[Dict[str, Any]]) -> List:
                             try:
                                 header, b64_data = url.split(",", 1)
                                 image_bytes = b64decode(b64_data)
-                                parts.append(ImagePart(data=image_bytes, media_type="image/png"))
+                                # Preserve the caller's real media type (data:image/jpeg;...)
+                                # instead of assuming png, so to_data_url() round-trips.
+                                mime_type = header.split(":", 1)[-1].split(";", 1)[0] or "image/png"
+                                parts.append(ImagePart(data=image_bytes, mime_type=mime_type))
                             except Exception as e:
                                 logger.warning(f"⚠️  Failed to parse base64 image: {e}")
                         else:
@@ -215,7 +218,9 @@ def _parse_messages(messages: List[Dict[str, Any]]) -> List:
                         # Direct image data
                         if "data" in item:
                             image_bytes = b64decode(item["data"]) if isinstance(item["data"], str) else item["data"]
-                            parts.append(ImagePart(data=image_bytes, media_type=item.get("media_type", "image/png")))
+                            # `mime_type` is canonical; accept `media_type` for older callers.
+                            mime_type = item.get("mime_type") or item.get("media_type") or "image/png"
+                            parts.append(ImagePart(data=image_bytes, mime_type=mime_type))
 
         if not parts:
             parts.append(TextPart(text=""))

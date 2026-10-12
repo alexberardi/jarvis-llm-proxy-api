@@ -10,18 +10,19 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 
-
-logger = logging.getLogger("uvicorn")
-
+from backends.rest_backend import BackendHTTPError
 from managers.chat_types import (
+    ChatResult,
+    GenerationParams,
+    ImagePart,
     NormalizedMessage,
     TextPart,
-    ImagePart,
-    GenerationParams,
-    ChatResult,
 )
-from models.api_models import Message, ChatCompletionRequest
+from models.api_models import ChatCompletionRequest, Message
+from services.response_helpers import error_type_for_status
 from services.settings_helpers import resolve_slot_reasoning_budget
+
+logger = logging.getLogger("uvicorn")
 
 
 # JSON system message to inject when response_format is json_object
@@ -736,6 +737,16 @@ async def run_chat_completion(
 
     except HTTPException:
         raise
+    except BackendHTTPError as e:
+        # The model server answered with a real status. Report that status and
+        # its own body instead of flattening it: a conversation that exceeded
+        # the context window is a client-fixable 400, not a server fault.
+        logger.warning(
+            f"⚠️  Model server returned {e.status_code}: {e.upstream_message[:200]}"
+        )
+        openai_error(
+            error_type_for_status(e.status_code), e.upstream_message, e.status_code
+        )
     except Exception as e:
         logger.exception(f"Internal error during chat completion: {e}")
         openai_error("internal_server_error", f"Internal error: {str(e)}", 500)

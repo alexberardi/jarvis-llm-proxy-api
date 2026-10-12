@@ -52,6 +52,26 @@ def _merge_tool_call_deltas(
     return merged
 
 
+class BackendHTTPError(Exception):
+    """A model-server error that keeps its HTTP status and body.
+
+    ``RestClient`` used to re-raise ``httpx.HTTPStatusError`` as
+    ``Exception(f"HTTP {code}: {text}")``, which stringifies the status into
+    the message. Nothing downstream could recover it, so every upstream failure
+    became ``internal_server_error`` / 500 — a conversation that outgrew the
+    context window was reported as a broken server, and 5xx retry logic would
+    hammer a request that could never succeed.
+
+    Callers branch on ``.status_code``; ``.upstream_message`` is the model's
+    own body, unwrapped, so detail like ``n_prompt_tokens`` survives.
+    """
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(f"HTTP {status_code}: {message}")
+        self.status_code = status_code
+        self.upstream_message = message
+
+
 class RestClient(LLMBackendBase):
     def __init__(self, base_url: str, model_name: str = "jarvis-llm", model_type: str = "main"):
         """
@@ -495,7 +515,7 @@ class RestClient(LLMBackendBase):
 
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ HTTP error: {e.response.status_code} - {e.response.text}")
-            raise Exception(f"HTTP {e.response.status_code}: {e.response.text}")
+            raise BackendHTTPError(e.response.status_code, e.response.text)
         except httpx.RequestError as e:
             logger.error(f"❌ Request error: {e}")
             raise Exception(f"Request failed: {e}")
@@ -804,12 +824,31 @@ class RestClient(LLMBackendBase):
         """
         Generate a vision chat response by converting NormalizedMessage to OpenAI format
         and calling the remote API.
-        
-        This method converts NormalizedMessage (which can contain ImagePart) to the
-        OpenAI-style structured content format expected by remote APIs.
+
+        Runs the httpx work on this backend's dedicated background loop, the same
+        loop ``generate_text_chat`` uses. ``chat_runner`` awaits this coroutine
+        directly on the *caller's* loop, so without the bridge the one persistent
+        ``self.client`` would be used from two different loops — the pooled
+        connection carries asyncio primitives bound to the first one and the next
+        call dies with "Event loop is closed" / "bound to a different event loop".
+        That surfaced as intermittent 500s on TEXT requests: whichever call grabbed
+        a connection poisoned by the other loop was the one that failed.
         """
+        bg_loop = self._get_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._generate_vision_chat_on_loop(model_cfg, messages, params), bg_loop
+        )
+        return await asyncio.wrap_future(future)
+
+    async def _generate_vision_chat_on_loop(
+        self,
+        model_cfg: Any,
+        messages: List[NormalizedMessage],
+        params: GenerationParams,
+    ) -> ChatResult:
+        """Body of the vision call. Always executed on ``self._bg_loop``."""
         start_time = time.time()
-        
+
         # Convert NormalizedMessage to OpenAI-style messages with structured content
         openai_messages: List[Dict[str, Any]] = []
         for msg in messages:
