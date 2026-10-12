@@ -25,6 +25,7 @@ function returning an iterator.
 
 import inspect
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -49,9 +50,16 @@ def _sse(chunks):
 
 
 class _FakeStreamResponse:
-    def __init__(self, lines, status=200):
+    def __init__(self, lines, status=200, body=""):
         self._lines = lines
         self.status_code = status
+        # httpx exposes these on a streamed response; the backend reads the
+        # body before raise_for_status() drops it.
+        self.is_error = status >= 400
+        self.text = body
+
+    async def aread(self):
+        return self.text.encode()
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -68,11 +76,11 @@ class _FakeStreamResponse:
         return False
 
 
-def _client_with_stream(lines, status=200):
+def _client_with_stream(lines, status=200, body=""):
     client = RestClient(base_url="http://llama-server:8080", model_name="live")
 
     def _stream(method, url, **kw):
-        return _FakeStreamResponse(lines, status)
+        return _FakeStreamResponse(lines, status, body)
 
     client.client.stream = _stream  # type: ignore[assignment]
     return client
@@ -156,6 +164,32 @@ class TestStreamingErrors:
         client = _client_with_stream([], status=500)
         with pytest.raises(Exception):
             list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+    def test_error_body_is_logged_before_raise_for_status(self, caplog):
+        # raise_for_status() discards the body, and on a streamed response the
+        # body has not even been read yet — so a provider 400 ("max_tokens:
+        # field required") was invisible. Read and log it first.
+        body = '{"type":"error","error":{"message":"max_tokens: field required"}}'
+        client = _client_with_stream([], status=400, body=body)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(Exception):
+                list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        logged = " ".join(r.message for r in caplog.records)
+        assert "400" in logged
+        assert "max_tokens: field required" in logged
+
+    def test_error_body_log_is_truncated(self, caplog):
+        client = _client_with_stream([], status=400, body="x" * 5000)
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(Exception):
+                list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        logged = " ".join(r.message for r in caplog.records)
+        assert "x" * 2000 in logged
+        assert "x" * 2001 not in logged
 
 
 class TestStreamingRequest:
@@ -252,3 +286,153 @@ class TestStreamedToolCalls:
 
         assert seen["json"]["tools"] == tools
         assert seen["json"]["tool_choice"] == "auto"
+
+
+def _anthropic_sse(events):
+    """Render Anthropic Messages SSE: `event:`/`data:` pairs, no [DONE]."""
+    out = []
+    for e in events:
+        out.append(f"event: {e['type']}")
+        out.append(f"data: {json.dumps(e)}")
+        out.append("")
+    return out
+
+
+def _anthropic_client_with_stream(lines, seen=None, status=200):
+    client = RestClient(base_url="https://api.anthropic.com", model_name="claude-sonnet-5")
+    client.provider = "anthropic"
+    client.auth_type = "bearer"
+    client.auth_token = "sk-ant-test"
+    client.headers = client._setup_headers()
+
+    def _stream(method, url, **kw):
+        if seen is not None:
+            seen["method"] = method
+            seen["url"] = url
+            seen["json"] = kw.get("json")
+            seen["headers"] = kw.get("headers")
+        return _FakeStreamResponse(lines, status)
+
+    client.client.stream = _stream  # type: ignore[assignment]
+    return client
+
+
+ANTHROPIC_TOOL_STREAM = [
+    {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 25}}},
+    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+    {"type": "content_block_delta", "index": 0,
+     "delta": {"type": "text_delta", "text": "On "}},
+    {"type": "ping"},
+    {"type": "content_block_delta", "index": 0,
+     "delta": {"type": "text_delta", "text": "it."}},
+    {"type": "content_block_stop", "index": 0},
+    {"type": "content_block_start", "index": 1,
+     "content_block": {"type": "tool_use", "id": "toolu_a", "name": "one", "input": {}}},
+    {"type": "content_block_delta", "index": 1,
+     "delta": {"type": "input_json_delta", "partial_json": '{"x":'}},
+    {"type": "content_block_delta", "index": 1,
+     "delta": {"type": "input_json_delta", "partial_json": "1}"}},
+    {"type": "content_block_stop", "index": 1},
+    {"type": "content_block_start", "index": 2,
+     "content_block": {"type": "tool_use", "id": "toolu_b", "name": "two", "input": {}}},
+    {"type": "content_block_delta", "index": 2,
+     "delta": {"type": "input_json_delta", "partial_json": '{"y": 2}'}},
+    {"type": "content_block_stop", "index": 2},
+    {"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+     "usage": {"output_tokens": 17}},
+    {"type": "message_stop"},
+]
+
+
+class TestAnthropicStreamedToolCalls:
+    """Anthropic streams typed SSE events, not OpenAI `choices[].delta` chunks.
+
+    No `[DONE]` sentinel either: the stream ends at `message_stop`. Feeding
+    those frames to the OpenAI parser yields an empty answer at best, and the
+    request itself 400s because the body was OpenAI-shaped.
+    """
+
+    def test_request_is_anthropic_shaped_and_streaming(self):
+        seen = {}
+        client = _anthropic_client_with_stream(_anthropic_sse(ANTHROPIC_TOOL_STREAM), seen)
+        tools = [{"type": "function", "function": {"name": "one",
+                                                   "parameters": {"type": "object"}}}]
+        params = GenerationParams(temperature=0.3, top_p=0.9, seed=11,
+                                  tools=tools, tool_choice="auto")
+
+        list(client.generate_text_chat_stream(None, _msgs("hi"), params))
+
+        body = seen["json"]
+        assert body["stream"] is True
+        # Falls back to the `inference.general.max_tokens` setting, not a
+        # second hard-coded ceiling.
+        assert body["max_tokens"] == client._default_max_tokens
+        assert body["model"] == "claude-sonnet-5"
+        assert body["messages"] == [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        ]
+        assert body["tools"][0]["name"] == "one"
+        assert "input_schema" in body["tools"][0]
+        assert body["tool_choice"] == {"type": "auto"}
+        assert body["thinking"] == {"type": "disabled"}
+        assert "temperature" not in body
+        assert "top_p" not in body
+        assert "seed" not in body
+        assert seen["url"].endswith("/v1/messages")
+        assert seen["headers"]["x-api-key"] == "sk-ant-test"
+        assert "Authorization" not in seen["headers"]
+
+    def test_text_deltas_are_yielded(self):
+        client = _anthropic_client_with_stream(_anthropic_sse(ANTHROPIC_TOOL_STREAM))
+        events = list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        assert [e["delta"] for e in events if "delta" in e] == ["On ", "it."]
+        assert events[-1]["content"] == "On it."
+
+    def test_parallel_tool_uses_reassemble_separately(self):
+        client = _anthropic_client_with_stream(_anthropic_sse(ANTHROPIC_TOOL_STREAM))
+        done = list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))[-1]
+
+        assert done["done"] is True
+        assert done["finish_reason"] == "tool_calls"
+        assert [c["id"] for c in done["tool_calls"]] == ["toolu_a", "toolu_b"]
+        assert [c["function"]["name"] for c in done["tool_calls"]] == ["one", "two"]
+        assert json.loads(done["tool_calls"][0]["function"]["arguments"]) == {"x": 1}
+        assert json.loads(done["tool_calls"][1]["function"]["arguments"]) == {"y": 2}
+
+    def test_usage_is_normalized(self):
+        client = _anthropic_client_with_stream(_anthropic_sse(ANTHROPIC_TOOL_STREAM))
+        done = list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))[-1]
+
+        assert done["usage"]["prompt_tokens"] == 25
+        assert done["usage"]["completion_tokens"] == 17
+        assert done["usage"]["total_tokens"] == 42
+
+    def test_plain_text_stream_ends_with_stop_and_no_tool_calls(self):
+        lines = _anthropic_sse([
+            {"type": "message_start", "message": {"usage": {"input_tokens": 4}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "hello"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 1}},
+            {"type": "message_stop"},
+        ])
+        client = _anthropic_client_with_stream(lines)
+        events = list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
+
+        assert [e["delta"] for e in events if "delta" in e] == ["hello"]
+        assert events[-1]["tool_calls"] is None
+        assert events[-1]["finish_reason"] == "stop"
+
+    def test_error_event_surfaces_as_an_exception(self):
+        lines = _anthropic_sse([
+            {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+            {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+        ])
+        client = _anthropic_client_with_stream(lines)
+
+        with pytest.raises(RuntimeError, match="Overloaded"):
+            list(client.generate_text_chat_stream(None, _msgs(), GenerationParams()))
